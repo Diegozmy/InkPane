@@ -165,7 +165,8 @@ npm run dev          # 同时启动 API（:4000）与前端（:5173）
 
 数据默认落在 `website/data/inkpane.sqlite`，运行期配置见 `website/server/.env.example`。
 
-**点亮屏幕**：设备端固件位于 `hardware/`，开发中。当前可先按微雪官方
+**点亮屏幕**：设备端固件位于 [`hardware/`](hardware/README.md)，开发中，开发计划与平台说明见该目录 README。
+当前可先按微雪官方
 [ESP-IDF](https://docs.waveshare.net/ESP32-S3-ePaper-3.97/ESP-IDF) /
 [Arduino](https://docs.waveshare.net/ESP32-S3-ePaper-3.97/Arduino) 教程跑通屏幕与 Wi-Fi。
 
