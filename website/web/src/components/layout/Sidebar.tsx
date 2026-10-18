@@ -94,17 +94,15 @@ function TodaySummary({
       ) : (
         <>
           <div className="today-summary">
-            <div className="stat-tile">
-              <span className="stat-tile__value">{stats.count}</span>
-              <span className="stat-tile__label">今日安排</span>
+            <div className="summary-line">
+              <span className="summary-line__label">今日安排</span>
+              <span className="summary-line__value numeric">{stats.count} 项</span>
             </div>
-            <div className="stat-tile">
-              <span className="stat-tile__value">
-                {hours}
-                <span style={{ fontSize: 'var(--text-sm)', fontWeight: 600 }}> 小时</span>
-                {restMinutes > 0 ? ` ${restMinutes} 分` : ''}
+            <div className="summary-line">
+              <span className="summary-line__label">占用时长</span>
+              <span className="summary-line__value numeric">
+                {hours} 小时{restMinutes > 0 ? ` ${restMinutes} 分` : ''}
               </span>
-              <span className="stat-tile__label">占用时长</span>
             </div>
           </div>
 

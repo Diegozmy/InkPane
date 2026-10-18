@@ -17,6 +17,10 @@ import { createEventsRouter, createOccurrencesRouter } from './modules/events/ro
 import { createRemindersRouter } from './modules/reminders.js';
 import { createStatsRouter } from './modules/stats.js';
 import { createCoursesRouter } from './modules/courses/routes.js';
+import { createTodosRouter } from './modules/todos/routes.js';
+import { createWeatherRouter } from './modules/weather/routes.js';
+import { createDisplayRouter } from './modules/display/routes.js';
+import { createDeviceRouter } from './modules/device/routes.js';
 import { countAllEvents } from './modules/events/service.js';
 import { getDatabase } from './db/client.js';
 import { schemaVersion } from './db/migrations.js';
@@ -44,8 +48,8 @@ export function createApp(): Express {
     },
     credentials: true,
     methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id'],
-    exposedHeaders: ['X-Request-Id'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id', 'X-Device-Token'],
+    exposedHeaders: ['X-Request-Id', 'ETag'],
     maxAge: 600,
   };
 
@@ -95,6 +99,10 @@ export function createApp(): Express {
   app.use('/api/stats', createStatsRouter());
   app.use('/api/reminders', createRemindersRouter());
   app.use('/api/courses', createCoursesRouter());
+  app.use('/api/todos', createTodosRouter());
+  app.use('/api/weather', createWeatherRouter());
+  app.use('/api/display', createDisplayRouter());
+  app.use('/api/device', createDeviceRouter());
 
   mountStaticApp(app);
 

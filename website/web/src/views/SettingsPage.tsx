@@ -54,7 +54,7 @@ function InfoRow({ icon, label, value }: { icon: IconName; label: string; value:
 }
 
 export function SettingsPage(): ReactElement {
-  const topbar = useShellTopBar();
+  const topbar = useShellTopBar({ showFilters: false });
   const navigate = useNavigate();
   const theme = useUiStore((state) => state.theme);
   const setTheme = useUiStore((state) => state.setTheme);
@@ -72,8 +72,8 @@ export function SettingsPage(): ReactElement {
       <div className="sidebar-card">
         <span className="sidebar-card__title">关于</span>
         <p className="muted" style={{ fontSize: 'var(--text-sm)' }}>
-          InkPane 日程是一个前后端分离的日程管理应用：前端 React + TypeScript，后端
-          Express + SQLite。数据保存在本机，不依赖任何第三方服务。
+          InkPane 墨窗的桌面端控制台：日程、课程、待办与天气在这里整理，
+          再由设备端拉取、铺到电子墨水屏上。数据只保存在本机的 SQLite 里。
         </p>
       </div>
 
@@ -101,8 +101,11 @@ export function SettingsPage(): ReactElement {
     <AppShell topbar={topbar} sidebar={sidebar}>
       <div className="page">
         <header className="page__header">
-          <h1 className="page__title">设置</h1>
-          <p className="page__subtitle">外观、提醒与数据源状态。</p>
+          <div className="page__heading">
+            <p className="page__eyebrow">Settings · 偏好</p>
+            <h1 className="page__title">设置</h1>
+            <p className="page__subtitle">外观、提醒、模块入口与数据源状态。</p>
+          </div>
         </header>
 
         <section className="card">
@@ -201,6 +204,29 @@ export function SettingsPage(): ReactElement {
               {reminders.lastCount} 条提醒窗口内的日程。
             </p>
           )}
+        </section>
+
+        <section className="card">
+          <div className="card__header">
+            <div>
+              <h2 className="card__title">桌面屏模块</h2>
+              <p className="card__description">
+                待办、天气与屏幕布局在各自的页面里维护。设备端通过 /api/device/screen
+                拿到排布好的屏幕数据，这里改完布局，设备下次唤醒就会生效。
+              </p>
+            </div>
+          </div>
+          <div className="row row--wrap">
+            <Button variant="secondary" leadingIcon="check-square" onClick={() => navigate('/todos')}>
+              待办清单
+            </Button>
+            <Button variant="secondary" leadingIcon="cloud-sun" onClick={() => navigate('/weather')}>
+              天气
+            </Button>
+            <Button variant="secondary" leadingIcon="device" onClick={() => navigate('/device')}>
+              屏幕与设备
+            </Button>
+          </div>
         </section>
 
         <section className="card">

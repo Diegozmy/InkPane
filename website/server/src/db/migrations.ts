@@ -130,6 +130,54 @@ const MIGRATIONS: readonly Migration[] = [
       `);
     },
   },
+  {
+    version: 3,
+    name: 'desk-screen-modules',
+    up: (db) => {
+      db.exec(`
+        -- 待办：与日程相互独立，due_date 只存日期串（无时区语义）
+        CREATE TABLE IF NOT EXISTS todos (
+          id           INTEGER PRIMARY KEY AUTOINCREMENT,
+          title        TEXT    NOT NULL,
+          notes        TEXT    NOT NULL DEFAULT '',
+          done         INTEGER NOT NULL DEFAULT 0 CHECK (done IN (0,1)),
+          priority     TEXT    NOT NULL DEFAULT 'normal'
+                         CHECK (priority IN ('low','normal','high','urgent')),
+          due_date     TEXT,
+          category_id  INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+          sort_order   INTEGER NOT NULL DEFAULT 0,
+          completed_at TEXT,
+          created_at   TEXT    NOT NULL,
+          updated_at   TEXT    NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_todos_done    ON todos (done);
+        CREATE INDEX IF NOT EXISTS idx_todos_sort    ON todos (sort_order);
+        CREATE INDEX IF NOT EXISTS idx_todos_created ON todos (created_at DESC);
+
+        -- 天气缓存：单行表，payload 是完整 WeatherSnapshot 的 JSON
+        CREATE TABLE IF NOT EXISTS weather_cache (
+          id         INTEGER PRIMARY KEY CHECK (id = 1),
+          payload    TEXT NOT NULL,
+          fetched_at TEXT NOT NULL
+        );
+
+        -- 设备最近一次上报的遥测，同样单行；是否配对以 last_seen_at 是否为空判断
+        CREATE TABLE IF NOT EXISTS device_status (
+          id              INTEGER PRIMARY KEY CHECK (id = 1),
+          last_seen_at    TEXT,
+          temperature     REAL,
+          humidity        REAL,
+          battery_voltage REAL,
+          battery_percent INTEGER CHECK (battery_percent IS NULL OR (battery_percent BETWEEN 0 AND 100)),
+          rssi            INTEGER CHECK (rssi IS NULL OR (rssi BETWEEN -120 AND 0)),
+          firmware        TEXT,
+          uptime_seconds  INTEGER,
+          updated_at      TEXT NOT NULL
+        );
+      `);
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(

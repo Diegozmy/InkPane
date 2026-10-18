@@ -171,3 +171,247 @@ export interface ReminderItem {
   fireAt: string;
   minutesBefore: number;
 }
+
+/* ------------------------------------------------------------------ *
+ * 待办
+ * ------------------------------------------------------------------ */
+
+export interface Todo {
+  id: number;
+  title: string;
+  notes: string;
+  done: boolean;
+  priority: Priority;
+  /** YYYY-MM-DD；无截止日期为 null */
+  dueDate: string | null;
+  categoryId: number | null;
+  sortOrder: number;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/* ------------------------------------------------------------------ *
+ * 天气
+ * ------------------------------------------------------------------ */
+
+export const WEATHER_ICONS = [
+  'clear',
+  'partly-cloudy',
+  'cloudy',
+  'fog',
+  'drizzle',
+  'rain',
+  'snow',
+  'thunderstorm',
+] as const;
+export type WeatherIcon = (typeof WEATHER_ICONS)[number];
+
+export interface WeatherCurrent {
+  temperature: number;
+  apparentTemperature: number;
+  humidity: number;
+  weatherCode: number;
+  condition: string;
+  icon: WeatherIcon;
+  windSpeed: number;
+  isDay: boolean;
+}
+
+export interface WeatherToday {
+  date: string;
+  min: number;
+  max: number;
+  precipitationProbability: number;
+  condition: string;
+  icon: WeatherIcon;
+}
+
+export interface WeatherForecastDay {
+  date: string;
+  weekday: string;
+  min: number;
+  max: number;
+  condition: string;
+  icon: WeatherIcon;
+  precipitationProbability: number;
+}
+
+/** 对外统一的天气快照；缓存、强制刷新与回退都返回这个形状。 */
+export interface WeatherSnapshot {
+  provider: 'open-meteo';
+  city: string;
+  latitude: number;
+  longitude: number;
+  observedAt: string;
+  fetchedAt: string;
+  stale: boolean;
+  source: 'open-meteo' | 'cache' | 'fallback';
+  message?: string;
+  current: WeatherCurrent;
+  today: WeatherToday;
+  /** 含今天在内共 3 天 */
+  forecast: WeatherForecastDay[];
+}
+
+export interface WeatherSettingsView {
+  city: string;
+  latitude: number;
+  longitude: number;
+  enabled: boolean;
+  timezone: string;
+  updatedAt: string;
+}
+
+export interface WeatherSearchResult {
+  name: string;
+  admin1: string;
+  country: string;
+  latitude: number;
+  longitude: number;
+  timezone: string;
+}
+
+/* ------------------------------------------------------------------ *
+ * 屏幕布局
+ * ------------------------------------------------------------------ */
+
+export const DISPLAY_MODULE_IDS = ['clock', 'calendar', 'weather', 'schedule', 'courses', 'todos'] as const;
+export type DisplayModuleId = (typeof DISPLAY_MODULE_IDS)[number];
+
+/** 墨水屏逻辑分辨率，布局坐标都以它为基准。 */
+export const DISPLAY_WIDTH = 800;
+export const DISPLAY_HEIGHT = 480;
+
+export interface DisplayModule {
+  id: DisplayModuleId;
+  enabled: boolean;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface DisplayLayout {
+  width: number;
+  height: number;
+  updatedAt: string;
+  modules: DisplayModule[];
+}
+
+export interface DisplayModuleRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** 前端布局编辑器所需的模块目录。 */
+export interface DisplayModuleCatalogItem {
+  id: DisplayModuleId;
+  name: string;
+  description: string;
+  defaultRect: DisplayModuleRect;
+}
+
+export interface DisplayConfig {
+  layout: DisplayLayout;
+  refreshMinutes: number;
+  modules: DisplayModuleCatalogItem[];
+  width: number;
+  height: number;
+}
+
+/* ------------------------------------------------------------------ *
+ * 设备屏幕
+ * ------------------------------------------------------------------ */
+
+export interface DeviceEvent {
+  id: string;
+  eventId: number;
+  occurrenceKey: string;
+  title: string;
+  location: string;
+  startAt: string;
+  endAt: string;
+  allDay: boolean;
+  categoryId: number | null;
+  color: string | null;
+  priority: Priority;
+  isCourse: boolean;
+}
+
+export interface DeviceTodo {
+  id: number;
+  title: string;
+  priority: Priority;
+  dueDate: string | null;
+}
+
+export interface DeviceNow {
+  iso: string;
+  time: string;
+  weekday: string;
+  date: string;
+  dateLabel: string;
+}
+
+export interface DeviceMonth {
+  year: number;
+  month: number;
+  /** 当月 1 日是星期几，0 = 周日 */
+  firstWeekday: number;
+  daysInMonth: number;
+  today: number;
+  /** 当月有日程的日期号，升序 */
+  marks: number[];
+}
+
+export interface DeviceScreen {
+  width: number;
+  height: number;
+  refreshMinutes: number;
+  layout: DisplayLayout;
+}
+
+/** ESP32 拉取的完整屏幕数据。 */
+export interface DeviceScreenPayload {
+  generatedAt: string;
+  timezone: string;
+  etag: string;
+  screen: DeviceScreen;
+  now: DeviceNow;
+  month: DeviceMonth;
+  weather: WeatherSnapshot | null;
+  events: DeviceEvent[];
+  courses: DeviceEvent[];
+  todos: DeviceTodo[];
+}
+
+export interface DeviceTelemetry {
+  temperature?: number;
+  humidity?: number;
+  batteryVoltage?: number;
+  batteryPercent?: number;
+  rssi?: number;
+  firmware?: string;
+  uptimeSeconds?: number;
+}
+
+/** 控制台「设备」页展示的状态。 */
+export interface DeviceStatus {
+  paired: boolean;
+  name: string;
+  tokenPreview: string;
+  lastSeenAt: string | null;
+  firmware: string | null;
+  batteryPercent: number | null;
+  batteryVoltage: number | null;
+  rssi: number | null;
+  indoorTemperature: number | null;
+  indoorHumidity: number | null;
+  screenVersion: string;
+  refreshMinutes: number;
+  layoutUpdatedAt: string;
+  serverTime: string;
+}

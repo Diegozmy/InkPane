@@ -154,7 +154,7 @@ export function AgendaPage(): ReactElement {
             leadingIcon="filter"
             onClick={() => setFiltersPanelOpen(true)}
           >
-            {topbar.activeFilterCount > 0 ? `筛选 ${topbar.activeFilterCount}` : '筛选'}
+            {(topbar.activeFilterCount ?? 0) > 0 ? `筛选 ${topbar.activeFilterCount}` : '筛选'}
           </Button>
 
           <SegmentedControl

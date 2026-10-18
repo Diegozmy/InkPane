@@ -7,6 +7,14 @@ export const queryKeys = {
   events: (params: Record<string, unknown>) => ['events', params] as const,
   occurrences: (params: Record<string, unknown>) => ['occurrences', params] as const,
   summary: (params: Record<string, unknown>) => ['summary', params] as const,
+  todos: (params: Record<string, unknown>) => ['todos', params] as const,
+  weather: ['weather'] as const,
+  weatherSettings: ['weather', 'settings'] as const,
+  weatherSearch: (query: string) => ['weather', 'search', query] as const,
+  display: ['display'] as const,
+  screen: ['display', 'screen'] as const,
+  device: ['device'] as const,
+  deviceToken: ['device', 'token'] as const,
 };
 
 export interface RangeParams {

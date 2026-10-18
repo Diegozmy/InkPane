@@ -71,7 +71,7 @@
 .search-field .input {
   padding-left: var(--space-8);
   padding-right: var(--space-8);
-  width: 260px;
+  width: 300px;
 }
 
 .search-field__clear {
@@ -917,4 +917,108 @@
 
 .mini-month__day.is-today .mini-month__dot {
   background: var(--on-accent);
+}
+
+/* ============================== 留白微调 ============================== */
+/* 管理后台整体放大后，日历的呼吸感同步提一档：行更高、事件块更高、表头更松。 */
+
+.toolbar {
+  padding: 0 0 var(--space-4);
+  gap: var(--space-4);
+}
+
+.toolbar__title {
+  font-size: var(--text-xl);
+  font-weight: 650;
+}
+
+.toolbar__nav {
+  padding: 4px;
+  gap: 4px;
+}
+
+.search-field .input {
+  height: 44px;
+}
+
+.month__weekday {
+  padding: var(--space-4) var(--space-3);
+  font-size: var(--text-sm);
+  letter-spacing: 0.12em;
+}
+
+.month__grid {
+  grid-auto-rows: minmax(184px, 1fr);
+}
+
+@media (max-height: 1200px) {
+  .month__grid {
+    grid-auto-rows: minmax(168px, 1fr);
+  }
+}
+
+@media (max-height: 1000px) {
+  .month__grid {
+    grid-auto-rows: minmax(146px, 1fr);
+  }
+}
+
+@media (max-height: 860px) {
+  .month__grid {
+    grid-auto-rows: minmax(128px, 1fr);
+  }
+}
+
+.month__cell {
+  padding: var(--space-4) var(--space-3) var(--space-3);
+  gap: 10px;
+}
+
+.month__daynum {
+  min-width: 34px;
+  height: 34px;
+}
+
+.month__events {
+  gap: 6px;
+}
+
+.event-chip--month {
+  height: 32px;
+  padding: 0 var(--space-3) 0 var(--space-2);
+}
+
+.month__more {
+  padding: 4px var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.agenda {
+  gap: var(--space-4);
+}
+
+.agenda__day {
+  padding: var(--space-4);
+}
+
+.agenda__item {
+  padding: var(--space-4);
+}
+
+.agenda__list {
+  gap: var(--space-2);
+}
+
+/* 详情面板与弹层同步放大内边距 */
+.detail-panel__body {
+  gap: var(--space-6);
+  padding: var(--space-6);
+}
+
+.detail-panel__header {
+  padding: var(--space-5) var(--space-6) var(--space-4);
+}
+
+.detail-panel__footer {
+  padding: var(--space-4) var(--space-6);
 }

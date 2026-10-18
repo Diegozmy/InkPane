@@ -1,7 +1,14 @@
 /** 请求体与查询参数的 Zod 校验模式。所有入口数据必须先经过这里。 */
 
 import { z } from 'zod';
-import { EVENT_STATUSES, PRIORITIES, RECURRENCE_FREQUENCIES } from './types.js';
+import {
+  DISPLAY_HEIGHT,
+  DISPLAY_MODULE_IDS,
+  DISPLAY_WIDTH,
+  EVENT_STATUSES,
+  PRIORITIES,
+  RECURRENCE_FREQUENCIES,
+} from './types.js';
 import { isValidDateKey, isValidTimeZone } from './time.js';
 
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
@@ -227,3 +234,184 @@ export type OverrideInputDto = z.infer<typeof overrideSchema>;
 export type StatsQueryInput = z.infer<typeof statsQuerySchema>;
 export type ReminderQueryInput = z.infer<typeof reminderQuerySchema>;
 export type ListEventsQueryInput = z.infer<typeof listEventsQuerySchema>;
+
+/* ------------------------------------------------------------------ *
+ * 待办
+ * ------------------------------------------------------------------ */
+
+const TODO_TITLE_MAX = 200;
+
+export const todoCreateSchema = z
+  .object({
+    title: z.string().trim().min(1, '待办标题不能为空').max(TODO_TITLE_MAX),
+    notes: z.string().max(4000).optional(),
+    priority: z.enum(PRIORITIES).optional(),
+    dueDate: dateKeySchema.nullable().optional(),
+    categoryId: z.number().int().positive().nullable().optional(),
+    sortOrder: z.number().int().min(-1_000_000).max(1_000_000).optional(),
+  })
+  .strict();
+
+export const todoUpdateSchema = z
+  .object({
+    title: z.string().trim().min(1, '待办标题不能为空').max(TODO_TITLE_MAX).optional(),
+    notes: z.string().max(4000).optional(),
+    done: z.boolean().optional(),
+    priority: z.enum(PRIORITIES).optional(),
+    dueDate: dateKeySchema.nullable().optional(),
+    categoryId: z.number().int().positive().nullable().optional(),
+    sortOrder: z.number().int().min(-1_000_000).max(1_000_000).optional(),
+  })
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, { message: '至少需要提供一个待更新字段' });
+
+export const todoListQuerySchema = z
+  .object({
+    done: booleanQuery(),
+    due: z.enum(['today', 'week']).optional(),
+    limit: z.coerce.number().int().min(1).max(500).optional(),
+    offset: z.coerce.number().int().min(0).max(100_000).optional(),
+  })
+  .strict();
+
+export const todoOrderSchema = z
+  .object({
+    ids: z.array(z.number().int().positive()).max(2000),
+  })
+  .strict();
+
+export type TodoCreateInput = z.infer<typeof todoCreateSchema>;
+export type TodoUpdateInput = z.infer<typeof todoUpdateSchema>;
+export type TodoListQueryInput = z.infer<typeof todoListQuerySchema>;
+
+/* ------------------------------------------------------------------ *
+ * 屏幕布局
+ * ------------------------------------------------------------------ */
+
+/** 布局坐标必须落在 4 像素网格上，墨水屏渲染才不会出现半像素模糊。 */
+function gridCoordinate(min: number, message: string) {
+  return z
+    .number()
+    .int('必须是整数')
+    .min(min, message)
+    .refine((value) => value % 4 === 0, { message: '必须是 4 的倍数' });
+}
+
+export const displayModuleSchema = z
+  .object({
+    id: z.enum(DISPLAY_MODULE_IDS),
+    enabled: z.boolean(),
+    x: gridCoordinate(0, 'x 不能小于 0'),
+    y: gridCoordinate(0, 'y 不能小于 0'),
+    w: gridCoordinate(80, 'w 不能小于 80'),
+    h: gridCoordinate(48, 'h 不能小于 48'),
+  })
+  .strict();
+
+export const displayLayoutSchema = z
+  .object({
+    width: z.literal(DISPLAY_WIDTH, { message: `宽度必须为 ${DISPLAY_WIDTH}` }),
+    height: z.literal(DISPLAY_HEIGHT, { message: `高度必须为 ${DISPLAY_HEIGHT}` }),
+    // 整体覆盖时 updatedAt 由服务端刷新；允许客户端回传但会被忽略
+    updatedAt: z.string().trim().min(1).max(40).optional(),
+    modules: z.array(displayModuleSchema).length(6, '布局必须包含 6 个模块'),
+  })
+  .strict()
+  .superRefine((layout, ctx) => {
+    const seen = new Set<string>();
+    layout.modules.forEach((module, index) => {
+      if (seen.has(module.id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['modules', index, 'id'],
+          message: `模块 ${module.id} 重复`,
+        });
+      }
+      seen.add(module.id);
+      if (module.x + module.w > DISPLAY_WIDTH) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['modules', index],
+          message: `模块 ${module.id} 超出屏幕右边界`,
+        });
+      }
+      if (module.y + module.h > DISPLAY_HEIGHT) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['modules', index],
+          message: `模块 ${module.id} 超出屏幕下边界`,
+        });
+      }
+    });
+    for (const id of DISPLAY_MODULE_IDS) {
+      if (!seen.has(id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['modules'],
+          message: `缺少模块 ${id}`,
+        });
+      }
+    }
+  });
+
+export const displayUpdateSchema = z
+  .object({
+    layout: displayLayoutSchema.optional(),
+    refreshMinutes: z.number().int().min(5).max(720).optional(),
+  })
+  .strict();
+
+export type DisplayUpdateInput = z.infer<typeof displayUpdateSchema>;
+
+/* ------------------------------------------------------------------ *
+ * 天气设置与搜索
+ * ------------------------------------------------------------------ */
+
+export const weatherSettingsUpdateSchema = z
+  .object({
+    city: z.string().trim().min(1, '城市名称不能为空').max(60).optional(),
+    latitude: z.number().min(-90, '纬度必须在 -90 到 90 之间').max(90, '纬度必须在 -90 到 90 之间').optional(),
+    longitude: z
+      .number()
+      .min(-180, '经度必须在 -180 到 180 之间')
+      .max(180, '经度必须在 -180 到 180 之间')
+      .optional(),
+    enabled: z.boolean().optional(),
+  })
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, { message: '至少需要提供一个待更新字段' });
+
+export const weatherSearchQuerySchema = z
+  .object({
+    q: z.string().trim().min(1, '搜索关键词不能为空').max(50),
+  })
+  .strict();
+
+export type WeatherSettingsUpdateInput = z.infer<typeof weatherSettingsUpdateSchema>;
+
+/* ------------------------------------------------------------------ *
+ * 设备
+ * ------------------------------------------------------------------ */
+
+export const deviceTelemetrySchema = z
+  .object({
+    temperature: z.number().finite().optional(),
+    humidity: z.number().finite().optional(),
+    batteryVoltage: z.number().finite().optional(),
+    batteryPercent: z.number().int().min(0).max(100).optional(),
+    rssi: z.number().int().min(-120).max(0).optional(),
+    firmware: z.string().trim().min(1).max(64).optional(),
+    uptimeSeconds: z.number().int().min(0).optional(),
+  })
+  .strict();
+
+export const deviceSettingsSchema = z
+  .object({
+    name: z.string().trim().min(1, '设备名称不能为空').max(40).optional(),
+    refreshMinutes: z.number().int().min(5).max(720).optional(),
+  })
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, { message: '至少需要提供一个待更新字段' });
+
+export type DeviceTelemetryInput = z.infer<typeof deviceTelemetrySchema>;
+export type DeviceSettingsInput = z.infer<typeof deviceSettingsSchema>;

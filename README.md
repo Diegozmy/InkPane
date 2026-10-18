@@ -93,40 +93,67 @@ InkPane 墨窗，以电子墨水为纸，以规整窗格为形，将整日行程
 
 ## 配套控制台
 
-墨水屏打字不便，所以墨窗把「录入与整理」交给桌面端控制台：日程、课程、分类与待办在这里编辑，
-设备端只负责把整理好的内容，以最安静的方式铺到屏幕上。
+墨水屏打字不便，所以墨窗把「录入与整理」交给桌面端控制台：日程、课程、待办、天气与屏幕布局
+都在这里调整，设备端只负责把整理好的内容，以最安静的方式铺到屏幕上。
 
 <p align="center">
-  <img src="website/docs/screenshots/01-month-light.png" alt="InkPane 控制台月视图（浅色）" width="900">
+  <img src="website/docs/screenshots/01-dashboard.png" alt="InkPane 控制台总览" width="900">
 </p>
-<p align="center"><sub>月视图：今日概览、分类配色与整月事件一览</sub></p>
+<p align="center"><sub>总览：今日日程、天气、待办与桌面屏幕的实时缩略预览</sub></p>
 
-- **四种视图** —— 月 / 周 / 日 / 列表，适合规划，也适合回顾。
-- **拖拽即改期** —— 时间轴空白处拖动新建、拖动事件块改期、拉底边调时长，15 分钟吸附，`Esc` 随时反悔。
-- **重复日程** —— 每天 / 每周 / 每月 / 每年，可改单次、改此后所有或拆分序列。
-- **分类、标签、搜索筛选** —— 分类带颜色，筛选条件本机持久化。
-- **提醒** —— 每 30 秒轮询待触发提醒，走系统通知；未授权时自动降级为页内提示。
-- **课程同步** —— 对接学校课程管理系统，支持测试连接、预览课表、立即导入与按配置自动定时同步。
+- **总览** —— 一屏看完今天：日程、课程、待办、天气与设备状态，并实时预览设备上的那一屏。
+- **待办清单** —— 优先级、截止日期、完成即勾去；设备端只取未完成的前 8 条，不堆积、不轰炸。
+- **天气** —— 当前实况、未来三天、城市搜索与经纬度手填；失败自动回退缓存，不让屏幕空掉。
+- **屏幕与设备** —— 800 × 480 窗格布局编辑、四套预设、模块开关、刷新间隔、设备令牌与遥测状态。
+- **日历** —— 月 / 周 / 日 / 列表四种视图；拖拽即改期、重复日程、分类标签、提醒与课程同步。
 - **主题与键盘** —— 深色 / 浅色 / 跟随系统，首屏不闪白；`T` 今天、`M/W/D` 视图、`N` 新建、`/` 搜索。
-- **响应式** —— 桌面端常驻侧栏，移动端抽屉 + 底部标签栏。
-
-**数据留在本机。** 日程与待办存于本地 SQLite，不依赖任何云账号；课程密码以 AES-256-GCM 密文
-保存在本机，接口永不回传明文。校方系统本身是 HTTP 明文站点这一限制，也被如实标注在界面里。
 
 <p align="center">
-  <img src="website/docs/screenshots/02-week-light.png" alt="周视图" width="440">
-  <img src="website/docs/screenshots/04-agenda-light.png" alt="列表视图" width="440">
+  <img src="website/docs/screenshots/02-month-light.png" alt="月视图" width="440">
+  <img src="website/docs/screenshots/05-agenda-light.png" alt="列表视图" width="440">
 </p>
-<p align="center"><sub>周视图（时间轴自动分列）与列表视图（连续 30 天按天分组）</sub></p>
+<p align="center"><sub>月视图与列表视图</sub></p>
 
 <p align="center">
-  <img src="website/docs/screenshots/05-event-dialog.png" alt="新建日程" width="440">
-  <img src="website/docs/screenshots/10-course-sync.png" alt="课程同步" width="440">
+  <img src="website/docs/screenshots/08-todos.png" alt="待办清单" width="440">
+  <img src="website/docs/screenshots/09-weather.png" alt="天气" width="440">
 </p>
-<p align="center"><sub>新建日程与课程同步</sub></p>
+<p align="center"><sub>待办清单与天气</sub></p>
+
+<p align="center">
+  <img src="website/docs/screenshots/10-device.png" alt="屏幕与设备" width="900">
+</p>
+<p align="center"><sub>屏幕与设备：布局编辑、实时预览、令牌与遥测</sub></p>
+
+**数据留在本机。** 日程、待办、天气缓存与设备令牌都存于本地 SQLite，不依赖任何云账号；
+课程密码以 AES-256-GCM 密文保存，接口永不回传明文。
 
 技术栈与工程细节（分层设计、重复日程引擎、时区处理、测试与静态检查）见
 [website/README.md](website/README.md)。
+
+## 硬件对接
+
+设备端与本地服务之间是一套稳定、可离线重试的 HTTP 契约，完整说明见
+**[设备端 API 与硬件对接指南](website/docs/DEVICE-API.md)**（含数据契约、1-bit 渲染规范、
+低功耗策略、ESP-IDF 示例与 curl 调试步骤）。
+
+```text
+设备唤醒 ──► GET /api/device/screen（带 X-Device-Token + If-None-Match）
+              │  304 ──► 内容未变，不重绘，直接休眠
+              │  200 ──► 按 screen.layout 渲染 800×480 窗格
+              ├──► POST /api/device/telemetry 上报 SHTC3 温湿度与电量
+              └──► 按 refreshMinutes 深度休眠，RTC 定时唤醒
+```
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/device/screen` | 屏幕数据：布局、时钟、月历、天气、今日日程 / 课程 / 待办；带 ETag，内容未变返回 304 |
+| `POST /api/device/telemetry` | 上报温度、湿度、电量、信号、固件版本与运行时长 |
+| `GET /api/display`、`PUT /api/display` | 读取 / 保存 6 个模块的窗格坐标与刷新间隔 |
+| `GET /api/device/token`、`POST /api/device/token` | 获取 / 轮换设备令牌（旧令牌立即失效） |
+
+设备令牌在控制台「设备」页获取；默认服务只监听 `127.0.0.1`，设备接入时需在
+`website/server/.env` 中设置 `HOST=0.0.0.0` 后重启。
 
 ## 目录结构
 
@@ -139,7 +166,7 @@ InkPane/
 └── website/                # InkPane 控制台
     ├── server/             # Express + node:sqlite，REST API
     ├── web/                # React 18 + TypeScript + Vite
-    ├── docs/               # 架构说明、API 文档、界面截图
+    ├── docs/               # 架构说明、REST API、设备对接文档、界面截图
     └── scripts/            # 工程脚本
 ```
 
@@ -165,6 +192,10 @@ npm run dev          # 同时启动 API（:4000）与前端（:5173）
 
 数据默认落在 `website/data/inkpane.sqlite`，运行期配置见 `website/server/.env.example`。
 
+**接入设备**：打开控制台「设备」页获取令牌与拉取地址，再把它们写进设备固件；完整字段、
+错误码与 ESP-IDF 示例见 [设备端 API 与硬件对接指南](website/docs/DEVICE-API.md)。
+设备在同一局域网访问时，需要在 `website/server/.env` 中设置 `HOST=0.0.0.0`。
+
 **点亮屏幕**：设备端固件位于 [`hardware/`](hardware/README.md)，开发中，开发计划与平台说明见该目录 README。
 当前可先按微雪官方
 [ESP-IDF](https://docs.waveshare.net/ESP32-S3-ePaper-3.97/ESP-IDF) /
@@ -173,16 +204,18 @@ npm run dev          # 同时启动 API（:4000）与前端（:5173）
 ## 项目状态
 
 - [x] 产品定义、视觉规范与控制台信息架构
-- [x] InkPane 控制台：日程、重复规则、分类标签、提醒、课程同步
+- [x] 控制台：总览、日历、待办、天气、屏幕布局编辑与课程同步
+- [x] 设备对接协议：屏幕数据、ETag / 304、遥测、令牌与完整硬件对接文档
 - [x] 硬件平台选型：ESP32-S3-ePaper-3.97
-- [ ] 墨水屏端渲染与窗格布局引擎
-- [ ] 设备与本地服务的数据同步协议
-- [ ] 天气模块与休眠 / 局部刷新功耗策略
+- [ ] 设备端固件：800 × 480 窗格渲染、深度休眠与 RTC 唤醒
+- [ ] 屏幕端 1-bit 字库、局刷策略与残影调优
 
 ## 参考与致谢
 
 - 硬件参考设计、产品图片与规格数据来自 [微雪电子 ESP32-S3-ePaper-3.97 官方文档](https://docs.waveshare.net/ESP32-S3-ePaper-3.97/)，
   相关版权归深圳市微雪电子有限公司所有。InkPane 是独立项目，与微雪电子无隶属关系。
+- 设备对接细节见 [DEVICE-API.md](website/docs/DEVICE-API.md)，REST 接口全集见 [API.md](website/docs/API.md)，
+  分层设计见 [ARCHITECTURE.md](website/docs/ARCHITECTURE.md)。
 - 固件开发基于 [ESP-IDF](https://docs.espressif.com/projects/esp-idf/zh_CN/latest/) 与 ESP32-S3 生态。
 - 控制台界面图标来自 [Phosphor Icons](https://phosphoricons.com/)，日期处理使用 [date-fns](https://date-fns.org/)。
 

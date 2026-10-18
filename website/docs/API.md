@@ -2,6 +2,26 @@
 
 Base URL：`http://127.0.0.1:4000/api`（开发期前端通过 Vite 代理访问 `/api`）
 
+## 接口概览
+
+| 前缀 | 说明 | 详见 |
+| --- | --- | --- |
+| `/api/health` | 服务存活、结构版本与事件数 | 本文「健康检查」 |
+| `/api/categories` | 分类的增删改查与排序 | 本文「分类」 |
+| `/api/events` | 日程主记录（未展开）与实例级操作 | 本文「日程主体」「实例级操作」 |
+| `/api/occurrences` | 展开后的日历实例 | 本文「展开后的实例」 |
+| `/api/stats` | 统计汇总 | 本文「统计」 |
+| `/api/reminders` | 待触发提醒 | 本文「提醒」 |
+| `/api/courses` | 学校课程同步 | 本文「课程同步」 |
+| `/api/todos` | 待办清单 | 本文「待办」 |
+| `/api/weather` | 天气快照、设置与城市搜索 | 本文「天气」 |
+| `/api/display` | 墨水屏布局与预览 | 本文「屏幕布局」 |
+| `/api/device` | 设备端拉屏、遥测与令牌 | 本文「设备」 |
+
+其中 `/api/device/screen` 使用 `X-Device-Token` 鉴权并支持 `ETag` / `304`，
+`/api/device/telemetry` 同样需要令牌；设备端的完整对接说明（ESP-IDF 示例、屏幕渲染规范、
+低功耗策略）见 [DEVICE-API.md](DEVICE-API.md)。
+
 ## 通用约定
 
 ### 成功响应
@@ -28,6 +48,7 @@ Base URL：`http://127.0.0.1:4000/api`（开发期前端通过 Vite 代理访问
 | HTTP | code | 含义 |
 | --- | --- | --- |
 | 400 | `BAD_REQUEST` | 参数语义不合法（如区间终点早于起点、区间跨度过大、JSON 解析失败） |
+| 401 | `UNAUTHORIZED` | 设备令牌缺失或无效，仅设备拉屏与遥测接口返回 |
 | 404 | `NOT_FOUND` | 资源或接口不存在 |
 | 409 | `CONFLICT` | 唯一约束冲突（如分类重名） |
 | 413 | `PAYLOAD_TOO_LARGE` | 请求体超出上限 |
@@ -40,6 +61,8 @@ Base URL：`http://127.0.0.1:4000/api`（开发期前端通过 Vite 代理访问
 | --- | --- |
 | `X-Request-Id` | 可选。客户端传入则原样回写，便于把前端报错与后端日志对上 |
 | `Content-Type` | 写操作需 `application/json` |
+| `X-Device-Token` | `/api/device/screen`、`/api/device/telemetry` 必填；其余接口不需要 |
+| `If-None-Match` | 可选。`GET /api/device/screen` 上使用，命中时返回 `304` |
 
 ### 时间格式
 
@@ -624,3 +647,526 @@ Base URL：`http://127.0.0.1:4000/api`（开发期前端通过 Vite 代理访问
 | 密码含 `&` 或 `=` | 422 | 校方登录表单无法处理，建议先改密码 |
 | 网络不可达 | 400 | 提示检查网络是否能访问学校系统 |
 | 课表结构变化 / 未排课 | 400 | 提示可能尚未排课或页面结构已变，并保留原始响应供排查 |
+
+---
+
+## 待办
+
+待办与日程相互独立：日程有起止时间，待办只有「做没做完」与可选的截止日期。
+两者共用分类，因此待办也可以挂到某个分类上。
+
+`Todo` 结构：
+
+```json
+{
+  "id": 31,
+  "title": "订正物理周测卷",
+  "notes": "错题按知识点归类，周五前交给课代表",
+  "done": false,
+  "priority": "high",
+  "dueDate": "2026-10-18",
+  "categoryId": 2,
+  "sortOrder": 10,
+  "completedAt": null,
+  "createdAt": "2026-10-16T13:20:11.000Z",
+  "updatedAt": "2026-10-17T01:05:42.000Z"
+}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | integer | 主键 |
+| `title` | string | 1–200 字符 |
+| `notes` | string | 备注，默认 `""`，≤4000 字符 |
+| `done` | boolean | 是否已完成 |
+| `priority` | 枚举 | `low` / `normal` / `high` / `urgent`，默认 `normal` |
+| `dueDate` | string \| null | 截止日期 `YYYY-MM-DD`，无截止日期为 `null` |
+| `categoryId` | integer \| null | 分类 id，未分类为 `null` |
+| `sortOrder` | integer | 手动排序值，升序排列 |
+| `completedAt` | string \| null | 完成时刻（ISO-8601 UTC）；未完成或从未完成为 `null` |
+| `createdAt` | string | 创建时刻 |
+| `updatedAt` | string | 最后修改时刻 |
+
+### `GET /api/todos`
+
+| 查询参数 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `done` | boolean | — | 省略返回全部；`true` 只返回已完成，`false` 只返回未完成（也接受 `1` / `0`） |
+| `due` | 枚举 | — | `today` 只返回今天到期的；`week` 返回今天起 7 天内到期的；无截止日期的不参与筛选 |
+| `limit` | 1–500 | 200 | 每页条数 |
+| `offset` | ≥0 | 0 | 偏移量 |
+
+排序：`done` 升序（未完成在前）→ `sortOrder` 升序 → `createdAt` 降序。
+
+```json
+{
+  "data": [
+    {
+      "id": 31,
+      "title": "订正物理周测卷",
+      "notes": "错题按知识点归类，周五前交给课代表",
+      "done": false,
+      "priority": "high",
+      "dueDate": "2026-10-18",
+      "categoryId": 2,
+      "sortOrder": 10,
+      "completedAt": null,
+      "createdAt": "2026-10-16T13:20:11.000Z",
+      "updatedAt": "2026-10-17T01:05:42.000Z"
+    },
+    {
+      "id": 33,
+      "title": "归还图书馆借书",
+      "notes": "",
+      "done": true,
+      "priority": "low",
+      "dueDate": null,
+      "categoryId": null,
+      "sortOrder": 20,
+      "completedAt": "2026-10-18T06:12:03.000Z",
+      "createdAt": "2026-10-14T09:41:26.000Z",
+      "updatedAt": "2026-10-18T06:12:03.000Z"
+    }
+  ],
+  "meta": { "total": 2, "limit": 200, "offset": 0 }
+}
+```
+
+`meta.total` 是**筛选后的总数**（不受 `limit` / `offset` 影响），前端据此显示「共 N 项」。
+
+### `GET /api/todos/:id`
+
+`200` 返回单个待办，不存在返回 `404 NOT_FOUND`。
+
+### `POST /api/todos`
+
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+| --- | --- | --- | --- | --- |
+| `title` | string | 是 | — | 1–200 字符 |
+| `notes` | string | 否 | `""` | ≤4000 字符 |
+| `priority` | 枚举 | 否 | `normal` | `low` / `normal` / `high` / `urgent` |
+| `dueDate` | string \| null | 否 | `null` | `YYYY-MM-DD`，必须是真实存在的日期 |
+| `categoryId` | integer \| null | 否 | `null` | 必须存在，否则 `422` |
+| `sortOrder` | integer | 否 | 追加到末尾（步长 10） | -1000000 至 1000000 |
+
+`201` 返回创建后的待办。
+
+创建入参里**没有** `done`：新建待办一律为未完成，要标记完成请用 `PATCH`。
+
+### `PATCH /api/todos/:id`
+
+接受 `title` / `notes` / `done` / `priority` / `dueDate` / `categoryId` / `sortOrder`
+的任意子集，至少提供一个字段。
+
+```json
+{ "done": true }
+```
+
+`done` 语义：
+
+| 传入 | 行为 |
+| --- | --- |
+| `done: true` | 置为已完成，同时把 `completedAt` 写成当前时刻 |
+| `done: false` | 置为未完成，同时把 `completedAt` 清空为 `null` |
+
+返回更新后的待办。`done: true` 时重试不会产生第二份记录，也不会删除历史记录。
+
+### `DELETE /api/todos/:id`
+
+删除待办，返回 `204 No Content`。不存在返回 `404`。
+
+### `PUT /api/todos/order`
+
+```json
+{ "ids": [33, 31, 32] }
+```
+
+按数组顺序重写 `sortOrder`（数组下标即新的展示顺序），返回重排后的完整待办列表。
+`ids` 最多 2000 项，只允许正整数；不存在的 id 会被忽略。
+
+```json
+{
+  "data": [
+    {
+      "id": 33,
+      "title": "归还图书馆借书",
+      "notes": "",
+      "done": false,
+      "priority": "low",
+      "dueDate": null,
+      "categoryId": null,
+      "sortOrder": 10,
+      "completedAt": null,
+      "createdAt": "2026-10-14T09:41:26.000Z",
+      "updatedAt": "2026-10-18T03:20:44.000Z"
+    }
+  ]
+}
+```
+
+响应包含按新顺序排列的全部待办，此处仅示一项。
+
+---
+
+## 天气
+
+天气由服务端向 Open-Meteo 取数并缓存，控制台与设备端拿到的是同一个快照结构。
+**缓存 TTL 为 15 分钟**：`GET /api/weather` 命中缓存时直接返回，不会每次都请求外网。
+设备拉屏时**只读缓存、绝不联网**，因此设备数据里的 `source` 恒为 `cache`（或 `weather` 为 `null`），`open-meteo` 只会出现在本接口的实时刷新结果里。
+
+`WeatherSnapshot` 结构（完整示例见下）：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `provider` | string | 固定 `open-meteo` |
+| `city` | string | 城市名，来自天气设置 |
+| `latitude` / `longitude` | number | 取数坐标 |
+| `observedAt` | string | 观测时刻（ISO-8601 UTC） |
+| `fetchedAt` | string | 写入缓存的时刻（ISO-8601 UTC） |
+| `stale` | boolean | `true` 表示缓存已过期且刷新失败，正在用旧数据 |
+| `source` | 枚举 | `open-meteo`（本次实时取数）/ `cache`（命中 15 分钟缓存）/ `fallback`（从未成功） |
+| `message` | string | 可选。降级原因说明，正常取数时不出现 |
+| `current` | object | 实况：`temperature` / `apparentTemperature` / `humidity` / `weatherCode` / `condition` / `icon` / `windSpeed` / `isDay` |
+| `today` | object | 今日：`date` / `min` / `max` / `precipitationProbability` / `condition` / `icon` |
+| `forecast` | object[] | 3 天，**含今天**；每项 `date` / `weekday` / `min` / `max` / `condition` / `icon` / `precipitationProbability` |
+
+单位：温度 °C、风速 km/h、湿度与降水概率 %，`weatherCode` 为 WMO 天气代码。
+
+### `GET /api/weather`
+
+读取当前天气快照。命中缓存时 `source: "cache"`；缓存过期会尝试刷新，刷新失败则返回
+旧快照并置 `stale: true`。
+
+```json
+{
+  "data": {
+    "provider": "open-meteo",
+    "city": "上海",
+    "latitude": 31.2304,
+    "longitude": 121.4737,
+    "observedAt": "2026-10-18T03:00:00.000Z",
+    "fetchedAt": "2026-10-18T03:32:10.000Z",
+    "stale": false,
+    "source": "cache",
+    "current": {
+      "temperature": 22.4,
+      "apparentTemperature": 23.1,
+      "humidity": 68,
+      "weatherCode": 2,
+      "condition": "多云",
+      "icon": "partly-cloudy",
+      "windSpeed": 12.6,
+      "isDay": true
+    },
+    "today": {
+      "date": "2026-10-18",
+      "min": 17.2,
+      "max": 24.8,
+      "precipitationProbability": 20,
+      "condition": "多云",
+      "icon": "partly-cloudy"
+    },
+    "forecast": [
+      {
+        "date": "2026-10-18",
+        "weekday": "周日",
+        "min": 17.2,
+        "max": 24.8,
+        "condition": "多云",
+        "icon": "partly-cloudy",
+        "precipitationProbability": 20
+      },
+      {
+        "date": "2026-10-19",
+        "weekday": "周一",
+        "min": 16.5,
+        "max": 23.4,
+        "condition": "晴",
+        "icon": "clear",
+        "precipitationProbability": 5
+      },
+      {
+        "date": "2026-10-20",
+        "weekday": "周二",
+        "min": 17.8,
+        "max": 22.6,
+        "condition": "雨",
+        "icon": "rain",
+        "precipitationProbability": 70
+      }
+    ]
+  }
+}
+```
+
+`icon` 取值：`clear` / `partly-cloudy` / `cloudy` / `fog` / `drizzle` / `rain` /
+`snow` / `thunderstorm`。
+
+**失败不返回 500。** 外网不可达时：有旧缓存则返回旧缓存（`stale: true`，带 `message`）；
+从未成功过则返回 `source: "fallback"` 的占位快照（同样带 `message`），控制台据此
+显示「天气暂不可用」，而不是把整个接口判为故障。
+
+### `POST /api/weather/refresh`
+
+忽略 15 分钟 TTL，立即重新取数。成功时 `source: "open-meteo"`；失败时与
+`GET /api/weather` 的降级行为一致（返回旧缓存或 `fallback` 快照），HTTP 状态仍为 `200`。
+
+请求体：无。响应体：`WeatherSnapshot`。
+
+### `GET /api/weather/settings` / `PUT /api/weather/settings`
+
+```json
+{
+  "data": {
+    "city": "上海",
+    "latitude": 31.2304,
+    "longitude": 121.4737,
+    "enabled": true,
+    "timezone": "Asia/Shanghai",
+    "updatedAt": "2026-10-15T09:12:44.000Z"
+  }
+}
+```
+
+`PUT` 接受 `city`（1–60 字符）、`latitude`（-90–90）、`longitude`（-180–180）、
+`enabled` 的任意子集，至少提供一个字段。
+
+`timezone` 由服务端时区决定（默认 `Asia/Shanghai`），不接受单独修改；它决定 `today`
+与 `forecast` 的日期归属。
+
+### `GET /api/weather/search?q=`
+
+按关键词搜索城市，返回 Open-Meteo 地理编码结果，供设置页选择城市后填入经纬度。
+
+| 查询参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `q` | string | 是 | 1–50 字符，中英文均可 |
+
+```json
+{
+  "data": {
+    "results": [
+      {
+        "name": "上海",
+        "admin1": "上海市",
+        "country": "中国",
+        "latitude": 31.2304,
+        "longitude": 121.4737,
+        "timezone": "Asia/Shanghai"
+      }
+    ]
+  }
+}
+```
+
+`admin1`（一级行政区）与 `country` 在 Open-Meteo 未提供时为空字符串。搜索失败时**不返回 5xx**，而是：
+
+```json
+{
+  "data": { "results": [] },
+  "meta": { "warning": "城市搜索服务暂不可达，可直接填写经纬度" }
+}
+```
+
+---
+
+## 屏幕布局
+
+800 × 480 墨水屏的布局由六个模块组成，每个模块有固定的 `id` 与可调矩形。
+坐标单位为像素，设备端按矩形裁剪绘制。
+
+`DisplayModule`：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | 枚举 | `clock` / `calendar` / `weather` / `schedule` / `courses` / `todos` |
+| `enabled` | boolean | 是否绘制 |
+| `x` / `y` | integer | 左上角坐标，≥0 且为 4 的倍数 |
+| `w` / `h` | integer | 宽高，`w >= 80`、`h >= 48`，且为 4 的倍数 |
+
+`DisplayLayout`：`width`（固定 800）、`height`（固定 480）、`updatedAt`、`modules`（6 项）。
+
+### `GET /api/display`
+
+返回当前布局、刷新间隔，以及模块目录（名称、说明与默认矩形），供布局编辑器渲染。
+
+```json
+{
+  "data": {
+    "layout": {
+      "width": 800,
+      "height": 480,
+      "updatedAt": "2026-10-15T09:12:44.000Z",
+      "modules": [
+        { "id": "clock", "enabled": true, "x": 16, "y": 16, "w": 220, "h": 100 },
+        { "id": "calendar", "enabled": true, "x": 16, "y": 128, "w": 220, "h": 180 },
+        { "id": "weather", "enabled": true, "x": 248, "y": 16, "w": 240, "h": 288 },
+        { "id": "schedule", "enabled": true, "x": 500, "y": 16, "w": 284, "h": 448 },
+        { "id": "courses", "enabled": true, "x": 248, "y": 316, "w": 240, "h": 148 },
+        { "id": "todos", "enabled": true, "x": 16, "y": 320, "w": 220, "h": 144 }
+      ]
+    },
+    "refreshMinutes": 30,
+    "modules": [
+      { "id": "clock", "name": "时钟", "description": "大字时间、星期与日期", "defaultRect": { "x": 16, "y": 16, "w": 220, "h": 100 } },
+      { "id": "calendar", "name": "月历", "description": "当月月历，并标记有日程的日期", "defaultRect": { "x": 16, "y": 128, "w": 220, "h": 180 } },
+      { "id": "weather", "name": "天气", "description": "当前天气与未来三天预报", "defaultRect": { "x": 248, "y": 16, "w": 240, "h": 288 } },
+      { "id": "schedule", "name": "今日日程", "description": "今天的时间安排", "defaultRect": { "x": 500, "y": 16, "w": 284, "h": 448 } },
+      { "id": "courses", "name": "今日课程", "description": "今天要上的课程", "defaultRect": { "x": 248, "y": 316, "w": 240, "h": 148 } },
+      { "id": "todos", "name": "待办", "description": "未完成的待办事项", "defaultRect": { "x": 16, "y": 320, "w": 220, "h": 144 } }
+    ],
+    "width": 800,
+    "height": 480
+  }
+}
+```
+
+### `PUT /api/display`
+
+```json
+{
+  "refreshMinutes": 30,
+  "layout": {
+    "width": 800,
+    "height": 480,
+    "modules": [
+      { "id": "clock", "enabled": true, "x": 16, "y": 16, "w": 220, "h": 100 },
+      { "id": "calendar", "enabled": true, "x": 16, "y": 128, "w": 220, "h": 180 },
+      { "id": "weather", "enabled": true, "x": 248, "y": 16, "w": 240, "h": 288 },
+      { "id": "schedule", "enabled": true, "x": 500, "y": 16, "w": 284, "h": 448 },
+      { "id": "courses", "enabled": true, "x": 248, "y": 316, "w": 240, "h": 148 },
+      { "id": "todos", "enabled": true, "x": 16, "y": 320, "w": 220, "h": 144 }
+    ]
+  }
+}
+```
+
+`layout` 与 `refreshMinutes` 均可选，只传其一即可。校验规则（不满足返回 `400 VALIDATION_FAILED`）：
+
+- `width` / `height` 必须分别是 `800` / `480`，`modules` 必须正好 6 项；
+- 六个 `id` 齐全且唯一；每个模块的 `id`、`enabled`、`x`、`y`、`w`、`h` 均为必填；
+- `x`、`y`、`w`、`h` 为整数且是 4 的倍数；`x >= 0`、`y >= 0`、`w >= 80`、`h >= 48`；
+- `x + w <= 800`、`y + h <= 480`；
+- `refreshMinutes` 为 5–720 的整数（设备端据此设置休眠间隔）；
+- 服务端不校验模块是否重叠。
+
+响应体与 `GET /api/display` 的 `data` 一致。
+
+### `GET /api/display/screen`
+
+控制台预览用：返回设备将看到的完整屏幕数据（`DeviceScreenPayload`），**免鉴权**。
+字段定义、ETag 语义与完整示例见 [DEVICE-API.md](DEVICE-API.md) 第 7 节。
+
+设备端请使用 `GET /api/device/screen`，它支持 `If-None-Match` / `304`，能省掉重复渲染。
+
+---
+
+## 设备
+
+设备接口供墨水屏固件调用。其中**拉屏与遥测**使用共享令牌 `X-Device-Token` 鉴权，
+其余（状态、设置、令牌读取与轮换）供控制台使用，不需要令牌。设备端的完整对接说明见
+[DEVICE-API.md](DEVICE-API.md)。
+
+### `GET /api/device/status`
+
+返回设备与控制台共享的状态汇总。**不需要令牌**，控制台直接读取，设备也可用它确认
+服务端认定的刷新间隔与屏幕版本。
+
+```json
+{
+  "data": {
+    "paired": true,
+    "name": "书桌墨窗",
+    "tokenPreview": "7f3a...c153",
+    "lastSeenAt": "2026-10-18T03:40:12.480Z",
+    "firmware": "0.1.0",
+    "batteryPercent": 87,
+    "batteryVoltage": 4.06,
+    "rssi": -56,
+    "indoorTemperature": 24.3,
+    "indoorHumidity": 46.8,
+    "screenVersion": "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2",
+    "refreshMinutes": 30,
+    "layoutUpdatedAt": "2026-10-15T09:12:44.000Z",
+    "serverTime": "2026-10-18T03:40:15.002Z"
+  }
+}
+```
+
+| 字段 | 类型 | 可空 | 说明 |
+| --- | --- | --- | --- |
+| `paired` | boolean | 否 | 是否收到过设备遥测（`lastSeenAt` 非空即为 `true`） |
+| `name` | string | 否 | 设备名，默认「InkPane 墨窗」 |
+| `tokenPreview` | string | 否 | 令牌脱敏预览：前 4 位 + `...` + 后 4 位 |
+| `lastSeenAt` | string | 是 | 最后一次遥测时间；从未上报为 `null` |
+| `firmware` | string | 是 | 最后一次上报的固件版本 |
+| `batteryPercent` / `batteryVoltage` / `rssi` | number | 是 | 最后一次上报的电量与信号 |
+| `indoorTemperature` / `indoorHumidity` | number | 是 | 最后一次上报的室内温湿度 |
+| `screenVersion` | string | 否 | 当前屏幕数据哈希（等同 ETag 去引号） |
+| `refreshMinutes` | integer | 否 | 刷新间隔（分钟） |
+| `layoutUpdatedAt` | string | 否 | 布局最后修改时间 |
+| `serverTime` | string | 否 | 服务端当前时间 |
+
+### `PUT /api/device/settings`
+
+| 字段 | 类型 | 必填 | 校验 |
+| --- | --- | --- | --- |
+| `name` | string | 否 | 1–40 字符 |
+| `refreshMinutes` | integer | 否 | 5–720 |
+
+至少提供一个字段，返回更新后的 `status` 数据。**不需要令牌**（控制台使用）。
+
+### `GET /api/device/token` / `POST /api/device/token`
+
+- `GET`：读取当前令牌；从未生成时生成一个并持久化，重复调用返回同一值。
+- `POST`：轮换令牌。**旧令牌立即失效**，正在使用旧令牌的设备下一次请求即 `401`。
+
+```json
+{ "data": { "token": "7f3a9c2e5b8d4a61c0f9e2d7b4a8c153" } }
+```
+
+两个接口都不需要鉴权（否则轮换后将无法取回新令牌），但只应暴露在可信局域网内。
+
+### `GET /api/device/screen`
+
+设备拉屏接口，需要 `X-Device-Token`。
+
+- 支持 `If-None-Match: <上次的 ETag>`，内容未变时返回 `304`（无响应体，`ETag` 照常返回）；
+- `200` 响应头带 `ETag`（40 位 sha1，带双引号）与 `Cache-Control: no-cache`；
+- ETag 只对数据内容做哈希，**不含** `generatedAt`、`now.time`、`now.iso`，因此分钟变化
+  不会触发重绘。
+
+响应体顶层字段：`generatedAt`（不参与 ETag）、`timezone`、`etag`（含双引号，可直接作为
+`If-None-Match` 的值）、`screen`（宽高、`refreshMinutes`、`layout`）、`now`
+（`iso` / `time` / `weekday` / `date` / `dateLabel`）、`month`（`year` / `month` /
+`firstWeekday` / `daysInMonth` / `today` / `marks`）、`weather`（`WeatherSnapshot` 或
+`null`）、`events`、`courses`、`todos`。完整字段说明、ETag 计算范围与完整示例见
+[DEVICE-API.md](DEVICE-API.md) 第 6.2、7 节。
+
+### `POST /api/device/telemetry`
+
+上报设备侧采集的温湿度、电量与信号，需要 `X-Device-Token` 与
+`Content-Type: application/json`。全部字段可选：
+
+| 字段 | 类型 | 范围 / 单位 |
+| --- | --- | --- |
+| `temperature` | number | °C |
+| `humidity` | number | % |
+| `batteryVoltage` | number | V |
+| `batteryPercent` | integer | 0–100 |
+| `rssi` | integer | -120–0（dBm） |
+| `firmware` | string | 1–64 字符 |
+| `uptimeSeconds` | integer | ≥0 |
+
+未提供的字段保留上一次上报的值，`lastSeenAt` 每次都会刷新。
+
+```json
+{ "temperature": 24.3, "humidity": 46.8, "batteryPercent": 87, "batteryVoltage": 4.06, "rssi": -56, "firmware": "0.1.0", "uptimeSeconds": 182 }
+```
+
+```json
+{ "data": { "receivedAt": "2026-10-18T03:40:12.480Z" } }
+```
+
+`200` 返回 `receivedAt`；字段超范围返回 `422 VALIDATION_FAILED`；令牌无效返回 `401`。
+

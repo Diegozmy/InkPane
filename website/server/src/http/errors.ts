@@ -5,6 +5,7 @@ export type ErrorCode =
   | 'VALIDATION_FAILED'
   | 'NOT_FOUND'
   | 'CONFLICT'
+  | 'UNAUTHORIZED'
   | 'INTERNAL_ERROR'
   | 'PAYLOAD_TOO_LARGE';
 
@@ -52,6 +53,13 @@ export class NotFoundError extends AppError {
 export class ConflictError extends AppError {
   constructor(message = '资源冲突', details?: unknown) {
     super(message, 409, 'CONFLICT', { details });
+  }
+}
+
+/** 设备令牌校验失败：只有设备自身需要，普通管理接口不使用。 */
+export class UnauthorizedError extends AppError {
+  constructor(message = '未授权') {
+    super(message, 401, 'UNAUTHORIZED');
   }
 }
 

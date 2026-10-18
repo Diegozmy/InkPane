@@ -24,6 +24,7 @@ export interface CalendarToolbarProps {
   onToday: () => void;
   onCreate: () => void;
   onOpenFilters: () => void;
+  onOpenAgenda: () => void;
   /** 供全局快捷键 `/` 聚焦搜索框 */
   searchRef?: RefObject<HTMLInputElement>;
 }
@@ -40,6 +41,7 @@ export function CalendarToolbar({
   onToday,
   onCreate,
   onOpenFilters,
+  onOpenAgenda,
   searchRef,
 }: CalendarToolbarProps): ReactElement {
   const localRef = useRef<HTMLInputElement>(null);
@@ -100,6 +102,10 @@ export function CalendarToolbar({
             ariaLabel="切换日历视图"
           />
         </div>
+
+        <Button variant="ghost" leadingIcon="list-bullets" onClick={onOpenAgenda}>
+          列表
+        </Button>
 
         <Button variant="primary" leadingIcon="plus" onClick={onCreate}>
           新建

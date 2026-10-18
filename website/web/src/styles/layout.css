@@ -22,11 +22,11 @@
   display: flex;
   align-items: center;
   gap: var(--space-4);
-  height: 68px;
-  padding: 0 var(--space-5);
+  height: 76px;
+  padding: 0 var(--page-pad-x);
   border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--bg-surface) 88%, transparent);
-  backdrop-filter: blur(12px) saturate(160%);
+  background: color-mix(in srgb, var(--bg-surface) 90%, transparent);
+  backdrop-filter: blur(14px) saturate(150%);
 }
 
 @supports not (backdrop-filter: blur(4px)) {
@@ -38,7 +38,7 @@
 .brand {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-3);
   flex: none;
   color: var(--text-strong);
   text-decoration: none;
@@ -52,9 +52,9 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: var(--radius-control);
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
   background: var(--accent);
   color: var(--on-accent);
 }
@@ -62,39 +62,44 @@
 .brand__text {
   display: flex;
   flex-direction: column;
-  line-height: 1.15;
+  gap: 2px;
+  line-height: 1.2;
 }
 
 .brand__name {
   font-size: var(--text-md);
-  font-weight: 700;
+  font-weight: 650;
   letter-spacing: -0.01em;
 }
 
 .brand__sub {
   font-size: 11px;
+  letter-spacing: 0.04em;
   color: var(--text-faint);
 }
 
 .topbar__nav {
   display: flex;
   align-items: center;
-  gap: var(--space-1);
-  margin-left: var(--space-2);
+  gap: 2px;
+  margin-left: var(--space-5);
 }
 
 .topbar__link {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  height: 38px;
-  padding: 0 var(--space-4);
+  height: 42px;
+  padding: 0 var(--space-3);
   border-radius: var(--radius-control);
   color: var(--text-muted);
   font-size: var(--text-base);
   font-weight: 500;
   text-decoration: none;
   white-space: nowrap;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
 }
 
 .topbar__link:hover {
@@ -116,15 +121,37 @@
 .topbar__actions {
   display: flex;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--space-2);
+}
+
+.topbar__filter {
+  position: relative;
+}
+
+.topbar__badge {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
 }
 
 .connection-dot {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-1);
-  height: 24px;
-  padding: 0 var(--space-2);
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
   border-radius: var(--radius-pill);
   font-size: var(--text-xs);
   font-weight: 600;
@@ -140,17 +167,30 @@
   color: var(--danger);
 }
 
+/* 桌面端侧栏常驻，不再需要抽屉入口 */
+@media (min-width: 1180px) {
+  .topbar__menu {
+    display: none;
+  }
+}
+
 /* 小屏隐藏次要导航文字，改为底部标签栏 */
 @media (max-width: 900px) {
   .topbar {
-    height: 60px;
+    height: 64px;
     padding: 0 var(--space-4);
+    gap: var(--space-3);
   }
 
   .topbar__nav,
   .brand__sub,
   .connection-dot__text {
     display: none;
+  }
+
+  .brand__mark {
+    width: 34px;
+    height: 34px;
   }
 }
 
@@ -164,8 +204,12 @@
 
 @media (min-width: 1180px) {
   .app-body {
-    grid-template-columns: 322px minmax(0, 1fr);
+    grid-template-columns: 304px minmax(0, 1fr);
   }
+}
+
+.app-body--plain {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .sidebar {
@@ -173,7 +217,7 @@
   flex-direction: column;
   gap: var(--space-6);
   min-height: 0;
-  padding: var(--space-5);
+  padding: var(--space-5) var(--space-5) var(--space-6);
   border-right: 1px solid var(--border);
   background: var(--bg-surface);
   overflow-y: auto;
@@ -203,17 +247,17 @@
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  padding: var(--space-5);
-  gap: var(--space-4);
+  padding: var(--page-pad-y) var(--page-pad-x) var(--space-7);
+  gap: var(--space-5);
   /* 设置页这类长内容在主区域内滚动，页面本身不滚动 */
   overflow-y: auto;
+  scroll-behavior: smooth;
 }
 
 @media (max-width: 640px) {
   .main {
-    padding: var(--space-4) var(--space-3);
-    padding-bottom: 92px;
-    gap: var(--space-3);
+    padding: var(--space-4) var(--space-4) 104px;
+    gap: var(--space-4);
   }
 }
 
@@ -230,7 +274,7 @@
   position: fixed;
   inset: 0;
   z-index: var(--z-modal);
-  background: rgba(9, 12, 16, 0.48);
+  background: rgba(20, 18, 14, 0.48);
   animation: fade-in var(--motion-base) var(--ease-standard);
 }
 
@@ -249,7 +293,7 @@
   bottom: 0;
   left: 0;
   z-index: var(--z-modal);
-  width: min(360px, 90vw);
+  width: min(360px, 92vw);
   display: flex;
   flex-direction: column;
   gap: var(--space-6);
@@ -307,12 +351,12 @@
   bottom: 0;
   z-index: var(--z-sticky);
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   align-items: stretch;
   padding: var(--space-1) var(--space-2) calc(var(--space-1) + env(safe-area-inset-bottom));
   border-top: 1px solid var(--border);
   background: color-mix(in srgb, var(--bg-surface) 94%, transparent);
-  backdrop-filter: blur(12px);
+  backdrop-filter: blur(14px);
 }
 
 @media (min-width: 901px) {
@@ -326,13 +370,13 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 3px;
-  height: 60px;
+  gap: 4px;
+  height: 62px;
   border: none;
   border-radius: var(--radius-control);
   background: transparent;
   color: var(--text-muted);
-  font-size: var(--text-xs);
+  font-size: 11px;
   text-decoration: none;
   cursor: pointer;
 }

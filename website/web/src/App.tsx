@@ -9,7 +9,11 @@ import { useTheme } from '@/hooks/use-theme';
 import { AgendaPage } from '@/views/AgendaPage';
 import { CalendarPage } from '@/views/CalendarPage';
 import { CourseSyncPage } from '@/views/CourseSyncPage';
+import { DashboardPage } from '@/views/DashboardPage';
+import { DevicePage } from '@/views/DevicePage';
 import { SettingsPage } from '@/views/SettingsPage';
+import { TodosPage } from '@/views/TodosPage';
+import { WeatherPage } from '@/views/WeatherPage';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -34,13 +38,17 @@ function AppRuntime() {
   return (
     <>
       <Routes>
-        <Route path="/" element={<Navigate to="/calendar/month" replace />} />
+        <Route path="/" element={<Navigate to="/today" replace />} />
+        <Route path="/today" element={<DashboardPage />} />
         <Route path="/calendar" element={<Navigate to="/calendar/month" replace />} />
         <Route path="/calendar/:view" element={<CalendarPage />} />
         <Route path="/agenda" element={<AgendaPage />} />
+        <Route path="/todos" element={<TodosPage />} />
+        <Route path="/weather" element={<WeatherPage />} />
+        <Route path="/device" element={<DevicePage />} />
         <Route path="/courses" element={<CourseSyncPage />} />
         <Route path="/settings" element={<SettingsPage />} />
-        <Route path="*" element={<Navigate to="/calendar/month" replace />} />
+        <Route path="*" element={<Navigate to="/today" replace />} />
       </Routes>
 
       {/* 全局浮层：日程编辑、详情面板与轻提示 */}

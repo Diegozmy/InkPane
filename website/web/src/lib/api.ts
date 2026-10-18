@@ -9,6 +9,11 @@ import type {
   CourseSyncStatus,
   CourseImportResult,
   CredentialsSummary,
+  DeviceScreenPayload,
+  DeviceSettingsPayload,
+  DeviceStatus,
+  DisplayConfig,
+  DisplayLayout,
   EventPayload,
   Filters,
   HealthInfo,
@@ -20,6 +25,12 @@ import type {
   ReminderItem,
   StatsSummary,
   SyncNowResult,
+  Todo,
+  TodoMeta,
+  TodoPayload,
+  WeatherSearchResult,
+  WeatherSettings,
+  WeatherSnapshot,
 } from '@/types';
 
 const API_BASE = (import.meta.env.VITE_API_BASE ?? '/api').replace(/\/$/, '');
@@ -226,4 +237,41 @@ export const api = {
   importCourses: (payload: { username?: string; password?: string } = {}) =>
     request<CourseImportResult>('/courses/import', { method: 'POST', body: payload }),
   syncCoursesNow: () => request<SyncNowResult>('/courses/sync-now', { method: 'POST' }),
+
+  /* ---------------- 待办 ---------------- */
+  listTodos: (query: Record<string, QueryValue>, signal?: AbortSignal) =>
+    requestEnvelope<Todo[]>('/todos', { query, signal }) as Promise<
+      Envelope<Todo[]> & { meta?: TodoMeta }
+    >,
+  createTodo: (payload: TodoPayload) => request<Todo>('/todos', { method: 'POST', body: payload }),
+  updateTodo: (id: number, payload: Partial<TodoPayload> & { done?: boolean }) =>
+    request<Todo>(`/todos/${id}`, { method: 'PATCH', body: payload }),
+  deleteTodo: (id: number) => request<void>(`/todos/${id}`, { method: 'DELETE' }),
+  reorderTodos: (ids: number[]) =>
+    request<Todo[]>('/todos/order', { method: 'PUT', body: { ids } }),
+
+  /* ---------------- 天气 ---------------- */
+  weather: (signal?: AbortSignal) => request<WeatherSnapshot>('/weather', { signal }),
+  refreshWeather: () => request<WeatherSnapshot>('/weather/refresh', { method: 'POST', body: {} }),
+  weatherSettings: (signal?: AbortSignal) => request<WeatherSettings>('/weather/settings', { signal }),
+  updateWeatherSettings: (payload: Partial<WeatherSettings>) =>
+    request<WeatherSettings>('/weather/settings', { method: 'PUT', body: payload }),
+  searchWeather: (q: string, signal?: AbortSignal) =>
+    requestEnvelope<{ results: WeatherSearchResult[] }>('/weather/search', {
+      query: { q },
+      signal,
+    }) as Promise<Envelope<{ results: WeatherSearchResult[] }> & { meta?: { warning?: string } }>,
+
+  /* ---------------- 屏幕布局与设备 ---------------- */
+  displayConfig: (signal?: AbortSignal) => request<DisplayConfig>('/display', { signal }),
+  updateDisplay: (payload: { layout?: DisplayLayout; refreshMinutes?: number }) =>
+    request<DisplayConfig>('/display', { method: 'PUT', body: payload }),
+  displayScreen: (signal?: AbortSignal) =>
+    request<DeviceScreenPayload>('/display/screen', { signal }),
+  deviceStatus: (signal?: AbortSignal) => request<DeviceStatus>('/device/status', { signal }),
+  updateDeviceSettings: (payload: DeviceSettingsPayload) =>
+    request<DeviceStatus>('/device/settings', { method: 'PUT', body: payload }),
+  deviceToken: (signal?: AbortSignal) => request<{ token: string }>('/device/token', { signal }),
+  rotateDeviceToken: () =>
+    request<{ token: string }>('/device/token', { method: 'POST', body: {} }),
 };

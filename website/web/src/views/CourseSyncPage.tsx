@@ -166,7 +166,7 @@ function PreviewTable({ preview }: { preview: CoursePreview }): ReactElement {
  * ------------------------------------------------------------------ */
 
 export function CourseSyncPage(): ReactElement {
-  const topbar = useShellTopBar();
+  const topbar = useShellTopBar({ showFilters: false });
   const status = useCourseSyncStatus();
   const settingsQuery = useCourseSettings();
   const updateSettings = useUpdateCourseSettings();
@@ -263,10 +263,13 @@ export function CourseSyncPage(): ReactElement {
     <AppShell topbar={topbar} sidebar={sidebar}>
       <div className="page">
         <header className="page__header">
-          <h1 className="page__title">课程同步</h1>
-          <p className="page__subtitle">
-            从学校课程管理系统导入课表，并按你设置的每节课时间生成日程。
-          </p>
+          <div className="page__heading">
+            <p className="page__eyebrow">Courses · 课表同步</p>
+            <h1 className="page__title">课程同步</h1>
+            <p className="page__subtitle">
+              从学校课程管理系统导入课表，并按你设置的每节课时间生成日程；开启自动同步后无需手动刷新。
+            </p>
+          </div>
         </header>
 
         {/* ---------------- 账号 ---------------- */}

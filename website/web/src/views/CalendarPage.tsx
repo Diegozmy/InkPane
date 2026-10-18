@@ -253,7 +253,7 @@ export function CalendarPage(): ReactElement {
         title={title}
         view={view}
         searchValue={filters.q}
-        activeFilterCount={topbar.activeFilterCount}
+        activeFilterCount={topbar.activeFilterCount ?? 0}
         onChangeView={(next) => navigate(`/calendar/${next}?d=${toDateKey(anchor)}`)}
         onChangeSearch={(value) => patchFilters({ q: value })}
         onPrev={goPrev}
@@ -261,6 +261,7 @@ export function CalendarPage(): ReactElement {
         onToday={goToday}
         onCreate={() => createAt(anchor)}
         onOpenFilters={() => setFiltersPanelOpen(true)}
+        onOpenAgenda={() => navigate(`/agenda?d=${toDateKey(anchor)}`)}
         searchRef={searchRef}
       />
 

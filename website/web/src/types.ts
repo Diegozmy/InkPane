@@ -291,3 +291,250 @@ export interface SyncNowResult {
   removed: number;
   total: number;
 }
+
+/* ------------------------------------------------------------------ *
+ * 待办清单
+ * ------------------------------------------------------------------ */
+
+export interface Todo {
+  id: number;
+  title: string;
+  notes: string;
+  done: boolean;
+  priority: Priority;
+  /** YYYY-MM-DD */
+  dueDate: string | null;
+  categoryId: number | null;
+  sortOrder: number;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TodoPayload {
+  title: string;
+  notes?: string;
+  priority?: Priority;
+  dueDate?: string | null;
+  categoryId?: number | null;
+  sortOrder?: number;
+}
+
+export interface TodoMeta {
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/* ------------------------------------------------------------------ *
+ * 天气（Open-Meteo 缓存快照）
+ * ------------------------------------------------------------------ */
+
+export type WeatherIcon =
+  | 'clear'
+  | 'partly-cloudy'
+  | 'cloudy'
+  | 'fog'
+  | 'drizzle'
+  | 'rain'
+  | 'snow'
+  | 'thunderstorm';
+
+export interface WeatherCurrent {
+  temperature: number;
+  apparentTemperature: number;
+  humidity: number;
+  weatherCode: number;
+  condition: string;
+  icon: WeatherIcon;
+  windSpeed: number;
+  isDay: boolean;
+}
+
+export interface WeatherDay {
+  date: string;
+  weekday: string;
+  min: number;
+  max: number;
+  condition: string;
+  icon: WeatherIcon;
+  precipitationProbability: number;
+}
+
+export interface WeatherToday {
+  date: string;
+  min: number;
+  max: number;
+  condition: string;
+  icon: WeatherIcon;
+  precipitationProbability: number;
+}
+
+export interface WeatherSnapshot {
+  provider: 'open-meteo';
+  city: string;
+  latitude: number;
+  longitude: number;
+  observedAt: string;
+  fetchedAt: string;
+  stale: boolean;
+  source: 'open-meteo' | 'cache' | 'fallback';
+  message?: string;
+  current: WeatherCurrent;
+  today: WeatherToday;
+  forecast: WeatherDay[];
+}
+
+export interface WeatherSettings {
+  city: string;
+  latitude: number;
+  longitude: number;
+  enabled: boolean;
+  timezone: string;
+  updatedAt: string;
+}
+
+export interface WeatherSearchResult {
+  name: string;
+  /** Open-Meteo 未提供时为空字符串 */
+  admin1: string;
+  country: string;
+  latitude: number;
+  longitude: number;
+  timezone: string;
+}
+
+/* ------------------------------------------------------------------ *
+ * 电子墨水屏布局
+ * ------------------------------------------------------------------ */
+
+export const DISPLAY_WIDTH = 800;
+export const DISPLAY_HEIGHT = 480;
+
+export type DisplayModuleId = 'clock' | 'calendar' | 'weather' | 'schedule' | 'courses' | 'todos';
+
+export interface DisplayRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface DisplayModule extends DisplayRect {
+  id: DisplayModuleId;
+  enabled: boolean;
+}
+
+export interface DisplayLayout {
+  width: number;
+  height: number;
+  updatedAt: string;
+  modules: DisplayModule[];
+}
+
+export interface DisplayModuleMeta {
+  id: DisplayModuleId;
+  name: string;
+  description: string;
+  defaultRect: DisplayRect;
+}
+
+export interface DisplayConfig {
+  layout: DisplayLayout;
+  refreshMinutes: number;
+  modules: DisplayModuleMeta[];
+  width: number;
+  height: number;
+}
+
+/* ------------------------------------------------------------------ *
+ * 设备对接
+ * ------------------------------------------------------------------ */
+
+export interface DeviceEvent {
+  id: string;
+  eventId: number;
+  occurrenceKey: string;
+  title: string;
+  location: string;
+  startAt: string;
+  endAt: string;
+  allDay: boolean;
+  categoryId: number | null;
+  color: string | null;
+  priority: Priority;
+  isCourse: boolean;
+}
+
+export interface DeviceTodo {
+  id: number;
+  title: string;
+  priority: Priority;
+  dueDate: string | null;
+}
+
+export interface DeviceMonth {
+  year: number;
+  month: number;
+  /** 0 = 周日 */
+  firstWeekday: number;
+  daysInMonth: number;
+  today: number;
+  marks: number[];
+}
+
+export interface DeviceScreenPayload {
+  generatedAt: string;
+  timezone: string;
+  etag: string;
+  screen: {
+    width: number;
+    height: number;
+    refreshMinutes: number;
+    layout: DisplayLayout;
+  };
+  now: {
+    iso: string;
+    time: string;
+    weekday: string;
+    date: string;
+    dateLabel: string;
+  };
+  month: DeviceMonth;
+  weather: WeatherSnapshot | null;
+  events: DeviceEvent[];
+  courses: DeviceEvent[];
+  todos: DeviceTodo[];
+}
+
+export interface DeviceStatus {
+  paired: boolean;
+  name: string;
+  tokenPreview: string;
+  lastSeenAt: string | null;
+  firmware: string | null;
+  batteryPercent: number | null;
+  batteryVoltage: number | null;
+  rssi: number | null;
+  indoorTemperature: number | null;
+  indoorHumidity: number | null;
+  screenVersion: string;
+  refreshMinutes: number;
+  layoutUpdatedAt: string;
+  serverTime: string;
+}
+
+export interface DeviceSettingsPayload {
+  name?: string;
+  refreshMinutes?: number;
+}
+
+export interface DeviceTelemetryPayload {
+  temperature?: number;
+  humidity?: number;
+  batteryVoltage?: number;
+  batteryPercent?: number;
+  rssi?: number;
+  firmware?: string;
+  uptimeSeconds?: number;
+}

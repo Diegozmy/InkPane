@@ -1,18 +1,28 @@
 /** 顶栏：品牌、主导航、连接状态与主题切换。 */
 
 import type { ReactElement } from 'react';
-import { NavLink } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router-dom';
 import { cn } from '@/lib/cn';
-import { Icon } from '@/components/ui/icon';
+import { Icon, type IconName } from '@/components/ui/icon';
 import { IconButton, Menu } from '@/components/ui';
 import type { ThemeMode } from '@/store/ui-store';
 import type { HealthInfo } from '@/types';
 
-const NAV_ITEMS = [
-  { to: '/calendar/month', label: '日历', icon: 'calendar-dots' as const, match: '/calendar' },
-  { to: '/agenda', label: '列表', icon: 'list-bullets' as const, match: '/agenda' },
-  { to: '/courses', label: '课程', icon: 'book' as const, match: '/courses' },
-  { to: '/settings', label: '设置', icon: 'settings' as const, match: '/settings' },
+interface NavItem {
+  to: string;
+  label: string;
+  icon: IconName;
+  match: string;
+}
+
+const NAV_ITEMS: readonly NavItem[] = [
+  { to: '/today', label: '总览', icon: 'house', match: '/today' },
+  { to: '/calendar/month', label: '日历', icon: 'calendar-dots', match: '/calendar' },
+  { to: '/todos', label: '待办', icon: 'check-square', match: '/todos' },
+  { to: '/weather', label: '天气', icon: 'cloud-sun', match: '/weather' },
+  { to: '/device', label: '设备', icon: 'device', match: '/device' },
+  { to: '/courses', label: '课程', icon: 'book', match: '/courses' },
+  { to: '/settings', label: '设置', icon: 'settings', match: '/settings' },
 ];
 
 const THEME_LABELS: Record<ThemeMode, string> = {
@@ -26,9 +36,12 @@ export interface TopBarProps {
   isOffline: boolean;
   theme: ThemeMode;
   onChangeTheme: (mode: ThemeMode) => void;
-  onOpenSidebar: () => void;
-  onOpenFilters: () => void;
-  activeFilterCount: number;
+  /** 未提供时不渲染侧栏开关（页面没有侧栏时） */
+  onOpenSidebar?: () => void;
+  /** 未提供时不渲染筛选按钮（非日历页） */
+  onOpenFilters?: () => void;
+  activeFilterCount?: number;
+  showFilters?: boolean;
 }
 
 export function TopBar({
@@ -38,53 +51,65 @@ export function TopBar({
   onChangeTheme,
   onOpenSidebar,
   onOpenFilters,
-  activeFilterCount,
+  activeFilterCount = 0,
+  showFilters = true,
 }: TopBarProps): ReactElement {
+  const { pathname } = useLocation();
+
   return (
     <header className="topbar">
-      <button
-        type="button"
-        className="btn btn--icon btn--ghost topbar__menu"
-        aria-label="打开侧栏"
-        onClick={onOpenSidebar}
-      >
-        <Icon name="sidebar" size={18} />
-      </button>
+      {onOpenSidebar && (
+        <button
+          type="button"
+          className="btn btn--icon btn--ghost topbar__menu"
+          aria-label="打开侧栏"
+          onClick={onOpenSidebar}
+        >
+          <Icon name="sidebar" size={18} />
+        </button>
+      )}
 
-      <NavLink to="/calendar/month" className="brand">
+      <NavLink to="/today" className="brand">
         <span className="brand__mark" aria-hidden="true">
-          <Icon name="calendar-dots" size={18} weight="fill" />
+          <Icon name="grid" size={18} weight="fill" />
         </span>
         <span className="brand__text">
-          <span className="brand__name">InkPane 日程</span>
-          <span className="brand__sub">月 · 周 · 日 · 列表</span>
+          <span className="brand__name">InkPane 墨窗</span>
+          <span className="brand__sub">桌面信息窗 · 控制台</span>
         </span>
       </NavLink>
 
       <nav className="topbar__nav" aria-label="主导航">
-        {NAV_ITEMS.map((item) => (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            className={({ isActive }) => cn('topbar__link', isActive && 'is-active')}
-          >
-            <Icon name={item.icon} size={15} />
-            {item.label}
-          </NavLink>
-        ))}
+        {NAV_ITEMS.map((item) => {
+          const active =
+            item.match === '/calendar' ? pathname.startsWith('/calendar') : pathname === item.to;
+          return (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              className={cn('topbar__link', active && 'is-active')}
+            >
+              <Icon name={item.icon} size={15} />
+              <span className="topbar__link-text">{item.label}</span>
+            </NavLink>
+          );
+        })}
       </nav>
 
       <div className="topbar__spacer" />
 
       <div className="topbar__actions">
-        <button
-          type="button"
-          className="btn btn--icon btn--ghost topbar__filter"
-          aria-label={activeFilterCount > 0 ? `筛选（已启用 ${activeFilterCount} 项）` : '筛选'}
-          onClick={onOpenFilters}
-        >
-          <Icon name="filter" size={18} />
-        </button>
+        {showFilters && onOpenFilters && (
+          <button
+            type="button"
+            className="btn btn--icon btn--ghost topbar__filter"
+            aria-label={activeFilterCount > 0 ? `筛选（已启用 ${activeFilterCount} 项）` : '筛选'}
+            onClick={onOpenFilters}
+          >
+            <Icon name="filter" size={18} />
+            {activeFilterCount > 0 && <span className="topbar__badge numeric">{activeFilterCount}</span>}
+          </button>
+        )}
 
         <span
           className={cn('connection-dot', isOffline ? 'connection-dot--offline' : 'connection-dot--online')}
