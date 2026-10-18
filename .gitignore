@@ -1,0 +1,48 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+build/
+*.tsbuildinfo
+
+# 运行时数据（SQLite 数据库与 WAL 文件）
+data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# 环境变量与密钥
+.env
+.env.local
+.env.*.local
+!.env.example
+*.pem
+*.key
+
+# 日志
+logs/
+*.log
+npm-debug.log*
+
+# 编辑器与系统
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# ESP-IDF / 固件构建产物
+hardware/build/
+hardware/sdkconfig
+hardware/sdkconfig.old
+hardware/dependencies.lock
+managed_components/
+*.bin.tmp
+
+# 临时文件
+tmp/
+temp/
+*.bak

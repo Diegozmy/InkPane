@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#14161a" media="(prefers-color-scheme: dark)" />
+    <meta
+      name="description"
+      content="InkPane 日程：月、周、日与列表四种视图，支持重复日程、分类标签、拖拽改期与到点提醒。"
+    />
+    <title>InkPane 日程</title>
+    <script>
+      // 在首屏渲染前应用主题，避免暗色模式出现白屏闪烁
+      (function () {
+        try {
+          var stored = localStorage.getItem('inkpane.theme');
+          var mode = stored === 'light' || stored === 'dark' ? stored : null;
+          var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+          var resolved = mode || (prefersDark ? 'dark' : 'light');
+          document.documentElement.dataset.theme = resolved;
+          document.documentElement.style.colorScheme = resolved;
+        } catch (error) {
+          document.documentElement.dataset.theme = 'light';
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>InkPane 日程需要启用 JavaScript 才能运行。</noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

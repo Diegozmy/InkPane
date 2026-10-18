@@ -1,0 +1,920 @@
+/* 日历视图：工具栏、月网格、时间网格、列表视图与事件块。 */
+
+/* ============================== 工具栏 ============================== */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  padding: var(--space-2) 0 var(--space-3);
+}
+
+.toolbar__group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.toolbar__group--end {
+  margin-left: auto;
+}
+
+.toolbar__nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg-surface);
+}
+
+.toolbar__title {
+  font-size: var(--text-xl);
+  font-weight: 650;
+  letter-spacing: -0.015em;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .toolbar {
+    gap: var(--space-3);
+  }
+
+  .toolbar__title {
+    font-size: var(--text-lg);
+  }
+
+  .toolbar__group--end {
+    width: 100%;
+    margin-left: 0;
+    justify-content: space-between;
+  }
+}
+
+.search-field {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.search-field__icon {
+  position: absolute;
+  left: var(--space-4);
+  color: var(--text-faint);
+  pointer-events: none;
+}
+
+.search-field .input {
+  padding-left: var(--space-8);
+  padding-right: var(--space-8);
+  width: 260px;
+}
+
+.search-field__clear {
+  position: absolute;
+  right: var(--space-3);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.search-field__clear:hover {
+  background: var(--bg-hover);
+  color: var(--text-strong);
+}
+
+@media (max-width: 900px) {
+  .search-field {
+    flex: 1;
+  }
+
+  .search-field .input {
+    width: 100%;
+  }
+}
+
+/* ============================== 事件块（通用） ============================== */
+
+.event-chip,
+.event-block {
+  --event-bg: var(--bg-subtle);
+  --event-fg: var(--text);
+  --event-accent: var(--text-faint);
+  --event-border: var(--border);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--event-border);
+  border-left: 3px solid var(--event-accent);
+  border-radius: var(--radius-control);
+  background: var(--event-bg);
+  color: var(--event-fg);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard),
+    transform var(--motion-fast) var(--ease-standard);
+}
+
+.event-chip:not(.is-static):hover,
+.event-block:not(.is-static):hover {
+  box-shadow: var(--shadow-sm);
+  filter: saturate(1.08);
+}
+
+.event-chip.is-selected,
+.event-block.is-selected {
+  outline: 2px solid var(--event-accent);
+  outline-offset: 1px;
+}
+
+.event-chip.is-dragging,
+.event-block.is-dragging {
+  opacity: 0.45;
+}
+
+.event-chip.is-past,
+.event-block.is-past {
+  opacity: 0.66;
+}
+
+.event-chip.is-cancelled,
+.event-block.is-cancelled {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+.event-chip__time,
+.event-block__time {
+  flex: none;
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.event-chip__title,
+.event-block__title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.event-chip__dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: var(--radius-pill);
+  background: var(--event-accent);
+}
+
+.event-chip__icons {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+  opacity: 0.75;
+}
+
+/* ============================== 月视图 ============================== */
+
+.month {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  border: 1px solid var(--grid-line-strong);
+  border-radius: var(--radius-surface);
+  background: var(--bg-surface);
+  /* 视口偏矮时允许月网格纵向滚动，而不是把事件硬压扁 */
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.month__weekdays {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  border-bottom: 1px solid var(--grid-line-strong);
+  background: var(--bg-subtle);
+}
+
+.month__weekday {
+  padding: var(--space-4) var(--space-3);
+  font-size: var(--text-base);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.month__weekday.is-weekend {
+  color: var(--text-faint);
+}
+
+.month__grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  /* 168px 是「3 条事件 + 日期」舒适呈现所需的高度 */
+  grid-auto-rows: minmax(168px, 1fr);
+  background: var(--grid-line);
+  gap: 1px;
+}
+
+/*
+ * 矮视口下逐级降低行高，优先保证整个月能一屏看完。
+ * 组件会实测单元格高度自动决定显示几条 + 「还有 N 项」，因此这里的档位不需要同步改 JS。
+ */
+@media (max-height: 1200px) {
+  .month__grid {
+    grid-auto-rows: minmax(152px, 1fr);
+  }
+}
+
+@media (max-height: 1000px) {
+  .month__grid {
+    grid-auto-rows: minmax(132px, 1fr);
+  }
+}
+
+@media (max-height: 860px) {
+  .month__grid {
+    grid-auto-rows: minmax(116px, 1fr);
+  }
+}
+
+.month__cell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-3);
+  background: var(--bg-surface);
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.month__cell.is-weekend {
+  background: linear-gradient(var(--weekend-tint), var(--weekend-tint)), var(--bg-surface);
+}
+
+.month__cell.is-outside {
+  background: linear-gradient(var(--outside-month-tint), var(--outside-month-tint)), var(--bg-canvas);
+}
+
+.month__cell.is-outside .month__daynum {
+  color: var(--text-faint);
+}
+
+.month__cell.is-drop-target {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.month__cell-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.month__daynum {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-base);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-strong);
+}
+
+.month__cell.is-today .month__daynum {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.month__count {
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+}
+
+.month__events {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.month__more {
+  align-self: flex-start;
+  padding: 2px var(--space-3);
+  border: none;
+  border-radius: var(--radius-control);
+  background: var(--bg-subtle);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.month__more:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.month__more:hover {
+  background: var(--bg-hover);
+  color: var(--text-strong);
+}
+
+.month__day-hint {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  padding: 2px var(--space-2);
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--ease-standard);
+}
+
+.month__cell:hover .month__day-hint {
+  opacity: 1;
+}
+
+.event-chip--month {
+  height: 28px;
+  padding: 0 var(--space-3) 0 var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.event-chip--month .event-chip__time {
+  font-size: var(--text-xs);
+}
+
+/* 移动端月视图：只显示色点，靠点选日期进入日视图查看详情 */
+@media (max-width: 640px) {
+  .month__grid {
+    grid-auto-rows: minmax(88px, 1fr);
+  }
+
+  .month__cell {
+    padding: var(--space-2);
+  }
+
+  .month__daynum {
+    min-width: 26px;
+    height: 26px;
+    font-size: var(--text-sm);
+  }
+
+  .event-chip--month {
+    height: 22px;
+    padding: 0 var(--space-2);
+    border-left-width: 4px;
+  }
+
+  .event-chip--month .event-chip__time,
+  .event-chip--month .event-chip__title {
+    display: none;
+  }
+
+  .month__count {
+    display: none;
+  }
+
+  .month__weekday {
+    padding: var(--space-3) var(--space-2);
+    font-size: var(--text-sm);
+  }
+}
+
+/* ============================== 时间网格（周 / 日） ============================== */
+
+.timegrid {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--grid-line-strong);
+  border-radius: var(--radius-surface);
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+
+.timegrid__head {
+  display: grid;
+  grid-template-columns: var(--time-gutter-width) repeat(var(--day-count, 7), minmax(0, 1fr));
+  border-bottom: 1px solid var(--grid-line-strong);
+  background: var(--bg-subtle);
+  /* 与可滚动的时间轴本体保持同宽，否则表头会和列错位一个滚动条的宽度 */
+  padding-right: var(--scrollbar-gutter, 0px);
+}
+
+.timegrid__day-head {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-2);
+  border-left: 1px solid var(--grid-line);
+  cursor: pointer;
+}
+
+.timegrid__day-head:hover {
+  background: var(--bg-hover);
+}
+
+.timegrid__day-head.is-today .timegrid__daynum {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.timegrid__day-head.is-weekend {
+  background: linear-gradient(var(--weekend-tint), var(--weekend-tint));
+}
+
+.timegrid__weekday {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.timegrid__daynum {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  height: 36px;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-strong);
+}
+
+.timegrid__allday {
+  display: grid;
+  grid-template-columns: var(--time-gutter-width) repeat(var(--day-count, 7), minmax(0, 1fr));
+  border-bottom: 1px solid var(--grid-line-strong);
+  background: var(--bg-surface);
+  max-height: 132px;
+  overflow-y: auto;
+  padding-right: var(--scrollbar-gutter, 0px);
+  /* 全天条数量多时允许滚动，但隐藏滚动条以保证与其它行严格对齐 */
+  scrollbar-width: none;
+}
+
+.timegrid__allday::-webkit-scrollbar {
+  display: none;
+}
+
+.timegrid__allday-label {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  border-right: 1px solid var(--grid-line);
+}
+
+.timegrid__allday-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  min-height: 40px;
+  border-left: 1px solid var(--grid-line);
+}
+
+.timegrid__body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: var(--time-gutter-width) minmax(0, 1fr);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.timegrid__gutter-col {
+  border-right: 1px solid var(--grid-line);
+}
+
+.timegrid__hour-label {
+  height: var(--hour-height);
+  padding-top: 5px;
+  padding-right: var(--space-3);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+  text-align: right;
+}
+
+.timegrid__cols {
+  display: grid;
+  grid-template-columns: repeat(var(--day-count, 7), minmax(0, 1fr));
+}
+
+.timegrid__col {
+  position: relative;
+  border-left: 1px solid var(--grid-line);
+}
+
+.timegrid__col.is-weekend {
+  background: linear-gradient(var(--weekend-tint), var(--weekend-tint));
+}
+
+.timegrid__col.is-today {
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+
+.timegrid__lines {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.timegrid__line {
+  height: var(--hour-height);
+  border-bottom: 1px solid var(--grid-line);
+}
+
+.timegrid__line.is-half {
+  border-bottom-style: dashed;
+  border-bottom-color: var(--grid-line);
+  opacity: 0.6;
+}
+
+.timegrid__events {
+  position: absolute;
+  inset: 0;
+}
+
+.timegrid__now {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 2px solid var(--now-line);
+  pointer-events: none;
+  z-index: 3;
+}
+
+.timegrid__now::before {
+  content: '';
+  position: absolute;
+  left: -4px;
+  top: -4px;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--now-line);
+}
+
+.timegrid__preview {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  border: 1px dashed var(--accent);
+  border-radius: var(--radius-control);
+  background: var(--accent-soft);
+  pointer-events: none;
+  z-index: 4;
+  display: flex;
+  align-items: flex-start;
+  padding: var(--space-1) var(--space-3);
+}
+
+.timegrid__preview-label {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.timegrid__hint {
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--grid-line);
+  background: var(--bg-subtle);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+.event-block {
+  position: absolute;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  overflow: hidden;
+  /* 位置由内联 CSS 变量驱动，避免 React 重排时抖动 */
+  top: var(--block-top);
+  height: var(--block-height);
+  left: var(--block-left);
+  width: var(--block-width);
+}
+
+.event-block__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.event-block__time {
+  font-size: var(--text-sm);
+}
+
+.event-block__title {
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+.event-block--compact {
+  padding: 3px var(--space-3);
+}
+
+.event-block--compact .event-block__time {
+  display: none;
+}
+
+.event-block__resize {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 10px;
+  cursor: ns-resize;
+}
+
+.event-block__resize::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: 3px;
+  width: 22px;
+  height: 2px;
+  transform: translateX(-50%);
+  border-radius: var(--radius-pill);
+  background: var(--event-accent);
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--ease-standard);
+}
+
+.event-block:hover .event-block__resize::after {
+  opacity: 0.7;
+}
+
+/* ============================== 列表（议程）视图 ============================== */
+
+.agenda {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.agenda__day {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.agenda__head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) 0;
+  background: var(--bg-canvas);
+}
+
+.agenda__date {
+  font-size: var(--text-lg);
+  font-weight: 650;
+  color: var(--text-strong);
+}
+
+.agenda__weekday {
+  font-size: var(--text-base);
+  color: var(--text-muted);
+}
+
+.agenda__count {
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.agenda__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.agenda__item {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-4);
+  width: 100%;
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--event-accent, var(--text-faint));
+  border-radius: var(--radius-surface);
+  background: var(--bg-surface);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard),
+    transform var(--motion-fast) var(--ease-standard);
+}
+
+.agenda__item:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-sm);
+}
+
+.agenda__item:active {
+  transform: translateY(1px);
+}
+
+.agenda__item.is-selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.agenda__item.is-cancelled {
+  text-decoration: line-through;
+  opacity: 0.62;
+}
+
+.agenda__time {
+  font-size: var(--text-base);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.agenda__time--allday {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.agenda__body {
+  min-width: 0;
+}
+
+.agenda__title {
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agenda__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-1);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  flex-wrap: wrap;
+}
+
+.agenda__meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.agenda__side {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: none;
+}
+
+@media (max-width: 640px) {
+  .agenda__item {
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: var(--space-3);
+    padding: var(--space-3);
+  }
+
+  .agenda__side {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+  }
+}
+
+/* ============================== 小月历 ============================== */
+
+.mini-month {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.mini-month__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.mini-month__title {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+}
+
+.mini-month__grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 3px;
+}
+
+.mini-month__weekday {
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  text-align: center;
+  padding-bottom: var(--space-1);
+}
+
+.mini-month__day {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.mini-month__day:hover {
+  background: var(--bg-hover);
+  color: var(--text-strong);
+}
+
+.mini-month__day.is-outside {
+  color: var(--text-faint);
+}
+
+.mini-month__day.is-today {
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 700;
+}
+
+.mini-month__day.is-anchor {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.mini-month__dot {
+  position: absolute;
+  bottom: 4px;
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+}
+
+.mini-month__day.is-today .mini-month__dot {
+  background: var(--on-accent);
+}

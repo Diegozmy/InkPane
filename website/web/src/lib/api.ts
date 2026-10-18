@@ -1,0 +1,229 @@
+/** 类型安全的 API 客户端。所有网络错误统一收敛为 ApiError。 */
+
+import type {
+  CalendarEvent,
+  Category,
+  CategoryPayload,
+  CoursePreview,
+  CourseSyncSettings,
+  CourseSyncStatus,
+  CourseImportResult,
+  CredentialsSummary,
+  EventPayload,
+  Filters,
+  HealthInfo,
+  MoveOccurrencePayload,
+  Occurrence,
+  OccurrenceMeta,
+  OccurrenceOverridePayload,
+  PageMeta,
+  ReminderItem,
+  StatsSummary,
+  SyncNowResult,
+} from '@/types';
+
+const API_BASE = (import.meta.env.VITE_API_BASE ?? '/api').replace(/\/$/, '');
+
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly details: unknown;
+
+  constructor(message: string, status: number, code = 'HTTP_ERROR', details?: unknown) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
+
+  /** 网络不可达（后端未启动）时给出可操作的提示。 */
+  get isNetworkError(): boolean {
+    return this.status === 0;
+  }
+
+  get isValidationError(): boolean {
+    return this.code === 'VALIDATION_FAILED';
+  }
+}
+
+export type QueryValue = string | number | boolean | undefined | null | (string | number)[];
+
+export interface RequestOptions {
+  method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
+  body?: unknown;
+  query?: Record<string, QueryValue>;
+  signal?: AbortSignal;
+}
+
+function buildUrl(path: string, query?: Record<string, QueryValue>): string {
+  const search = new URLSearchParams();
+  if (query) {
+    for (const [key, value] of Object.entries(query)) {
+      if (value === undefined || value === null) continue;
+      if (Array.isArray(value)) {
+        if (value.length === 0) continue;
+        search.set(key, value.join(','));
+      } else if (typeof value === 'boolean') {
+        search.set(key, value ? 'true' : 'false');
+      } else {
+        const text = String(value);
+        if (text.length === 0) continue;
+        search.set(key, text);
+      }
+    }
+  }
+  const queryString = search.toString();
+  return `${API_BASE}${path}${queryString ? `?${queryString}` : ''}`;
+}
+
+interface Envelope<T> {
+  data: T;
+  meta?: unknown;
+}
+
+async function requestEnvelope<T>(path: string, options: RequestOptions = {}): Promise<Envelope<T>> {
+  const url = buildUrl(path, options.query);
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (options.body !== undefined) headers['Content-Type'] = 'application/json';
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: options.method ?? 'GET',
+      headers,
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      signal: options.signal,
+      credentials: 'same-origin',
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw error;
+    throw new ApiError(
+      '无法连接后端服务，请确认 API 服务已启动（默认 http://127.0.0.1:4000）',
+      0,
+      'NETWORK_ERROR',
+    );
+  }
+
+  if (response.status === 204) return { data: undefined as T };
+
+  const text = await response.text();
+  let payload: unknown = undefined;
+  if (text.length > 0) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      throw new ApiError('服务端返回了非 JSON 响应', response.status, 'INVALID_RESPONSE');
+    }
+  }
+
+  if (!response.ok) {
+    const errorBody = (payload as { error?: { message?: string; code?: string; details?: unknown } })
+      ?.error;
+    throw new ApiError(
+      errorBody?.message ?? `请求失败（HTTP ${response.status}）`,
+      response.status,
+      errorBody?.code ?? 'HTTP_ERROR',
+      errorBody?.details,
+    );
+  }
+
+  const envelope = payload as Envelope<T> | undefined;
+  return { data: (envelope?.data ?? (undefined as T)), meta: envelope?.meta };
+}
+
+async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const { data } = await requestEnvelope<T>(path, options);
+  return data;
+}
+
+/** 把筛选状态转换成查询参数。 */
+export function filtersToQuery(filters: Filters): Record<string, QueryValue> {
+  return {
+    q: filters.q.trim() || undefined,
+    categoryId: filters.categoryIds,
+    priority: filters.priorities,
+    status: filters.statuses,
+    tag: filters.tags,
+    includeCancelled: filters.includeCancelled ? true : undefined,
+  };
+}
+
+export const api = {
+  health: (signal?: AbortSignal) => request<HealthInfo>('/health', { signal }),
+
+  /* ---------------- 分类 ---------------- */
+  listCategories: (signal?: AbortSignal) => request<Category[]>('/categories', { signal }),
+  createCategory: (payload: CategoryPayload) =>
+    request<Category>('/categories', { method: 'POST', body: payload }),
+  updateCategory: (id: number, payload: Partial<CategoryPayload>) =>
+    request<Category>(`/categories/${id}`, { method: 'PATCH', body: payload }),
+  deleteCategory: (id: number) =>
+    request<{ id: number; detachedEventCount: number }>(`/categories/${id}`, { method: 'DELETE' }),
+  reorderCategories: (ids: number[]) =>
+    request<Category[]>('/categories/order', { method: 'PUT', body: { ids } }),
+
+  /* ---------------- 日程实例 ---------------- */
+  listOccurrences: (query: Record<string, QueryValue>, signal?: AbortSignal) =>
+    requestEnvelope<Occurrence[]>('/occurrences', { query, signal }) as Promise<
+      Envelope<Occurrence[]> & { meta?: OccurrenceMeta }
+    >,
+
+  /* ---------------- 日程主体 ---------------- */
+  listEvents: (query: Record<string, QueryValue>, signal?: AbortSignal) =>
+    requestEnvelope<CalendarEvent[]>('/events', { query, signal }) as Promise<
+      Envelope<CalendarEvent[]> & { meta?: PageMeta }
+    >,
+  createEvent: (payload: EventPayload) =>
+    request<CalendarEvent>('/events', { method: 'POST', body: payload }),
+  getEvent: (id: number) => request<CalendarEvent>(`/events/${id}`),
+  updateEvent: (id: number, payload: Partial<EventPayload>) =>
+    request<CalendarEvent>(`/events/${id}`, { method: 'PATCH', body: payload }),
+  deleteEvent: (id: number) => request<void>(`/events/${id}`, { method: 'DELETE' }),
+
+  /* ---------------- 实例级操作 ---------------- */
+  moveOccurrence: (eventId: number, payload: MoveOccurrencePayload) =>
+    request<{
+      scope: string;
+      event: CalendarEvent | null;
+      createdEventId: number | null;
+    }>(`/events/${eventId}/move`, { method: 'POST', body: payload }),
+
+  cancelOccurrence: (eventId: number, payload: { occurrenceKey: string; scope?: 'single' | 'future' }) =>
+    request<{ scope: string; deleted: boolean }>(`/events/${eventId}/cancel-occurrence`, {
+      method: 'POST',
+      body: payload,
+    }),
+
+  overrideOccurrence: (eventId: number, payload: OccurrenceOverridePayload) =>
+    request<unknown>(`/events/${eventId}/override`, { method: 'PUT', body: payload }),
+
+  resetOverride: (eventId: number, occurrenceKey: string) =>
+    request<{ removed: boolean }>(`/events/${eventId}/override/${encodeURIComponent(occurrenceKey)}`, {
+      method: 'DELETE',
+    }),
+
+  /* ---------------- 统计与提醒 ---------------- */
+  summary: (query: Record<string, QueryValue>, signal?: AbortSignal) =>
+    request<StatsSummary>('/stats/summary', { query, signal }),
+
+  dueReminders: (query: Record<string, QueryValue>, signal?: AbortSignal) =>
+    request<ReminderItem[]>('/reminders/due', { query, signal }),
+
+  /* ---------------- 课程同步 ---------------- */
+  courseStatus: (signal?: AbortSignal) => request<CourseSyncStatus>('/courses/status', { signal }),
+  courseSettings: (signal?: AbortSignal) => request<CourseSyncSettings>('/courses/settings', { signal }),
+  updateCourseSettings: (payload: Partial<CourseSyncSettings>) =>
+    request<CourseSyncSettings>('/courses/settings', { method: 'PATCH', body: payload }),
+  saveCourseCredentials: (payload: { username: string; password: string; remember?: boolean }) =>
+    request<CredentialsSummary>('/courses/credentials', { method: 'PUT', body: payload }),
+  deleteCourseCredentials: () =>
+    request<{ removed: boolean }>('/courses/credentials', { method: 'DELETE' }),
+  testCourseLogin: (payload: { username: string; password: string }) =>
+    request<{ ok: boolean; baseUrl: string }>('/courses/test-login', { method: 'POST', body: payload }),
+  previewCourses: (payload: { username?: string; password?: string } = {}) =>
+    request<CoursePreview>('/courses/preview', { method: 'POST', body: payload }),
+  importCourses: (payload: { username?: string; password?: string } = {}) =>
+    request<CourseImportResult>('/courses/import', { method: 'POST', body: payload }),
+  syncCoursesNow: () => request<SyncNowResult>('/courses/sync-now', { method: 'POST' }),
+};
