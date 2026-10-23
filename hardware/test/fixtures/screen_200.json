@@ -1,0 +1,152 @@
+{
+  "data": {
+    "schemaVersion": 1,
+    "generatedAt": "2026-10-18T03:40:00.042Z",
+    "timezone": "Asia/Shanghai",
+    "etag": "\"9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2\"",
+    "device": { "id": 1, "name": "书桌墨窗" },
+    "screen": {
+      "width": 800,
+      "height": 480,
+      "refreshMinutes": 30,
+      "layout": {
+        "width": 800,
+        "height": 480,
+        "updatedAt": "2026-10-15T09:12:44.000Z",
+        "modules": [
+          { "id": "clock", "enabled": true, "x": 16, "y": 16, "w": 220, "h": 100 },
+          { "id": "calendar", "enabled": true, "x": 16, "y": 128, "w": 220, "h": 180 },
+          { "id": "weather", "enabled": true, "x": 248, "y": 16, "w": 240, "h": 288 },
+          { "id": "schedule", "enabled": true, "x": 500, "y": 16, "w": 284, "h": 448 },
+          { "id": "courses", "enabled": true, "x": 248, "y": 316, "w": 240, "h": 148 },
+          { "id": "todos", "enabled": true, "x": 16, "y": 320, "w": 220, "h": 144 }
+        ]
+      }
+    },
+    "now": {
+      "iso": "2026-10-18T03:40:00.000Z",
+      "time": "11:40",
+      "weekday": "周日",
+      "date": "2026-10-18",
+      "dateLabel": "10月18日",
+      "epochSeconds": 1792294800,
+      "utcOffsetMinutes": 480,
+      "localIso": "2026-10-18T11:40:00"
+    },
+    "month": {
+      "year": 2026,
+      "month": 10,
+      "firstWeekday": 4,
+      "daysInMonth": 31,
+      "today": 18,
+      "marks": [2, 5, 8, 12, 15, 18, 21, 26, 29]
+    },
+    "weather": {
+      "provider": "open-meteo",
+      "city": "上海",
+      "latitude": 31.2304,
+      "longitude": 121.4737,
+      "observedAt": "2026-10-18T03:00:00.000Z",
+      "fetchedAt": "2026-10-18T03:32:10.000Z",
+      "stale": false,
+      "source": "cache",
+      "current": {
+        "temperature": 22.4,
+        "apparentTemperature": 23.1,
+        "humidity": 68,
+        "weatherCode": 2,
+        "condition": "多云",
+        "icon": "partly-cloudy",
+        "windSpeed": 12.6,
+        "isDay": true
+      },
+      "today": {
+        "date": "2026-10-18",
+        "min": 17.2,
+        "max": 24.8,
+        "precipitationProbability": 20,
+        "condition": "多云",
+        "icon": "partly-cloudy"
+      },
+      "forecast": [
+        {
+          "date": "2026-10-18",
+          "weekday": "周日",
+          "min": 17.2,
+          "max": 24.8,
+          "condition": "多云",
+          "icon": "partly-cloudy",
+          "precipitationProbability": 20
+        },
+        {
+          "date": "2026-10-19",
+          "weekday": "周一",
+          "min": 16.5,
+          "max": 23.4,
+          "condition": "晴",
+          "icon": "clear",
+          "precipitationProbability": 5
+        },
+        {
+          "date": "2026-10-20",
+          "weekday": "周二",
+          "min": 17.8,
+          "max": 22.6,
+          "condition": "雨",
+          "icon": "rain",
+          "precipitationProbability": 70
+        }
+      ]
+    },
+    "events": [
+      {
+        "id": "1042:2026-10-18T03:00:00.000Z",
+        "eventId": 1042,
+        "occurrenceKey": "2026-10-18T03:00:00.000Z",
+        "title": "数学竞赛辅导",
+        "location": "实验楼 302",
+        "startAt": "2026-10-18T03:00:00.000Z",
+        "endAt": "2026-10-18T04:30:00.000Z",
+        "allDay": false,
+        "categoryId": 1,
+        "color": "#3b6fd4",
+        "priority": "high",
+        "isCourse": false
+      },
+      {
+        "id": "1043:2026-10-18",
+        "eventId": 1043,
+        "occurrenceKey": "2026-10-18",
+        "title": "整理下周错题本",
+        "location": "",
+        "startAt": "2026-10-18",
+        "endAt": "2026-10-18",
+        "allDay": true,
+        "categoryId": 2,
+        "color": "#0f766e",
+        "priority": "normal",
+        "isCourse": false
+      },
+      {
+        "id": "1044:2026-10-18T10:00:00.000Z",
+        "eventId": 1044,
+        "occurrenceKey": "2026-10-18T10:00:00.000Z",
+        "title": "家庭晚餐",
+        "location": "家",
+        "startAt": "2026-10-18T10:00:00.000Z",
+        "endAt": "2026-10-18T11:30:00.000Z",
+        "allDay": false,
+        "categoryId": 3,
+        "color": "#b45309",
+        "priority": "normal",
+        "isCourse": false
+      }
+    ],
+    "courses": [],
+    "todos": [
+      { "id": 31, "title": "订正物理周测卷", "priority": "high", "dueDate": "2026-10-18" },
+      { "id": 32, "title": "准备英语演讲提纲", "priority": "normal", "dueDate": "2026-10-20" },
+      { "id": 33, "title": "归还图书馆借书", "priority": "low", "dueDate": null }
+    ]
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "data": {
+    "schemaVersion": 1,
+    "generatedAt": "2026-10-19T00:00:00.000Z",
+    "timezone": "Asia/Shanghai",
+    "etag": "\"0000000000000000000000000000000000000000\"",
+    "device": null,
+    "screen": {
+      "width": 800,
+      "height": 480,
+      "refreshMinutes": 15,
+      "layout": {
+        "width": 800,
+        "height": 480,
+        "updatedAt": "2026-10-15T09:12:44.000Z",
+        "modules": [
+          { "id": "clock", "enabled": true, "x": 16, "y": 16, "w": 220, "h": 100 },
+          { "id": "calendar", "enabled": true, "x": 16, "y": 128, "w": 220, "h": 180 },
+          { "id": "weather", "enabled": true, "x": 248, "y": 16, "w": 240, "h": 288 },
+          { "id": "schedule", "enabled": true, "x": 500, "y": 16, "w": 284, "h": 448 },
+          { "id": "courses", "enabled": true, "x": 248, "y": 316, "w": 240, "h": 148 },
+          { "id": "todos", "enabled": true, "x": 16, "y": 320, "w": 220, "h": 144 }
+        ]
+      }
+    },
+    "now": {
+      "iso": "2026-10-19T00:00:00.000Z",
+      "time": "08:00",
+      "weekday": "周一",
+      "date": "2026-10-19",
+      "dateLabel": "10月19日",
+      "epochSeconds": 1792368000,
+      "utcOffsetMinutes": 480,
+      "localIso": "2026-10-19T08:00:00"
+    },
+    "month": {
+      "year": 2026,
+      "month": 10,
+      "firstWeekday": 4,
+      "daysInMonth": 31,
+      "today": 19,
+      "marks": []
+    },
+    "weather": null,
+    "events": [],
+    "courses": [],
+    "todos": []
+  }
+}
