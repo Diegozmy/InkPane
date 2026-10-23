@@ -6,6 +6,8 @@ export type ErrorCode =
   | 'NOT_FOUND'
   | 'CONFLICT'
   | 'UNAUTHORIZED'
+  | 'FORBIDDEN'
+  | 'RATE_LIMITED'
   | 'INTERNAL_ERROR'
   | 'PAYLOAD_TOO_LARGE';
 
@@ -60,6 +62,20 @@ export class ConflictError extends AppError {
 export class UnauthorizedError extends AppError {
   constructor(message = '未授权') {
     super(message, 401, 'UNAUTHORIZED');
+  }
+}
+
+/** 已登录但无权访问（非管理员、CSRF 来源不合法等）。 */
+export class ForbiddenError extends AppError {
+  constructor(message = '没有权限执行该操作') {
+    super(message, 403, 'FORBIDDEN');
+  }
+}
+
+/** 登录限流。 */
+export class RateLimitedError extends AppError {
+  constructor(message = '操作过于频繁，请稍后再试', retryAfterSeconds = 60) {
+    super(message, 429, 'RATE_LIMITED', { details: { retryAfterSeconds } });
   }
 }
 

@@ -5,6 +5,7 @@
 import { config } from '../../config.js';
 import { getDatabase, transaction, type SqliteDatabase } from '../../db/client.js';
 import { BadRequestError, NotFoundError, ValidationError } from '../../http/errors.js';
+import { readDisplayTimezone } from '../display/settings.js';
 import {
   expandEvent,
   normalizeRecurrenceRule,
@@ -192,16 +193,17 @@ export interface OccurrenceResult {
 /** 查询区间内的所有日程实例（日历四视图与搜索都走这里）。 */
 export function queryOccurrences(
   query: OccurrenceQueryInput,
+  userId: number,
   db: SqliteDatabase = getDatabase(),
 ): OccurrenceResult {
-  const timezone = systemTimeZone();
+  const timezone = readDisplayTimezone(db, userId);
   const range = resolveRange(query.from, query.to);
   const totalLimit = Math.min(query.limit ?? 1200, config.maxOccurrencesPerQuery);
 
   const statuses = query.status ?? [];
   const includeCancelled = query.includeCancelled === true || statuses.includes('cancelled');
 
-  const candidates = repo.findCandidateEvents(db, {
+  const candidates = repo.findCandidateEvents(db, userId, {
     fromIso: range.from.toISOString(),
     toIso: range.to.toISOString(),
     fromDateKey: toDateKey(range.from, timezone),
@@ -268,24 +270,35 @@ function buildWriteModelFromInput(
   };
 }
 
-function assertCategoryExists(db: SqliteDatabase, categoryId: number | null | undefined): void {
+function assertCategoryExists(
+  db: SqliteDatabase,
+  userId: number,
+  categoryId: number | null | undefined,
+): void {
   if (categoryId === null || categoryId === undefined) return;
-  const row = db.prepare('SELECT id FROM categories WHERE id = ?').get(categoryId);
+  const row = db
+    .prepare('SELECT id FROM categories WHERE id = ? AND user_id = ?')
+    .get(categoryId, userId);
   if (!row) throw new ValidationError(`分类 ${categoryId} 不存在`);
 }
 
 export function createEvent(
   input: EventCreateInput,
+  userId: number,
   db: SqliteDatabase = getDatabase(),
 ): EventRecord {
-  assertCategoryExists(db, input.categoryId);
-  const timezone = input.timezone ?? systemTimeZone();
+  assertCategoryExists(db, userId, input.categoryId);
+  const timezone = input.timezone ?? readDisplayTimezone(db, userId);
   const model = buildWriteModelFromInput(input, timezone);
-  return repo.insertEvent(db, model);
+  return repo.insertEvent(db, userId, model);
 }
 
-export function getEvent(id: number, db: SqliteDatabase = getDatabase()): EventRecord {
-  const event = repo.findEventById(db, id);
+export function getEvent(
+  id: number,
+  userId: number,
+  db: SqliteDatabase = getDatabase(),
+): EventRecord {
+  const event = repo.findEventById(db, userId, id);
   if (!event) throw new NotFoundError(`日程 ${id} 不存在`);
   return event;
 }
@@ -293,11 +306,12 @@ export function getEvent(id: number, db: SqliteDatabase = getDatabase()): EventR
 export function updateEvent(
   id: number,
   patch: EventUpdateInput,
+  userId: number,
   db: SqliteDatabase = getDatabase(),
 ): EventRecord {
-  const existing = repo.findEventById(db, id);
+  const existing = repo.findEventById(db, userId, id);
   if (!existing) throw new NotFoundError(`日程 ${id} 不存在`);
-  if (patch.categoryId !== undefined) assertCategoryExists(db, patch.categoryId);
+  if (patch.categoryId !== undefined) assertCategoryExists(db, userId, patch.categoryId);
 
   const timezone = patch.timezone ?? existing.timezone;
   const allDay = patch.allDay ?? existing.allDay;
@@ -330,7 +344,7 @@ export function updateEvent(
         : patch.remindMinutesBefore,
   };
 
-  const updated = repo.updateEvent(db, id, model);
+  const updated = repo.updateEvent(db, userId, id, model);
   if (!updated) throw new NotFoundError(`日程 ${id} 不存在`);
 
   // 从重复改为不重复时，孤立的实例覆盖已无意义，一并清理
@@ -341,18 +355,19 @@ export function updateEvent(
   return updated;
 }
 
-export function deleteEvent(id: number, db: SqliteDatabase = getDatabase()): void {
-  const deleted = repo.deleteEvent(db, id);
+export function deleteEvent(id: number, userId: number, db: SqliteDatabase = getDatabase()): void {
+  const deleted = repo.deleteEvent(db, userId, id);
   if (!deleted) throw new NotFoundError(`日程 ${id} 不存在`);
 }
 
 export function browseEvents(
   query: ListEventsQueryInput,
+  userId: number,
   db: SqliteDatabase = getDatabase(),
 ): { items: EventRecord[]; total: number; limit: number; offset: number } {
   const limit = query.limit ?? 50;
   const offset = query.offset ?? 0;
-  const { items, total } = repo.listEvents(db, {
+  const { items, total } = repo.listEvents(db, userId, {
     search: query.q,
     categoryIds: query.categoryId,
     priorities: query.priority,
@@ -376,6 +391,7 @@ function splitDateKeyOf(occurrenceKey: string, allDay: boolean, timezone: string
 /** 把主序列按给定实例切成“截断到前一段”。 */
 function truncateMasterSeries(
   db: SqliteDatabase,
+  userId: number,
   event: EventRecord,
   splitKey: string,
 ): void {
@@ -393,7 +409,7 @@ function truncateMasterSeries(
 
   // 拆分点就是首个实例时，原序列会变成空序列，直接删除主体
   if (compareDateKeys(untilKey, baseDateKey) < 0) {
-    repo.deleteEvent(db, event.id);
+    repo.deleteEvent(db, userId, event.id);
     return;
   }
 
@@ -404,7 +420,7 @@ function truncateMasterSeries(
     until: untilKey,
   };
 
-  repo.updateEvent(db, event.id, {
+  repo.updateEvent(db, userId, event.id, {
     title: event.title,
     description: event.description,
     location: event.location,
@@ -432,10 +448,11 @@ export interface MoveResult {
 export function moveOccurrence(
   eventId: number,
   input: MoveOccurrenceInputDto,
+  userId: number,
   db: SqliteDatabase = getDatabase(),
 ): MoveResult {
   return transaction(db, () => {
-    const event = repo.findEventById(db, eventId);
+    const event = repo.findEventById(db, userId, eventId);
     if (!event) throw new NotFoundError(`日程 ${eventId} 不存在`);
 
     const requestedScope = input.scope ?? 'single';
@@ -458,7 +475,7 @@ export function moveOccurrence(
         endAt: times.endAt,
         allDay,
       });
-      return { scope, event: repo.findEventById(db, eventId), createdEventId: null, override };
+      return { scope, event: repo.findEventById(db, userId, eventId), createdEventId: null, override };
     }
 
     if (scope === 'all') {
@@ -473,7 +490,7 @@ export function moveOccurrence(
 
         const movedStart = addDaysToDateKey(event.startAt.slice(0, 10), dayDelta);
         const movedEnd = addDaysToDateKey(movedStart, durationDays);
-        const updated = repo.updateEvent(db, eventId, {
+        const updated = repo.updateEvent(db, userId, eventId, {
           title: event.title,
           description: event.description,
           location: event.location,
@@ -506,7 +523,7 @@ export function moveOccurrence(
       const movedStart = new Date(new Date(event.startAt).getTime() + delta);
       const movedEnd = new Date(new Date(event.endAt).getTime() + delta);
 
-      const updated = repo.updateEvent(db, eventId, {
+      const updated = repo.updateEvent(db, userId, eventId, {
         title: event.title,
         description: event.description,
         location: event.location,
@@ -553,7 +570,7 @@ export function moveOccurrence(
         : Math.max(0, rule.count - seriesIndexBefore(rule, baseDateKey, event.timezone, splitDateKey));
 
     // 先创建“新的一段”，再把覆盖记录迁移过去，最后截断原序列
-    const created = repo.insertEvent(db, {
+    const created = repo.insertEvent(db, userId, {
       title: event.title,
       description: event.description,
       location: event.location,
@@ -580,11 +597,11 @@ export function moveOccurrence(
     });
 
     repo.reassignOverrides(db, eventId, created.id, splitKey);
-    truncateMasterSeries(db, event, splitKey);
+    truncateMasterSeries(db, userId, event, splitKey);
 
     return {
       scope,
-      event: repo.findEventById(db, eventId),
+      event: repo.findEventById(db, userId, eventId),
       createdEventId: created.id,
       override: null,
     };
@@ -615,10 +632,11 @@ export interface CancelResult {
 export function cancelOccurrence(
   eventId: number,
   input: CancelOccurrenceInputDto,
+  userId: number,
   db: SqliteDatabase = getDatabase(),
 ): CancelResult {
   return transaction(db, () => {
-    const event = repo.findEventById(db, eventId);
+    const event = repo.findEventById(db, userId, eventId);
     if (!event) throw new NotFoundError(`日程 ${eventId} 不存在`);
 
     const scope = input.scope ?? 'single';
@@ -635,15 +653,15 @@ export function cancelOccurrence(
 
     // 从首个实例起取消，等价于删除整个序列
     if (isFirstOccurrence) {
-      repo.deleteEvent(db, eventId);
+      repo.deleteEvent(db, userId, eventId);
       return { scope: 'future', event: null, deleted: true, override: null };
     }
 
-    truncateMasterSeries(db, event, input.occurrenceKey);
+    truncateMasterSeries(db, userId, event, input.occurrenceKey);
     return {
       scope: 'future',
-      event: repo.findEventById(db, eventId),
-      deleted: repo.findEventById(db, eventId) === null,
+      event: repo.findEventById(db, userId, eventId),
+      deleted: repo.findEventById(db, userId, eventId) === null,
       override: null,
     };
   });
@@ -652,12 +670,13 @@ export function cancelOccurrence(
 export function upsertOccurrenceOverride(
   eventId: number,
   input: OverrideInputDto,
+  userId: number,
   db: SqliteDatabase = getDatabase(),
 ): EventOverride {
   return transaction(db, () => {
-    const event = repo.findEventById(db, eventId);
+    const event = repo.findEventById(db, userId, eventId);
     if (!event) throw new NotFoundError(`日程 ${eventId} 不存在`);
-    if (input.categoryId !== undefined) assertCategoryExists(db, input.categoryId);
+    if (input.categoryId !== undefined) assertCategoryExists(db, userId, input.categoryId);
 
     const allDay = input.allDay ?? event.allDay;
     const patch: Partial<repo.OverrideWriteModel> = {};
@@ -690,24 +709,26 @@ export function upsertOccurrenceOverride(
 export function resetOccurrenceOverride(
   eventId: number,
   occurrenceKey: string,
+  userId: number,
   db: SqliteDatabase = getDatabase(),
 ): boolean {
-  const event = repo.findEventById(db, eventId);
+  const event = repo.findEventById(db, userId, eventId);
   if (!event) throw new NotFoundError(`日程 ${eventId} 不存在`);
   return repo.deleteOverride(db, eventId, occurrenceKey);
 }
 
 export function listEventOverrides(
   eventId: number,
+  userId: number,
   db: SqliteDatabase = getDatabase(),
 ): EventOverride[] {
-  const event = repo.findEventById(db, eventId);
+  const event = repo.findEventById(db, userId, eventId);
   if (!event) throw new NotFoundError(`日程 ${eventId} 不存在`);
   return repo.listOverrides(db, eventId);
 }
 
-export function countAllEvents(db: SqliteDatabase = getDatabase()): number {
-  return repo.countEvents(db);
+export function countAllEvents(db: SqliteDatabase, userId: number): number {
+  return repo.countEvents(db, userId);
 }
 
 export { systemTimeZone };

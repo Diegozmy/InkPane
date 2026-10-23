@@ -358,6 +358,7 @@ export const displayUpdateSchema = z
   .object({
     layout: displayLayoutSchema.optional(),
     refreshMinutes: z.number().int().min(5).max(720).optional(),
+    timezone: timezoneSchema.optional(),
   })
   .strict();
 

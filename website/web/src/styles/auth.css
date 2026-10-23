@@ -1,0 +1,133 @@
+/* 登录/初始化、用户管理表格与多设备页面补充样式。 */
+
+.auth-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: var(--space-8);
+  background:
+    radial-gradient(circle at 20% 10%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 45%),
+    var(--bg-canvas);
+}
+
+.auth-card {
+  width: min(460px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  padding: var(--space-8);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-surface);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.auth-title {
+  font-size: var(--text-2xl);
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+.auth-footnote {
+  margin: 0;
+  text-align: center;
+}
+
+.auth-footnote a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.topbar__user {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 180px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.topbar__user:hover {
+  background: var(--bg-hover);
+  border-color: var(--border);
+  color: var(--text-strong);
+}
+
+.topbar__user-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+}
+
+.table-wrap {
+  overflow-x: auto;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+
+.data-table th,
+.data-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.data-table th {
+  color: var(--text-faint);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.data-table tr:last-child td {
+  border-bottom: none;
+}
+
+.device-layout-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(320px, 0.9fr);
+  gap: var(--space-6);
+  align-items: start;
+}
+
+.device-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+@media (max-width: 1100px) {
+  .device-layout-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .auth-page {
+    padding: var(--space-4);
+  }
+
+  .auth-card {
+    padding: var(--space-6);
+  }
+
+  .topbar__user-name {
+    display: none;
+  }
+}

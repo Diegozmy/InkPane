@@ -53,9 +53,9 @@ export interface TodoListResult {
 }
 
 /** 列表排序固定为：未完成在前 → sort_order 升序 → 创建时间倒序。 */
-export function listTodos(db: SqliteDatabase, filters: TodoFilters): TodoListResult {
-  const where: string[] = [];
-  const params: SqlValue[] = [];
+export function listTodos(db: SqliteDatabase, userId: number, filters: TodoFilters): TodoListResult {
+  const where: string[] = ['user_id = ?'];
+  const params: SqlValue[] = [userId];
 
   if (filters.done !== undefined) {
     where.push('done = ?');
@@ -66,7 +66,7 @@ export function listTodos(db: SqliteDatabase, filters: TodoFilters): TodoListRes
     params.push(filters.dueFrom, filters.dueTo);
   }
 
-  const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+  const whereSql = `WHERE ${where.join(' AND ')}`;
   const total = Number(
     get<{ count: number }>(db, `SELECT COUNT(*) AS count FROM todos ${whereSql}`, params)?.count ?? 0,
   );
@@ -82,33 +82,42 @@ export function listTodos(db: SqliteDatabase, filters: TodoFilters): TodoListRes
 }
 
 /** 设备屏幕用：未完成待办，按用户排序取前 N 条。 */
-export function listOpenTodos(db: SqliteDatabase, limit: number): Todo[] {
+export function listOpenTodos(db: SqliteDatabase, userId: number, limit: number): Todo[] {
   return all<TodoRow>(
     db,
-    `SELECT ${TODO_COLUMNS} FROM todos WHERE done = 0
+    `SELECT ${TODO_COLUMNS} FROM todos WHERE done = 0 AND user_id = ?
      ORDER BY sort_order ASC, created_at DESC, id DESC
      LIMIT ?`,
-    [limit],
+    [userId, limit],
   ).map(toTodo);
 }
 
 /** 全量列表（重排后返回用），排序与分页列表一致。 */
-export function listAllTodos(db: SqliteDatabase): Todo[] {
+export function listAllTodos(db: SqliteDatabase, userId: number): Todo[] {
   return all<TodoRow>(
     db,
-    `SELECT ${TODO_COLUMNS} FROM todos
+    `SELECT ${TODO_COLUMNS} FROM todos WHERE user_id = ?
      ORDER BY done ASC, sort_order ASC, created_at DESC, id DESC`,
+    [userId],
   ).map(toTodo);
 }
 
-export function findTodo(db: SqliteDatabase, id: number): Todo | null {
-  const row = get<TodoRow>(db, `SELECT ${TODO_COLUMNS} FROM todos WHERE id = ?`, [id]);
+export function findTodo(db: SqliteDatabase, userId: number, id: number): Todo | null {
+  const row = get<TodoRow>(
+    db,
+    `SELECT ${TODO_COLUMNS} FROM todos WHERE id = ? AND user_id = ?`,
+    [id, userId],
+  );
   return row ? toTodo(row) : null;
 }
 
 /** 默认排序值：追加到末尾，步长 10。 */
-export function nextSortOrder(db: SqliteDatabase): number {
-  const row = get<{ value: number | null }>(db, 'SELECT MAX(sort_order) AS value FROM todos');
+export function nextSortOrder(db: SqliteDatabase, userId: number): number {
+  const row = get<{ value: number | null }>(
+    db,
+    'SELECT MAX(sort_order) AS value FROM todos WHERE user_id = ?',
+    [userId],
+  );
   return Number(row?.value ?? 0) + 10;
 }
 
@@ -140,34 +149,53 @@ function writeValues(model: TodoWriteModel): SqlValue[] {
   ];
 }
 
-export function insertTodo(db: SqliteDatabase, model: TodoWriteModel): Todo {
+export function insertTodo(
+  db: SqliteDatabase,
+  userId: number,
+  model: TodoWriteModel,
+): Todo {
   const timestamp = nowIso();
   const result = run(
     db,
-    `INSERT INTO todos (${TODO_WRITE_CLAUSE.replace(/ = \?/g, '')}, created_at, updated_at)
-     VALUES (${new Array(8).fill('?').join(', ')}, ?, ?)`,
-    [...writeValues(model), timestamp, timestamp],
+    `INSERT INTO todos (user_id, ${TODO_WRITE_CLAUSE.replace(/ = \?/g, '')}, created_at, updated_at)
+     VALUES (?, ${new Array(8).fill('?').join(', ')}, ?, ?)`,
+    [userId, ...writeValues(model), timestamp, timestamp],
   );
-  const created = findTodo(db, result.lastInsertRowid);
+  const created = findTodo(db, userId, result.lastInsertRowid);
   if (!created) throw new Error('待办写入后无法读回');
   return created;
 }
 
-export function updateTodo(db: SqliteDatabase, id: number, model: TodoWriteModel): Todo | null {
+export function updateTodo(
+  db: SqliteDatabase,
+  userId: number,
+  id: number,
+  model: TodoWriteModel,
+): Todo | null {
   const result = run(
     db,
-    `UPDATE todos SET ${TODO_WRITE_CLAUSE}, updated_at = ? WHERE id = ?`,
-    [...writeValues(model), nowIso(), id],
+    `UPDATE todos SET ${TODO_WRITE_CLAUSE}, updated_at = ? WHERE id = ? AND user_id = ?`,
+    [...writeValues(model), nowIso(), id, userId],
   );
   if (result.changes === 0) return null;
-  return findTodo(db, id);
+  return findTodo(db, userId, id);
 }
 
-export function deleteTodo(db: SqliteDatabase, id: number): boolean {
-  return run(db, 'DELETE FROM todos WHERE id = ?', [id]).changes > 0;
+export function deleteTodo(db: SqliteDatabase, userId: number, id: number): boolean {
+  return run(db, 'DELETE FROM todos WHERE id = ? AND user_id = ?', [id, userId]).changes > 0;
 }
 
 /** 批量写排序值；不存在的 id 直接跳过。 */
-export function updateSortOrder(db: SqliteDatabase, id: number, sortOrder: number): void {
-  run(db, 'UPDATE todos SET sort_order = ?, updated_at = ? WHERE id = ?', [sortOrder, nowIso(), id]);
+export function updateSortOrder(
+  db: SqliteDatabase,
+  userId: number,
+  id: number,
+  sortOrder: number,
+): void {
+  run(db, 'UPDATE todos SET sort_order = ?, updated_at = ? WHERE id = ? AND user_id = ?', [
+    sortOrder,
+    nowIso(),
+    id,
+    userId,
+  ]);
 }

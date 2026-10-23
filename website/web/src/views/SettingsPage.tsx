@@ -1,8 +1,11 @@
 /** 设置页：外观、提醒、分类、快捷键与连接信息。 */
 
-import { useState, type ReactElement } from 'react';
+import { useEffect, useState, type ReactElement } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useCategories, useHealth } from '@/api/use-calendar-data';
+import { useChangePassword, useLogout, useMe, useUpdateProfile } from '@/api/use-auth';
+import { useDisplayConfig } from '@/api/use-workspace';
+import { useUpdateDisplay } from '@/api/use-workspace-mutations';
 import { useReminderScheduler } from '@/hooks/use-reminders';
 import { requestNotificationPermission, showReminderNotification } from '@/lib/notify';
 import { useUiStore, type ThemeMode } from '@/store/ui-store';
@@ -13,7 +16,9 @@ import { FilterDialog } from '@/components/filters/FilterDialog';
 import {
   Badge,
   Button,
+  Field,
   InlineAlert,
+  Input,
   SegmentedControl,
   Switch,
 } from '@/components/ui';
@@ -64,8 +69,27 @@ export function SettingsPage(): ReactElement {
   const reminders = useReminderScheduler();
   const { data: categories } = useCategories();
   const health = useHealth();
+  const me = useMe();
+  const updateProfile = useUpdateProfile();
+  const changePassword = useChangePassword();
+  const logout = useLogout();
+  const display = useDisplayConfig();
+  const updateDisplay = useUpdateDisplay();
 
   const [categoryManagerOpen, setCategoryManagerOpen] = useState(false);
+  const [displayName, setDisplayName] = useState('');
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [passwordNotice, setPasswordNotice] = useState<string | null>(null);
+  const [timezone, setTimezone] = useState('Asia/Shanghai');
+
+  useEffect(() => {
+    if (me.data?.user) setDisplayName(me.data.user.displayName);
+  }, [me.data]);
+
+  useEffect(() => {
+    if (display.data) setTimezone(display.data.timezone);
+  }, [display.data]);
 
   const sidebar = (
     <>
@@ -265,6 +289,110 @@ export function SettingsPage(): ReactElement {
         <section className="card">
           <div className="card__header">
             <div>
+              <h2 className="card__title">账户</h2>
+              <p className="card__description">
+                当前登录：<strong>{me.data?.user.username}</strong>
+                {me.data?.user.role === 'admin' ? '（管理员）' : ''}
+              </p>
+            </div>
+            <Button
+              variant="ghost"
+              leadingIcon="sign-out"
+              loading={logout.isPending}
+              onClick={() => logout.mutate(undefined, { onSuccess: () => navigate('/login', { replace: true }) })}
+            >
+              退出登录
+            </Button>
+          </div>
+
+          <div className="stack stack--lg">
+            <form
+              className="row row--wrap"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (displayName.trim()) updateProfile.mutate(displayName.trim());
+              }}
+            >
+              <Field label="显示名" htmlFor="account-display-name">
+                <Input
+                  id="account-display-name"
+                  value={displayName}
+                  onChange={(event) => setDisplayName(event.target.value)}
+                  maxLength={40}
+                />
+              </Field>
+              <Button type="submit" variant="secondary" loading={updateProfile.isPending}>
+                保存显示名
+              </Button>
+            </form>
+
+            <form
+              className="row row--wrap"
+              onSubmit={(event) => {
+                event.preventDefault();
+                setPasswordNotice(null);
+                changePassword.mutate(
+                  { currentPassword, newPassword },
+                  {
+                    onSuccess: () => {
+                      setCurrentPassword('');
+                      setNewPassword('');
+                      setPasswordNotice('密码已更新，其他设备上的登录已失效');
+                    },
+                    onError: (cause) =>
+                      setPasswordNotice(cause instanceof Error ? cause.message : '修改密码失败'),
+                  },
+                );
+              }}
+            >
+              <Field label="当前密码" htmlFor="account-current-password">
+                <Input
+                  id="account-current-password"
+                  type="password"
+                  value={currentPassword}
+                  autoComplete="current-password"
+                  onChange={(event) => setCurrentPassword(event.target.value)}
+                />
+              </Field>
+              <Field label="新密码" htmlFor="account-new-password" hint="至少 8 位">
+                <Input
+                  id="account-new-password"
+                  type="password"
+                  value={newPassword}
+                  autoComplete="new-password"
+                  onChange={(event) => setNewPassword(event.target.value)}
+                />
+              </Field>
+              <Button type="submit" variant="secondary" loading={changePassword.isPending}>
+                修改密码
+              </Button>
+            </form>
+            {passwordNotice && <InlineAlert tone="info" title="提示">{passwordNotice}</InlineAlert>}
+
+            <form
+              className="row row--wrap"
+              onSubmit={(event) => {
+                event.preventDefault();
+                updateDisplay.mutate({ timezone: timezone.trim() });
+              }}
+            >
+              <Field label="显示时区" htmlFor="account-timezone" hint="IANA 名称，例如 Asia/Shanghai">
+                <Input
+                  id="account-timezone"
+                  value={timezone}
+                  onChange={(event) => setTimezone(event.target.value)}
+                />
+              </Field>
+              <Button type="submit" variant="secondary" loading={updateDisplay.isPending}>
+                保存时区
+              </Button>
+            </form>
+          </div>
+        </section>
+
+        <section className="card">
+          <div className="card__header">
+            <div>
               <h2 className="card__title">数据与连接</h2>
               <p className="card__description">
                 数据存储在本机 SQLite 文件中；若需要重置，可在 server 目录执行{' '}
@@ -283,7 +411,6 @@ export function SettingsPage(): ReactElement {
               value={import.meta.env.VITE_API_BASE ?? '/api（经 Vite 代理）'}
             />
             <InfoRow icon="grid" label="数据库结构版本" value={String(health.data?.schemaVersion ?? '—')} />
-            <InfoRow icon="calendar-blank" label="日程总数" value={String(health.data?.eventCount ?? '—')} />
             <InfoRow icon="clock" label="服务运行时长" value={`${health.data?.uptimeSeconds ?? 0} 秒`} />
             <InfoRow icon="desktop" label="运行环境" value={health.data?.env ?? '—'} />
           </div>

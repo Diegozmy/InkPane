@@ -6,7 +6,11 @@ Base URL：`http://127.0.0.1:4000/api`（开发期前端通过 Vite 代理访问
 
 | 前缀 | 说明 | 详见 |
 | --- | --- | --- |
-| `/api/health` | 服务存活、结构版本与事件数 | 本文「健康检查」 |
+| `/api/health` | 服务存活与结构版本（公开） | 本文「健康检查」 |
+| `/api/setup` | 首次初始化状态与管理员认领 | 本文「初始化」 |
+| `/api/auth` | 登录、退出、当前用户、改密 | 本文「账户」 |
+| `/api/users` | 管理员创建/停用/重置用户 | 本文「用户管理」 |
+| `/api/devices` | 当前账号的设备、令牌与遥测 | 本文「设备管理」 |
 | `/api/categories` | 分类的增删改查与排序 | 本文「分类」 |
 | `/api/events` | 日程主记录（未展开）与实例级操作 | 本文「日程主体」「实例级操作」 |
 | `/api/occurrences` | 展开后的日历实例 | 本文「展开后的实例」 |
@@ -15,12 +19,51 @@ Base URL：`http://127.0.0.1:4000/api`（开发期前端通过 Vite 代理访问
 | `/api/courses` | 学校课程同步 | 本文「课程同步」 |
 | `/api/todos` | 待办清单 | 本文「待办」 |
 | `/api/weather` | 天气快照、设置与城市搜索 | 本文「天气」 |
-| `/api/display` | 墨水屏布局与预览 | 本文「屏幕布局」 |
-| `/api/device` | 设备端拉屏、遥测与令牌 | 本文「设备」 |
+| `/api/display` | 墨水屏布局、刷新间隔与时区 | 本文「屏幕布局」 |
+| `/api/device` | 设备端拉屏与遥测（令牌鉴权） | 本文「设备」 |
 
-其中 `/api/device/screen` 使用 `X-Device-Token` 鉴权并支持 `ETag` / `304`，
-`/api/device/telemetry` 同样需要令牌；设备端的完整对接说明（ESP-IDF 示例、屏幕渲染规范、
-低功耗策略）见 [DEVICE-API.md](DEVICE-API.md)。
+除 `/api/health`、`/api/setup`、`/api/auth/login` 与 `/api/device/*` 外，所有接口都要求
+控制台会话 Cookie；用户数据按会话中的 `user_id` 隔离。`/api/device/screen` 使用
+`X-Device-Token` 鉴权并支持 `ETag` / `304`；设备端的完整对接说明见
+[DEVICE-API.md](DEVICE-API.md)。
+
+## 初始化与账户
+
+| 方法 | 路径 | 鉴权 | 说明 |
+| --- | --- | --- | --- |
+| `GET` | `/api/setup/status` | 否 | `{ required }`；没有活跃 admin 时为 true |
+| `POST` | `/api/setup` | 否 | `{ username, password, displayName?, timezone? }`；仅 required 时可用 |
+| `POST` | `/api/auth/login` | 否 | `{ username, password }`；成功下发 HttpOnly Cookie |
+| `POST` | `/api/auth/logout` | 会话 | 撤销当前会话并清 Cookie |
+| `GET` | `/api/auth/me` | 会话 | 当前用户与 `setupRequired` |
+| `PATCH` | `/api/auth/me` | 会话 | `{ displayName }` |
+| `POST` | `/api/auth/password` | 会话 | `{ currentPassword, newPassword }`；撤销其他会话 |
+
+密码使用 scrypt 哈希；登录失败 15 分钟内 5 次后返回 `429 RATE_LIMITED`。
+写请求若带 `Origin` 且不在 `CORS_ORIGIN` / `PUBLIC_ORIGIN` 内，返回 `403 FORBIDDEN`。
+
+## 用户管理（管理员）
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/users` | 账号元数据、设备数量；不返回内容数据 |
+| `POST` | `/api/users` | `{ username, password, displayName?, role?, timezone? }` |
+| `PATCH` | `/api/users/:id` | `{ displayName?, role?, status? }`；不能停用/降级最后一个 admin |
+| `POST` | `/api/users/:id/password` | `{ password }`；撤销该用户会话 |
+
+停用账号会立即撤销会话；该用户的设备令牌也会在下次请求时返回 `401`。
+
+## 设备管理（当前账号）
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/devices` | 设备列表、在线状态、遥测；不含完整令牌 |
+| `POST` | `/api/devices` | `{ name }` → `{ device, token }`；完整令牌只返回一次 |
+| `PATCH` | `/api/devices/:id` | `{ name }` |
+| `POST` | `/api/devices/:id/rotate` | 轮换令牌；旧令牌立即失效，新令牌只返回一次 |
+| `DELETE` | `/api/devices/:id` | 软撤销设备；旧令牌立即失效 |
+
+每账号最多 20 台设备。设备令牌为 32 位 hex，数据库只保存 SHA-256 与首尾 4 位前缀。
 
 ## 通用约定
 
@@ -84,8 +127,7 @@ Base URL：`http://127.0.0.1:4000/api`（开发期前端通过 Vite 代理访问
   "data": {
     "status": "ok",
     "env": "development",
-    "schemaVersion": 1,
-    "eventCount": 10,
+    "schemaVersion": 4,
     "uptimeSeconds": 42,
     "serverTime": "2025-06-02T01:00:00.000Z"
   }
@@ -931,8 +973,8 @@ Base URL：`http://127.0.0.1:4000/api`（开发期前端通过 Vite 代理访问
 `PUT` 接受 `city`（1–60 字符）、`latitude`（-90–90）、`longitude`（-180–180）、
 `enabled` 的任意子集，至少提供一个字段。
 
-`timezone` 由服务端时区决定（默认 `Asia/Shanghai`），不接受单独修改；它决定 `today`
-与 `forecast` 的日期归属。
+`timezone` 来自用户显示设置（`PUT /api/display` 的 `timezone`，默认 `Asia/Shanghai`），
+决定 `today` 与 `forecast` 的日期归属。
 
 ### `GET /api/weather/search?q=`
 
@@ -1007,6 +1049,7 @@ Base URL：`http://127.0.0.1:4000/api`（开发期前端通过 Vite 代理访问
       ]
     },
     "refreshMinutes": 30,
+    "timezone": "Asia/Shanghai",
     "modules": [
       { "id": "clock", "name": "时钟", "description": "大字时间、星期与日期", "defaultRect": { "x": 16, "y": 16, "w": 220, "h": 100 } },
       { "id": "calendar", "name": "月历", "description": "当月月历，并标记有日程的日期", "defaultRect": { "x": 16, "y": 128, "w": 220, "h": 180 } },
@@ -1026,6 +1069,7 @@ Base URL：`http://127.0.0.1:4000/api`（开发期前端通过 Vite 代理访问
 ```json
 {
   "refreshMinutes": 30,
+  "timezone": "Asia/Shanghai",
   "layout": {
     "width": 800,
     "height": 480,
@@ -1041,20 +1085,21 @@ Base URL：`http://127.0.0.1:4000/api`（开发期前端通过 Vite 代理访问
 }
 ```
 
-`layout` 与 `refreshMinutes` 均可选，只传其一即可。校验规则（不满足返回 `400 VALIDATION_FAILED`）：
+`layout`、`refreshMinutes`、`timezone` 均可选，至少传一个。校验规则（不满足返回 `400 VALIDATION_FAILED`）：
 
 - `width` / `height` 必须分别是 `800` / `480`，`modules` 必须正好 6 项；
 - 六个 `id` 齐全且唯一；每个模块的 `id`、`enabled`、`x`、`y`、`w`、`h` 均为必填；
 - `x`、`y`、`w`、`h` 为整数且是 4 的倍数；`x >= 0`、`y >= 0`、`w >= 80`、`h >= 48`；
 - `x + w <= 800`、`y + h <= 480`；
 - `refreshMinutes` 为 5–720 的整数（设备端据此设置休眠间隔）；
+- `timezone` 为合法 IANA 名称（如 `Asia/Shanghai`）；
 - 服务端不校验模块是否重叠。
 
 响应体与 `GET /api/display` 的 `data` 一致。
 
 ### `GET /api/display/screen`
 
-控制台预览用：返回设备将看到的完整屏幕数据（`DeviceScreenPayload`），**免鉴权**。
+控制台预览用：返回当前用户设备将看到的完整屏幕数据（`DeviceScreenPayload`），需要控制台会话。
 字段定义、ETag 语义与完整示例见 [DEVICE-API.md](DEVICE-API.md) 第 7 节。
 
 设备端请使用 `GET /api/device/screen`，它支持 `If-None-Match` / `304`，能省掉重复渲染。
@@ -1063,69 +1108,11 @@ Base URL：`http://127.0.0.1:4000/api`（开发期前端通过 Vite 代理访问
 
 ## 设备
 
-设备接口供墨水屏固件调用。其中**拉屏与遥测**使用共享令牌 `X-Device-Token` 鉴权，
-其余（状态、设置、令牌读取与轮换）供控制台使用，不需要令牌。设备端的完整对接说明见
-[DEVICE-API.md](DEVICE-API.md)。
+设备拉屏与遥测使用**每设备令牌** `X-Device-Token` 鉴权；令牌在控制台
+`/api/devices` 创建/轮换。设备端的完整对接说明见 [DEVICE-API.md](DEVICE-API.md)。
 
-### `GET /api/device/status`
-
-返回设备与控制台共享的状态汇总。**不需要令牌**，控制台直接读取，设备也可用它确认
-服务端认定的刷新间隔与屏幕版本。
-
-```json
-{
-  "data": {
-    "paired": true,
-    "name": "书桌墨窗",
-    "tokenPreview": "7f3a...c153",
-    "lastSeenAt": "2026-10-18T03:40:12.480Z",
-    "firmware": "0.1.0",
-    "batteryPercent": 87,
-    "batteryVoltage": 4.06,
-    "rssi": -56,
-    "indoorTemperature": 24.3,
-    "indoorHumidity": 46.8,
-    "screenVersion": "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2",
-    "refreshMinutes": 30,
-    "layoutUpdatedAt": "2026-10-15T09:12:44.000Z",
-    "serverTime": "2026-10-18T03:40:15.002Z"
-  }
-}
-```
-
-| 字段 | 类型 | 可空 | 说明 |
-| --- | --- | --- | --- |
-| `paired` | boolean | 否 | 是否收到过设备遥测（`lastSeenAt` 非空即为 `true`） |
-| `name` | string | 否 | 设备名，默认「InkPane 墨窗」 |
-| `tokenPreview` | string | 否 | 令牌脱敏预览：前 4 位 + `...` + 后 4 位 |
-| `lastSeenAt` | string | 是 | 最后一次遥测时间；从未上报为 `null` |
-| `firmware` | string | 是 | 最后一次上报的固件版本 |
-| `batteryPercent` / `batteryVoltage` / `rssi` | number | 是 | 最后一次上报的电量与信号 |
-| `indoorTemperature` / `indoorHumidity` | number | 是 | 最后一次上报的室内温湿度 |
-| `screenVersion` | string | 否 | 当前屏幕数据哈希（等同 ETag 去引号） |
-| `refreshMinutes` | integer | 否 | 刷新间隔（分钟） |
-| `layoutUpdatedAt` | string | 否 | 布局最后修改时间 |
-| `serverTime` | string | 否 | 服务端当前时间 |
-
-### `PUT /api/device/settings`
-
-| 字段 | 类型 | 必填 | 校验 |
-| --- | --- | --- | --- |
-| `name` | string | 否 | 1–40 字符 |
-| `refreshMinutes` | integer | 否 | 5–720 |
-
-至少提供一个字段，返回更新后的 `status` 数据。**不需要令牌**（控制台使用）。
-
-### `GET /api/device/token` / `POST /api/device/token`
-
-- `GET`：读取当前令牌；从未生成时生成一个并持久化，重复调用返回同一值。
-- `POST`：轮换令牌。**旧令牌立即失效**，正在使用旧令牌的设备下一次请求即 `401`。
-
-```json
-{ "data": { "token": "7f3a9c2e5b8d4a61c0f9e2d7b4a8c153" } }
-```
-
-两个接口都不需要鉴权（否则轮换后将无法取回新令牌），但只应暴露在可信局域网内。
+> **v4 变更：** `/api/device/status`、`/api/device/settings`、`/api/device/token`
+> 已移除。控制台请使用 `/api/devices`（列表、创建、重命名、轮换、撤销）。
 
 ### `GET /api/device/screen`
 

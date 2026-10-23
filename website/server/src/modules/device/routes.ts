@@ -1,40 +1,42 @@
 /**
- * 设备的 HTTP 路由。
+ * 设备的 HTTP 路由（只保留设备自身需要的拉屏与遥测）。
  *
  * 鉴权边界：
- * - 设备拉取接口（/screen、/telemetry）必须带 X-Device-Token；
- * - 控制台管理接口（/status、/settings、/token）免鉴权，仅在服务端本机使用。
- * 不接受把令牌放在 query 参数里，避免出现在访问日志中。
+ * - /screen、/telemetry 必须带 X-Device-Token；
+ * - 令牌只对应一台设备，进而解析出所属用户；
+ * - 控制台管理接口在 /api/devices（会话鉴权）。
  */
 
 import { Router, type RequestHandler } from 'express';
-import { getDatabase } from '../../db/client.js';
 import { asyncHandler } from '../../http/async-handler.js';
 import { UnauthorizedError } from '../../http/errors.js';
-import { deviceSettingsSchema, deviceTelemetrySchema } from '../../domain/schemas.js';
-import { readDeviceToken } from './settings.js';
+import { deviceTelemetrySchema } from '../../domain/schemas.js';
 import {
-  getDeviceScreen,
-  getDeviceStatus,
-  getDeviceToken,
-  recordDeviceTelemetry,
-  regenerateDeviceToken,
-  updateDeviceSettings,
-} from './service.js';
+  authenticateDevice,
+  getScreenForDevice,
+  recordTelemetry,
+  type AuthenticatedDevice,
+} from '../devices/service.js';
 
 export const DEVICE_TOKEN_HEADER = 'x-device-token';
+
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
+  namespace Express {
+    interface Request {
+      deviceAuth?: AuthenticatedDevice;
+    }
+  }
+}
 
 /** 设备令牌校验中间件。 */
 export const requireDeviceToken: RequestHandler = (req, _res, next) => {
   try {
-    const provided = req.header(DEVICE_TOKEN_HEADER)?.trim();
-    const expected = readDeviceToken(getDatabase());
-    if (!provided || provided !== expected) {
-      throw new UnauthorizedError('设备令牌无效');
-    }
+    const auth = authenticateDevice(req.header(DEVICE_TOKEN_HEADER));
+    req.deviceAuth = auth;
     next();
   } catch (error) {
-    next(error);
+    next(error instanceof Error ? error : new UnauthorizedError('设备令牌无效'));
   }
 };
 
@@ -54,7 +56,8 @@ export function createDeviceRouter(): Router {
     '/screen',
     requireDeviceToken,
     asyncHandler((req, res) => {
-      const payload = getDeviceScreen();
+      const auth = req.deviceAuth!;
+      const payload = getScreenForDevice(auth.userId, auth.device.id);
       res.setHeader('ETag', payload.etag);
       res.setHeader('Cache-Control', 'no-cache');
       if (etagMatches(req.header('if-none-match'), payload.etag)) {
@@ -70,36 +73,7 @@ export function createDeviceRouter(): Router {
     requireDeviceToken,
     asyncHandler((req, res) => {
       const input = deviceTelemetrySchema.parse(req.body);
-      res.json({ data: recordDeviceTelemetry(input) });
-    }),
-  );
-
-  router.get(
-    '/status',
-    asyncHandler((_req, res) => {
-      res.json({ data: getDeviceStatus() });
-    }),
-  );
-
-  router.get(
-    '/token',
-    asyncHandler((_req, res) => {
-      res.json({ data: { token: getDeviceToken() } });
-    }),
-  );
-
-  router.post(
-    '/token',
-    asyncHandler((_req, res) => {
-      res.json({ data: { token: regenerateDeviceToken() } });
-    }),
-  );
-
-  router.put(
-    '/settings',
-    asyncHandler((req, res) => {
-      const input = deviceSettingsSchema.parse(req.body);
-      res.json({ data: updateDeviceSettings(input) });
+      res.json({ data: recordTelemetry(req.deviceAuth!.device.id, input) });
     }),
   );
 

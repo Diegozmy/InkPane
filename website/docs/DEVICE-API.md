@@ -11,21 +11,21 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 文档版本 | v1 |
+| 文档版本 | v2（多用户/多设备） |
 | 生效时间 | 2026-10 起 |
-| 适用固件 | ESP-IDF v5.x，target `esp32s3` |
+| 适用固件 | ESP-IDF v6.1（参考实现位于 `hardware/main`；v5.2+ 理论兼容，未验证） |
 | 适用服务端 | `website/server`（Express + `node:sqlite`） |
-| 契约范围 | `/api/device/*`、`/api/display/screen`、`/api/health` |
+| 契约范围 | `/api/device/*`、`/api/health` |
 
 三条约定先写在前面：
 
 - **字段名、默认值、状态码属于稳定契约。** 改动会被视为破坏性变更；新增字段时设备端
   必须忽略不认识的字段，而不是解析失败。
 - **不要依赖响应中字段的排列顺序。** JSON 对象无序，示例中的顺序只为便于阅读。
-- **设备端只读 `/api/device/screen`。** 控制台预览用的 `/api/display/screen` 免鉴权、
-  不接受条件请求，设备端不应使用。
+- **每台设备一个令牌。** 一个后端可以服务多个用户；设备令牌绑定到某台设备，再解析出
+  所属用户。设备端只读 `/api/device/screen`、只写 `/api/device/telemetry`。
 
-下文所有时间均为 **ISO-8601**；日期为 `YYYY-MM-DD`；默认时区 `Asia/Shanghai`。
+下文所有时间均为 **ISO-8601**；日期为 `YYYY-MM-DD`；时区由用户在控制台配置，默认 `Asia/Shanghai`。
 
 ## 2. 系统架构与时序
 
@@ -38,8 +38,8 @@
  │                       │          │                                      │
  │  1. RTC 定时唤醒       │          │  GET  /api/device/screen             │
  │  2. Wi-Fi STA 连接     │ ───────► │  POST /api/device/telemetry          │
- │  3. GET /api/device/   │          │  GET  /api/device/status             │
- │     screen             │ ◄─────── │  GET  /api/health                    │
+ │  3. GET /api/device/   │          │  GET  /api/health                    │
+ │     screen             │ ◄─────── │                                      │
  │  4. 比对 ETag          │          │                                      │
  │  5. 1-bit 渲染刷新      │          │  ┌──────────────┐  ┌───────────────┐ │
  │  6. POST 遥测          │          │  │ SQLite       │  │ Open-Meteo    │ │
@@ -109,17 +109,16 @@ $env:HOST='0.0.0.0'; npm run dev:api
 改完后用 `http://<本机局域网 IP>:4000` 访问；Windows 首次监听时需在防火墙提示中允许
 Node.js 的专用网络访问。
 
-**第 2 步：获取设备令牌**
+**第 2 步：在控制台创建设备并获取令牌**
 
-```bash
-curl -s http://127.0.0.1:4000/api/device/token
-```
+打开控制台「屏幕与设备」→「添加设备」，完整令牌只会在创建后显示一次。
+如果使用旧版数据库，v4 迁移会保留原令牌，无需重新配置。
 
 ```json
-{ "data": { "token": "7f3a9c2e5b8d4a61c0f9e2d7b4a8c153" } }
+{ "data": { "device": { "id": 1, "name": "书桌墨窗" }, "token": "7f3a9c2e5b8d4a61c0f9e2d7b4a8c153" } }
 ```
 
-首次调用会生成并持久化令牌，重复调用返回同一个值。令牌等同密码，不要贴到公开渠道。
+令牌等同设备密码，不要贴到公开渠道；丢失只能轮换。
 
 **第 3 步：把令牌与 API 地址写入设备 NVS**
 
@@ -133,6 +132,10 @@ key:       ssid/pass -> Wi-Fi 凭据
 
 也可以用 `idf.py menuconfig` 编译期内置默认值（见第 11 节），但令牌仍建议保存在 NVS，
 以便轮换后不下线重刷固件。
+
+> `hardware/main` 的参考固件已经内置 AP 配网：首次上电（或按住 GPIO5 两秒上电）会打开
+> `InkPane-XXXXXX` 热点，用手机在 `http://192.168.4.1` 填写 Wi-Fi、`api_url` 与令牌即可，
+> 不需要手工写 NVS 或重新编译固件。下面的 NVS 键仍然是同一套。
 
 **第 4 步：首次拉取屏幕数据**
 
@@ -158,7 +161,7 @@ curl -s -X POST http://127.0.0.1:4000/api/device/telemetry \
 
 ## 4. 鉴权
 
-拉屏与遥测两个设备接口使用**共享令牌**鉴权，令牌放在请求头 `X-Device-Token` 中：
+拉屏与遥测两个设备接口使用**每设备独立令牌**，令牌放在请求头 `X-Device-Token` 中：
 
 ```http
 GET /api/device/screen HTTP/1.1
@@ -172,14 +175,16 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
 | 头名称 | `X-Device-Token` |
 | 令牌形态 | 32 位小写十六进制（16 字节随机数，服务端生成，长度固定） |
 | 生效范围 | `/api/device/screen`、`/api/device/telemetry` |
-| 不需要令牌 | `/api/health`、`/api/display`、`/api/display/screen`、`/api/device/status`、`/api/device/settings`、`/api/device/token` |
+| 绑定关系 | 每个令牌对应一台 `devices` 行，进而解析出所属用户；A 的令牌只能拉 A 的数据 |
+| 不需要令牌 | `/api/health`、`/api/setup/*`、`/api/auth/*` |
 
 **生成与轮换**
 
-- `GET /api/device/token`：读取当前令牌；从未生成时生成一个并持久化。
-- `POST /api/device/token`：轮换。**旧令牌立即失效**，正在使用旧令牌的设备下一次请求
-  会收到 `401`。新令牌只在这个响应里给出一次，请立刻写入设备的 NVS 与控制台
-  （之后仍可用 `GET /api/device/token` 读回，但不要把读取接口当作安全存储）。
+- 在控制台「屏幕与设备」里创建一台设备；完整令牌只在创建响应里返回一次。
+- `POST /api/devices/:id/rotate` 轮换。**旧令牌立即失效**，新令牌只返回一次；
+  请立刻写入设备 NVS，丢失只能再次轮换。
+- 数据库只保存令牌的 SHA-256 与首尾 4 位前缀；没有任何接口能读回完整旧令牌。
+- v4 迁移会把旧版单例 `device.token` 迁入 `devices`，旧固件无需改配置即可继续拉取。
 
 **401 响应体**
 
@@ -187,41 +192,46 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
 {
   "error": {
     "code": "UNAUTHORIZED",
-    "message": "设备令牌缺失或无效",
+    "message": "设备令牌无效",
     "requestId": "c1a7f3e2-9b4d-4f6a-8e15-2d7c9b0a4f63"
   }
 }
 ```
 
 设备端处理建议：`401` 属于配置错误，重试无意义。停在当前画面、按最长退避间隔再试一次，
-或等待人工重新配对，不要把令牌打日志、也不要通过明文 HTTP 之外的渠道传输。
+或等待人工重新配对；不要把令牌打日志，也不要通过明文 HTTP 之外的渠道传输。
 
 **安全边界（请如实告知使用者）**
 
-- 本服务定位是**本地个人工具**，没有账号体系、没有 TLS。令牌只应出现在可信局域网内。
-- 令牌等同密码：拿到令牌即可读取屏幕数据、伪造遥测。
-- 若需要跨网访问，请在前端放一层反向代理（Nginx / Caddy）并启用 HTTPS，
-  同时只在代理层暴露 `/api/device/*`，其余接口不对外。
-- 设备端固件不应在串口日志里打印完整令牌；打印 `tokenPreview`（前 4 后 4 位）即可。
+- 本服务定位是**本地/可信局域网工具**；管理接口已要求登录，但服务本身不内置 TLS。
+- 令牌等同设备密码：拿到令牌即可读取该用户的屏幕数据、伪造该设备的遥测。
+- 若需要跨网访问，请在前面放一层反向代理（Nginx / Caddy）并启用 HTTPS，
+  只暴露 `/api/device/*`，控制台走独立入口。
+- 设备端固件不应在串口日志里打印完整令牌；打印 `tokenPrefix`（前 4 后 4 位）即可。
+- 停用用户会立即撤销其会话；该用户的设备令牌在下次请求时返回 `401`。
 
 ## 5. 接口一览表
 
 | 方法 | 路径 | 鉴权 | 说明 | 幂等性 |
 | --- | --- | --- | --- | --- |
-| `GET` | `/api/health` | 否 | 服务存活与版本、库内事件数 | 幂等 |
-| `GET` | `/api/device/screen` | 是 | 拉取屏幕数据，支持 `If-None-Match` / `304` | 幂等 |
-| `POST` | `/api/device/telemetry` | 是 | 上报设备状态（温湿度、电量、RSSI 等） | 非幂等（每次上报产生新的 `receivedAt`） |
-| `GET` | `/api/device/token` | 否 | 读取当前设备令牌，未生成时生成 | 幂等（重复调用返回同一令牌） |
-| `POST` | `/api/device/token` | 否 | 轮换令牌，旧令牌立即失效 | 非幂等（每次结果不同） |
-| `GET` | `/api/device/status` | 否 | 设备与控制台共享的状态汇总 | 幂等 |
-| `PUT` | `/api/device/settings` | 否 | 修改设备名、刷新间隔 | 幂等 |
-| `GET` | `/api/display` | 否 | 读取布局与刷新间隔 | 幂等 |
-| `PUT` | `/api/display` | 否 | 修改布局与刷新间隔 | 幂等 |
-| `GET` | `/api/display/screen` | 否 | 控制台预览用屏幕数据（无 ETag） | 幂等 |
+| `GET` | `/api/health` | 否 | 服务存活与结构版本 | 幂等 |
+| `GET` | `/api/device/screen` | 设备令牌 | 拉取屏幕数据，支持 `If-None-Match` / `304` | 幂等 |
+| `POST` | `/api/device/telemetry` | 设备令牌 | 上报设备状态（温湿度、电量、RSSI 等） | 非幂等（每次上报产生新的 `receivedAt`） |
+| `GET` | `/api/devices` | 控制台会话 | 当前账号的设备列表与遥测 | 幂等 |
+| `POST` | `/api/devices` | 控制台会话 | 创建设备，完整令牌只返回一次 | 非幂等 |
+| `POST` | `/api/devices/:id/rotate` | 控制台会话 | 轮换令牌，旧令牌立即失效 | 非幂等 |
+| `DELETE` | `/api/devices/:id` | 控制台会话 | 撤销设备 | 幂等 |
+| `GET` | `/api/display` | 控制台会话 | 读取布局、刷新间隔与时区 | 幂等 |
+| `PUT` | `/api/display` | 控制台会话 | 修改布局、刷新间隔与时区 | 幂等 |
+| `GET` | `/api/display/screen` | 控制台会话 | 控制台预览用屏幕数据（无 ETag） | 幂等 |
 
 请求体上限默认 `256kb`（`BODY_LIMIT`），遥测与设置请求体远小于该值。
 
 ## 6. 接口详情
+
+> **v2 变更：** 旧版 `/api/device/token`、`/api/device/status`、`/api/device/settings`
+> 已移除。设备只使用 6.2 / 6.3；令牌与状态由控制台的 `/api/devices` 管理。
+> 下文 6.4–6.7 仅作为旧版迁移参考保留，设备端不应再调用。
 
 ### 6.1 `GET /api/health`
 
@@ -508,7 +518,7 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
 
 ### 6.10 `GET /api/display/screen`（控制台预览）
 
-用途：控制台预览设备将看到的画面。**免鉴权、忽略 `If-None-Match`、总是返回 `200`。**
+用途：控制台预览当前用户设备将看到的画面。**需要控制台会话、忽略 `If-None-Match`、总是返回 `200`。**
 
 响应体与 `GET /api/device/screen` 完全相同（`DeviceScreenPayload`），但：
 
@@ -526,9 +536,11 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
 
 | 字段 | 类型 | 可空 | 说明 |
 | --- | --- | --- | --- |
+| `schemaVersion` | integer | 否 | 当前为 `1`；不认识的版本应先提示升级固件 |
 | `generatedAt` | string | 否 | 快照生成时刻，ISO-8601 UTC。**不参与 ETag** |
-| `timezone` | string | 否 | IANA 时区名，默认 `Asia/Shanghai`；`now` 与 `month` 均按此计算 |
+| `timezone` | string | 否 | IANA 时区名，由用户配置；`now` 与 `month` 均按此计算 |
 | `etag` | string | 否 | 数据内容哈希（40 位小写十六进制 sha1，**含双引号**），与响应头 `ETag` 完全一致，可直接作为 `If-None-Match` 的值 |
+| `device` | object \| null | 是 | 当前设备 `{ id, name }`；**不参与 ETag** |
 | `screen` | object | 否 | 屏幕尺寸、刷新间隔与当前布局，见 7.2 |
 | `now` | object | 否 | 当前时间信息，见 7.3 |
 | `month` | object | 否 | 当月日历信息，见 7.4 |
@@ -577,6 +589,9 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
 | `weekday` | string | `周一` … `周日` |
 | `date` | string | `YYYY-MM-DD` |
 | `dateLabel` | string | 可直接绘制的日期标签，形如 `10月18日`（不含年份）；设备端原样绘制，不要反向解析 |
+| `epochSeconds` | integer | 服务端当前 Unix 秒。**不参与 ETag**；用于校准 RTC |
+| `utcOffsetMinutes` | integer | 用户时区相对 UTC 的偏移分钟数（东八区 `480`） |
+| `localIso` | string | 用户时区下的本地墙上时间，`YYYY-MM-DDTHH:mm:ss`。**不参与 ETag**；可直接写入 RTC |
 
 ### 7.4 `month`
 
@@ -921,14 +936,22 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
 
 ## 9. 低功耗刷新策略
 
-### 9.1 `refreshMinutes` 与休眠
+### 9.1 `refreshMinutes` 与双周期休眠
 
-- `refreshMinutes` 取值为 **5–720** 的整数，默认 **30**，可通过 `PUT /api/display`
-  或 `PUT /api/device/settings` 修改。
-- 设备每次唤醒后按 `screen.refreshMinutes` 设置 RTC 定时器，然后进入深度休眠：
+- `refreshMinutes` 取值为 **5–720** 的整数，默认 **30**，可通过 `PUT /api/display` 修改。
+  它只决定**联网拉取**的周期，不决定时钟走时。
+- 设备端应使用两个独立的唤醒周期：
+  - **时钟周期**：约每分钟（或活跃时段每分钟、夜间 5 分钟）唤醒，只读 RTC、局部刷新
+    `clock` 矩形；
+  - **网络周期**：按 `screen.refreshMinutes` 唤醒，连 Wi-Fi、拉取 `/api/device/screen`、
+    上报遥测。
+- 每次计算下一次唤醒时取两者中较早的时间；不要用 30 分钟网络周期直接代替时钟周期，
+  否则分钟数会明显滞后。
 
 ```c
+/* 网络周期 */
 esp_sleep_enable_timer_wakeup((uint64_t)refresh_minutes * 60ULL * 1000000ULL);
+/* 实际实现还需要把定时器设为 min(下一次分钟边界, 下一次网络拉取) */
 esp_deep_sleep_start();
 ```
 
@@ -936,15 +959,17 @@ esp_deep_sleep_start();
   待机电流取决于板卡（TG28 + 外设断电），以实测为准，通常在几十 µA 量级。
 - 唤醒源可以叠加：RTC 定时器 + 拨轮按键（RTC GPIO）+ PCF85063 的闹钟中断。
   按键唤醒时立即刷新一次，能让「按下即更新」的交互成立。
+- 分钟级局部刷新会累积残影并消耗面板刷新寿命：每天首次唤醒做一次全刷，
+  连续局刷 12–24 次后插入全刷，低温环境缩短全刷周期。
 
 ### 9.2 时钟由本地 RTC 走时
 
 - **不要为了分钟跳变而每分钟刷新整屏。** 时钟模块的走时由 PCF85063 RTC 提供，
-  设备端只需在分钟边界做一次**局部刷新**，只重画 `clock` 模块的矩形。
-- PCF85063 通过 I²C 读取，掉电由纽扣电池维持；Wi-Fi 联网后可用服务端 `now.iso`
-  校准一次（注意换算到本地时区再写入）。
-- 时区：`screen` 数据中的 `now` 已按 `timezone` 换算好，设备端不需要自己做时区换算；
-  给 RTC 写时间时写入**本地时间**即可，避免固件里再实现一套时区库。
+  设备端只在分钟边界做一次**局部刷新**，只重画 `clock` 模块的矩形。
+- PCF85063 通过 I²C 读取，掉电由纽扣电池维持；联网后可用 `now.epochSeconds` +
+  `now.utcOffsetMinutes` 校准，或直接把 `now.localIso` 写入 RTC（均为本地墙上时间）。
+- 304 响应没有 body，但 HTTP `Date` 头仍在；可用它加已保存的时区偏移做低成本校准。
+- 时区：`screen` 数据中的 `now` 已按 `timezone` 换算好，设备端不需要自己做时区换算。
 
 ### 9.3 ETag 命中 304 时不重绘
 
@@ -1040,8 +1065,9 @@ esp_deep_sleep_start();
 
 ## 11. ESP-IDF 对接示例
 
-以下为伪代码，但调用的 API 均为 ESP-IDF v5.x 真实存在的接口，可直接照着落地。
-完整固件工程位于仓库 `hardware/` 目录（开发中）。
+以下为伪代码，但调用的 API 均为 ESP-IDF v5.x / v6.x 真实存在的接口，可直接照着落地。
+完整固件工程位于仓库 [`hardware/main`](../../hardware/main)（ESP-IDF v6.1，已实现本文全部
+设备端契约；构建、配网与验收步骤见 [hardware/README.md](../../hardware/README.md)）。
 
 示例中出现的 `board_init()`、`inkpane_draw_module()`、`inkpane_refresh_minutes()`、
 `battery_percent()`、`battery_millivolt()`、`wifi_rssi()`、`BUTTON_WAKE_PIN_MASK`
@@ -1440,9 +1466,8 @@ BASE=http://127.0.0.1:4000
 # 1. 服务是否在线
 curl -s "$BASE/api/health"
 
-# 2. 获取（首次会生成）设备令牌
-TOKEN=$(curl -s "$BASE/api/device/token" | jq -r .data.token)
-echo "$TOKEN"
+# 2. 从控制台「屏幕与设备 → 添加设备」复制令牌（只显示一次）
+TOKEN=7f3a9c2e5b8d4a61c0f9e2d7b4a8c153
 
 # 3. 拉取屏幕数据，同时保存响应头
 curl -s -D headers.txt -o screen.json \
@@ -1460,10 +1485,7 @@ curl -s -o /dev/null -w '%{http_code}\n' \
   "$BASE/api/device/screen"
 # 输出：304
 
-# 6. 改一条待办或日程后再请求，ETag 应变化并返回 200（此处以改布局为例）
-curl -s -X PUT "$BASE/api/display" \
-  -H 'Content-Type: application/json' \
-  -d '{"refreshMinutes":15}' > /dev/null
+# 6. 在控制台改一条待办/日程或布局，再请求会返回 200 与新 ETag
 curl -s -o /dev/null -w '%{http_code}\n' \
   -H "X-Device-Token: $TOKEN" \
   -H "If-None-Match: $ETAG" \
@@ -1476,15 +1498,12 @@ curl -s -X POST "$BASE/api/device/telemetry" \
   -H 'Content-Type: application/json' \
   -d '{"temperature":24.3,"humidity":46.8,"batteryPercent":87,"batteryVoltage":4.06,"rssi":-56,"firmware":"0.1.0","uptimeSeconds":182}'
 
-# 8. 查看设备状态（免鉴权；确认 lastSeenAt、screenVersion、refreshMinutes）
-curl -s "$BASE/api/device/status"
-
-# 9. 轮换令牌：旧令牌立即失效
-curl -s -X POST "$BASE/api/device/token"
+# 8. 设备状态与令牌轮换在控制台「屏幕与设备」页完成；
+#    轮换后旧令牌立即失效，再拉屏会返回 401。
 curl -s -o /dev/null -w '%{http_code}\n' \
   -H "X-Device-Token: $TOKEN" \
   "$BASE/api/device/screen"
-# 输出：401
+# 在控制台轮换后，这里输出：401
 ```
 
 Windows PowerShell 下把 `curl` 换成 `curl.exe`，`grep`/`sed` 用 PowerShell 等价写法；
@@ -1508,7 +1527,7 @@ Windows PowerShell 下把 `curl` 换成 `curl.exe`，`grep`/`sed` 用 PowerShell
 **Q3：`weather` 是 `null`，或者 `stale: true`。**
 
 设备的屏幕数据里天气**只会来自缓存**：`null` 表示天气模块被关闭或从未成功取数，
-`source` 恒为 `cache`；`stale: true` 表示缓存已过期且控制台尚未刷新成功，此时
+`source` 恒为 `cache`；`stale: true` 表示缓存已过期且后台刷新尚未成功，此时
 `message` 会给出原因。设备应隐藏天气模块或只显示占位文字，不要显示 0 °C。
 控制台的 `GET /api/weather` 还会出现 `source: "open-meteo"`（本次实时取数）与
 `source: "fallback"`（从未成功过的占位快照），排查方向：本机能否访问
@@ -1536,16 +1555,16 @@ Windows PowerShell 下把 `curl` 换成 `curl.exe`，`grep`/`sed` 用 PowerShell
 
 **Q7：轮换令牌后设备失联。**
 
-这是设计行为：`POST /api/device/token` 会让旧令牌立即失效。需要重新把新令牌写入设备
-NVS（串口命令或重新配网），设备下一次唤醒即可恢复。若设备已无法联网配置，只能重新
-烧录带新令牌的固件。为避免这种情况，轮换前先确认能把新令牌送进设备。
+这是设计行为：控制台 `POST /api/devices/:id/rotate` 会让旧令牌立即失效。需要重新把新令牌
+写入设备 NVS（串口命令或重新配网），设备下一次唤醒即可恢复。若设备已无法联网配置，
+只能重新烧录带新令牌的固件。为避免这种情况，轮换前先确认能把新令牌送进设备。
 
 **Q8：一天要唤醒多少次？会不会很耗电？**
 
-按 `refreshMinutes = 30` 计算，一天 48 次唤醒；其中真正刷屏的通常只有个位数
-（跨天、日程变动、天气更新）。每次唤醒的耗电主要来自 Wi-Fi 连接与 HTTP 往返，
-而不是刷新本身。想更省电：调大 `refreshMinutes`、把遥测改为每 N 次唤醒上报一次、
-时钟分钟用局部刷新而不是整屏刷新。
+按 `refreshMinutes = 30` 计算，一天约 48 次**联网**唤醒；时钟还需要独立的分钟级唤醒，
+只做局部刷新。真正整屏刷新的通常只有个位数（跨天、日程变动、天气更新）。每次联网唤醒的
+耗电主要来自 Wi-Fi 连接与 HTTP 往返，而不是刷新本身。想更省电：调大 `refreshMinutes`、
+把遥测改为每 N 次唤醒上报一次、夜间降低时钟唤醒频率。
 
 **Q9：屏幕上有残影怎么办。**
 

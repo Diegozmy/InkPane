@@ -2,7 +2,7 @@
  * 天气设置读写。
  *
  * 城市、经纬度与开关都按契约使用独立键（weather.city / weather.latitude / …），
- * 首次读取时把缺省键落库，保证 updatedAt 稳定、GET 结果可重复。
+ * 多用户后每个用户各有一份。
  */
 
 import type { SqliteDatabase } from '../../db/client.js';
@@ -48,8 +48,8 @@ function parseCoordinate(raw: string | null, min: number, max: number, fallback:
 }
 
 /** 读取设置，顺带补齐缺失的默认键。 */
-export function readWeatherSettings(db: SqliteDatabase): WeatherSettings {
-  const missing = ALL_KEYS.filter((key) => readSettingRow(db, key) === null);
+export function readWeatherSettings(db: SqliteDatabase, userId: number): WeatherSettings {
+  const missing = ALL_KEYS.filter((key) => readSettingRow(db, userId, key) === null);
   const defaults: Record<(typeof ALL_KEYS)[number], string> = {
     [KEYS.city]: DEFAULT_WEATHER_SETTINGS.city,
     [KEYS.latitude]: String(DEFAULT_WEATHER_SETTINGS.latitude),
@@ -57,28 +57,28 @@ export function readWeatherSettings(db: SqliteDatabase): WeatherSettings {
     [KEYS.enabled]: DEFAULT_WEATHER_SETTINGS.enabled ? 'true' : 'false',
   };
   for (const key of missing) {
-    writeSetting(db, key, defaults[key]);
+    writeSetting(db, userId, key, defaults[key]);
   }
 
-  const cityRaw = readSetting(db, KEYS.city)?.trim();
-  const enabledRaw = readSetting(db, KEYS.enabled);
+  const cityRaw = readSetting(db, userId, KEYS.city)?.trim();
+  const enabledRaw = readSetting(db, userId, KEYS.enabled);
 
   return {
     city: cityRaw && cityRaw.length > 0 ? cityRaw : DEFAULT_WEATHER_SETTINGS.city,
     latitude: parseCoordinate(
-      readSetting(db, KEYS.latitude),
+      readSetting(db, userId, KEYS.latitude),
       -90,
       90,
       DEFAULT_WEATHER_SETTINGS.latitude,
     ),
     longitude: parseCoordinate(
-      readSetting(db, KEYS.longitude),
+      readSetting(db, userId, KEYS.longitude),
       -180,
       180,
       DEFAULT_WEATHER_SETTINGS.longitude,
     ),
     enabled: enabledRaw === null ? DEFAULT_WEATHER_SETTINGS.enabled : enabledRaw === 'true',
-    updatedAt: latestSettingUpdate(db, ALL_KEYS) ?? nowIso(),
+    updatedAt: latestSettingUpdate(db, userId, ALL_KEYS) ?? nowIso(),
   };
 }
 
@@ -91,26 +91,27 @@ export interface WeatherSettingsPatch {
 
 export function writeWeatherSettings(
   db: SqliteDatabase,
+  userId: number,
   patch: WeatherSettingsPatch,
 ): WeatherSettings {
-  if (patch.city !== undefined) writeSetting(db, KEYS.city, patch.city);
-  if (patch.latitude !== undefined) writeSetting(db, KEYS.latitude, String(patch.latitude));
-  if (patch.longitude !== undefined) writeSetting(db, KEYS.longitude, String(patch.longitude));
+  if (patch.city !== undefined) writeSetting(db, userId, KEYS.city, patch.city);
+  if (patch.latitude !== undefined) writeSetting(db, userId, KEYS.latitude, String(patch.latitude));
+  if (patch.longitude !== undefined) writeSetting(db, userId, KEYS.longitude, String(patch.longitude));
   if (patch.enabled !== undefined) {
-    writeSetting(db, KEYS.enabled, patch.enabled ? 'true' : 'false');
+    writeSetting(db, userId, KEYS.enabled, patch.enabled ? 'true' : 'false');
   }
-  return readWeatherSettings(db);
+  return readWeatherSettings(db, userId);
 }
 
 /** 对外返回的形状：额外带上显示时区，方便前端判断「今天」。 */
-export function weatherSettingsView(db: SqliteDatabase): WeatherSettingsView {
-  const settings = readWeatherSettings(db);
+export function weatherSettingsView(db: SqliteDatabase, userId: number): WeatherSettingsView {
+  const settings = readWeatherSettings(db, userId);
   return {
     city: settings.city,
     latitude: settings.latitude,
     longitude: settings.longitude,
     enabled: settings.enabled,
-    timezone: readDisplayTimezone(db),
+    timezone: readDisplayTimezone(db, userId),
     updatedAt: settings.updatedAt,
   };
 }

@@ -6,16 +6,17 @@
  */
 
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import request from 'supertest';
 import type { Express } from 'express';
 import { createApp } from '../src/app.js';
 import { closeDatabase, openDatabase, setDatabaseForTesting } from '../src/db/client.js';
 import { runMigrations } from '../src/db/migrations.js';
+import { setupTestAdmin } from './helpers/auth.js';
 import { todayDateKey } from '../src/domain/display-time.js';
 
 const TZ = 'Asia/Shanghai';
 
 let app: Express;
+let agent: Awaited<ReturnType<typeof setupTestAdmin>>;
 
 interface LayoutModule {
   id: string;
@@ -34,7 +35,7 @@ interface Layout {
 }
 
 async function getDisplay(): Promise<Record<string, unknown>> {
-  const response = await request(app).get('/api/display');
+  const response = await agent.get('/api/display');
   expect(response.status).toBe(200);
   return response.body.data as Record<string, unknown>;
 }
@@ -51,12 +52,13 @@ function cloneLayout(layout: Layout): Layout {
   return JSON.parse(JSON.stringify(layout)) as Layout;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   closeDatabase();
   const db = openDatabase(':memory:');
   runMigrations(db);
   setDatabaseForTesting(db);
   app = createApp();
+  agent = await setupTestAdmin(app);
 });
 
 afterAll(() => {
@@ -130,7 +132,7 @@ describe('更新布局与刷新间隔', () => {
       module.id === 'clock' ? { ...module, x: 24, y: 20, w: 224, h: 104, enabled: false } : module,
     );
 
-    const response = await request(app)
+    const response = await agent
       .put('/api/display')
       .send({ layout: { ...layout, updatedAt: '2000-01-01T00:00:00.000Z' }, refreshMinutes: 60 });
     expect(response.status).toBe(200);
@@ -151,7 +153,7 @@ describe('更新布局与刷新间隔', () => {
 
   it('只改 refreshMinutes 时布局不变', async () => {
     const before = await getDisplay();
-    const response = await request(app).put('/api/display').send({ refreshMinutes: 120 });
+    const response = await agent.put('/api/display').send({ refreshMinutes: 120 });
     expect(response.status).toBe(200);
     expect(response.body.data.refreshMinutes).toBe(120);
     expect((response.body.data.layout as Layout).updatedAt).toBe(
@@ -167,33 +169,33 @@ describe('更新布局与刷新间隔', () => {
     outOfBounds.modules = outOfBounds.modules.map((module) =>
       module.id === 'clock' ? { ...module, x: 600 } : module,
     );
-    const boundsResponse = await request(app).put('/api/display').send({ layout: outOfBounds });
+    const boundsResponse = await agent.put('/api/display').send({ layout: outOfBounds });
 
     const notGrid = cloneLayout(base);
     notGrid.modules = notGrid.modules.map((module) =>
       module.id === 'clock' ? { ...module, x: 17 } : module,
     );
-    const gridResponse = await request(app).put('/api/display').send({ layout: notGrid });
+    const gridResponse = await agent.put('/api/display').send({ layout: notGrid });
 
     const missing = cloneLayout(base);
     missing.modules = missing.modules.slice(0, 5);
-    const missingResponse = await request(app).put('/api/display').send({ layout: missing });
+    const missingResponse = await agent.put('/api/display').send({ layout: missing });
 
     const duplicated = cloneLayout(base);
     duplicated.modules = duplicated.modules.map((module, index) =>
       index === 1 ? { ...module, id: 'clock' } : module,
     );
-    const duplicateResponse = await request(app).put('/api/display').send({ layout: duplicated });
+    const duplicateResponse = await agent.put('/api/display').send({ layout: duplicated });
 
     const extra = cloneLayout(base);
     extra.modules = extra.modules.map((module) =>
       module.id === 'clock' ? ({ ...module, extra: true } as unknown as LayoutModule) : module,
     );
-    const extraResponse = await request(app).put('/api/display').send({ layout: extra });
+    const extraResponse = await agent.put('/api/display').send({ layout: extra });
 
     const wrongSize = cloneLayout(base);
     wrongSize.width = 1024 as unknown as number;
-    const sizeResponse = await request(app).put('/api/display').send({ layout: wrongSize });
+    const sizeResponse = await agent.put('/api/display').send({ layout: wrongSize });
 
     for (const response of [
       boundsResponse,
@@ -210,31 +212,31 @@ describe('更新布局与刷新间隔', () => {
   });
 
   it('refreshMinutes 边界为 5..720', async () => {
-    const tooSmall = await request(app).put('/api/display').send({ refreshMinutes: 4 });
+    const tooSmall = await agent.put('/api/display').send({ refreshMinutes: 4 });
     expect(tooSmall.status).toBe(400);
     expect(tooSmall.body.error.code).toBe('VALIDATION_FAILED');
 
-    const tooLarge = await request(app).put('/api/display').send({ refreshMinutes: 721 });
+    const tooLarge = await agent.put('/api/display').send({ refreshMinutes: 721 });
     expect(tooLarge.status).toBe(400);
 
-    const lower = await request(app).put('/api/display').send({ refreshMinutes: 5 });
+    const lower = await agent.put('/api/display').send({ refreshMinutes: 5 });
     expect(lower.status).toBe(200);
     expect(lower.body.data.refreshMinutes).toBe(5);
 
-    const upper = await request(app).put('/api/display').send({ refreshMinutes: 720 });
+    const upper = await agent.put('/api/display').send({ refreshMinutes: 720 });
     expect(upper.status).toBe(200);
     expect(upper.body.data.refreshMinutes).toBe(720);
   });
 
   it('非整数刷新间隔返回 400', async () => {
-    const response = await request(app).put('/api/display').send({ refreshMinutes: 30.5 });
+    const response = await agent.put('/api/display').send({ refreshMinutes: 30.5 });
     expect(response.status).toBe(400);
   });
 });
 
 describe('控制台屏幕预览', () => {
   it('免鉴权返回与设备屏幕一致的载荷', async () => {
-    const response = await request(app).get('/api/display/screen');
+    const response = await agent.get('/api/display/screen');
     expect(response.status).toBe(200);
 
     const payload = response.body.data;

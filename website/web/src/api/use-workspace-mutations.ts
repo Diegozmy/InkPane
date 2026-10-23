@@ -6,7 +6,6 @@ import { toast, useUiStore } from '@/store/ui-store';
 import { queryKeys } from './query-keys';
 import type {
   DeviceScreenPayload,
-  DeviceSettingsPayload,
   DisplayLayout,
   Todo,
   TodoPayload,
@@ -162,42 +161,14 @@ export function useUpdateWeatherSettings() {
 export function useUpdateDisplay() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (payload: { layout?: DisplayLayout; refreshMinutes?: number }) =>
+    mutationFn: (payload: { layout?: DisplayLayout; refreshMinutes?: number; timezone?: string }) =>
       api.updateDisplay(payload),
     onSuccess: () => {
       toast.success('屏幕布局已生效', '设备下次拉取时会拿到新布局');
       void client.invalidateQueries({ queryKey: ['display'] });
-      void client.invalidateQueries({ queryKey: ['device'] });
+      void client.invalidateQueries({ queryKey: ['devices'] });
     },
     onError: (error) => reportError('保存屏幕布局失败', error),
-  });
-}
-
-/* ------------------------------ 设备 ------------------------------ */
-
-export function useUpdateDeviceSettings() {
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn: (payload: DeviceSettingsPayload) => api.updateDeviceSettings(payload),
-    onSuccess: (status) => {
-      toast.success('设备设置已保存', status.name);
-      void client.invalidateQueries({ queryKey: ['device'] });
-      void client.invalidateQueries({ queryKey: ['display'] });
-    },
-    onError: (error) => reportError('保存设备设置失败', error),
-  });
-}
-
-export function useRotateDeviceToken() {
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn: () => api.rotateDeviceToken(),
-    onSuccess: ({ token }) => {
-      toast.success('设备令牌已轮换', '旧令牌立即失效，请同步更新设备端配置');
-      client.setQueryData(queryKeys.deviceToken, { token });
-      void client.invalidateQueries({ queryKey: ['device'] });
-    },
-    onError: (error) => reportError('轮换设备令牌失败', error),
   });
 }
 

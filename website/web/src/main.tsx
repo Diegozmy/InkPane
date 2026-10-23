@@ -9,6 +9,7 @@ import './styles/layout.css';
 import './styles/calendar.css';
 import './styles/panels.css';
 import './styles/workspace.css';
+import './styles/auth.css';
 
 const container = document.getElementById('root');
 if (!container) {

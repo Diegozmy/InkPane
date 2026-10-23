@@ -3,6 +3,7 @@
 import { Router } from 'express';
 import { getDatabase } from '../../db/client.js';
 import { asyncHandler } from '../../http/async-handler.js';
+import { requireUser } from '../../http/auth.js';
 import { weatherSearchQuerySchema, weatherSettingsUpdateSchema } from '../../domain/schemas.js';
 import {
   clearWeatherCache,
@@ -17,22 +18,22 @@ export function createWeatherRouter(): Router {
 
   router.get(
     '/',
-    asyncHandler(async (_req, res) => {
-      res.json({ data: await getWeatherSnapshot() });
+    asyncHandler(async (req, res) => {
+      res.json({ data: await getWeatherSnapshot(requireUser(req).userId) });
     }),
   );
 
   router.post(
     '/refresh',
-    asyncHandler(async (_req, res) => {
-      res.json({ data: await refreshWeatherSnapshot() });
+    asyncHandler(async (req, res) => {
+      res.json({ data: await refreshWeatherSnapshot(requireUser(req).userId) });
     }),
   );
 
   router.get(
     '/settings',
-    asyncHandler((_req, res) => {
-      res.json({ data: weatherSettingsView(getDatabase()) });
+    asyncHandler((req, res) => {
+      res.json({ data: weatherSettingsView(getDatabase(), requireUser(req).userId) });
     }),
   );
 
@@ -41,10 +42,11 @@ export function createWeatherRouter(): Router {
     asyncHandler((req, res) => {
       const patch = weatherSettingsUpdateSchema.parse(req.body);
       const db = getDatabase();
-      writeWeatherSettings(db, patch);
+      const userId = requireUser(req).userId;
+      writeWeatherSettings(db, userId, patch);
       // 城市/坐标/开关变化后旧缓存已无意义，清空以便下次刷新
-      clearWeatherCache(db);
-      res.json({ data: weatherSettingsView(db) });
+      clearWeatherCache(db, userId);
+      res.json({ data: weatherSettingsView(db, userId) });
     }),
   );
 

@@ -12,6 +12,9 @@ import {
   requestContext,
   securityHeaders,
 } from './http/middleware.js';
+import { csrfGuard, requireAuth } from './http/auth.js';
+import { createAuthRouter, createSetupRouter } from './modules/auth/routes.js';
+import { createUsersRouter } from './modules/users/routes.js';
 import { createCategoriesRouter } from './modules/categories.js';
 import { createEventsRouter, createOccurrencesRouter } from './modules/events/routes.js';
 import { createRemindersRouter } from './modules/reminders.js';
@@ -21,7 +24,7 @@ import { createTodosRouter } from './modules/todos/routes.js';
 import { createWeatherRouter } from './modules/weather/routes.js';
 import { createDisplayRouter } from './modules/display/routes.js';
 import { createDeviceRouter } from './modules/device/routes.js';
-import { countAllEvents } from './modules/events/service.js';
+import { createDevicesRouter } from './modules/devices/routes.js';
 import { getDatabase } from './db/client.js';
 import { schemaVersion } from './db/migrations.js';
 
@@ -32,15 +35,15 @@ import { schemaVersion } from './db/migrations.js';
 export function createApp(): Express {
   const app = express();
 
-  // 反向代理场景下仍能拿到真实客户端 IP
-  app.set('trust proxy', true);
+  // 仅在明确配置了反向代理时信任 X-Forwarded-*，避免客户端伪造 IP。
+  app.set('trust proxy', config.trustProxy);
   app.disable('x-powered-by');
 
   const corsOptions: CorsOptions = {
     origin(origin, callback) {
       // 无 Origin 的请求（同源页面、curl、服务端调用）一律放行
       if (!origin) return callback(null, true);
-      if (config.corsOrigins.includes('*') || config.corsOrigins.includes(origin)) {
+      if (config.corsOrigins.includes(origin)) {
         return callback(null, true);
       }
       logger.warn('CORS 拒绝来源', { origin });
@@ -76,8 +79,9 @@ export function createApp(): Express {
   );
   app.use(securityHeaders);
   app.use(cors(corsOptions));
-  app.use(express.json({ limit: config.bodyLimit }));
+  // requestId 必须在 body parser 之前，否则 JSON 解析错误没有 requestId。
   app.use(requestContext);
+  app.use(express.json({ limit: config.bodyLimit }));
   app.use(accessLog);
 
   app.get('/api/health', (_req, res) => {
@@ -86,13 +90,23 @@ export function createApp(): Express {
         status: 'ok',
         env: config.nodeEnv,
         schemaVersion: safeSchemaVersion(),
-        eventCount: safeCount(),
         uptimeSeconds: Math.round(process.uptime()),
         serverTime: new Date().toISOString(),
       },
     });
   });
 
+  // 公开或半公开：初始化与登录
+  app.use('/api/setup', createSetupRouter());
+  app.use('/api/auth', createAuthRouter());
+
+  // 设备拉取：只认设备令牌，不参与 Cookie 会话
+  app.use('/api/device', createDeviceRouter());
+
+  // 从这里开始全部要求控制台会话
+  app.use('/api', requireAuth, csrfGuard);
+  app.use('/api/users', createUsersRouter());
+  app.use('/api/devices', createDevicesRouter());
   app.use('/api/categories', createCategoriesRouter());
   app.use('/api/events', createEventsRouter());
   app.use('/api/occurrences', createOccurrencesRouter());
@@ -102,7 +116,6 @@ export function createApp(): Express {
   app.use('/api/todos', createTodosRouter());
   app.use('/api/weather', createWeatherRouter());
   app.use('/api/display', createDisplayRouter());
-  app.use('/api/device', createDeviceRouter());
 
   mountStaticApp(app);
 
@@ -110,14 +123,6 @@ export function createApp(): Express {
   app.use(errorHandler);
 
   return app;
-}
-
-function safeCount(): number {
-  try {
-    return countAllEvents();
-  } catch {
-    return 0;
-  }
 }
 
 function safeSchemaVersion(): number {

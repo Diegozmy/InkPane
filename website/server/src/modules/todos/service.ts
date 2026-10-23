@@ -1,7 +1,7 @@
 /**
  * 待办服务。
  *
- * 「今天/本周」按显示设置里的 display.timezone 计算，而不是服务器本机时区，
+ * 「今天/本周」按用户的 display.timezone 计算，而不是服务器本机时区，
  * 因此把服务部署到任何时区，过滤结果都与用户看到的墨水屏一致。
  */
 
@@ -26,15 +26,20 @@ export interface TodoListResult {
 }
 
 /** 分类不存在时按「校验失败」处理，与事件模块保持一致。 */
-function assertCategoryExists(db: SqliteDatabase, categoryId: number | null | undefined): void {
+function assertCategoryExists(
+  db: SqliteDatabase,
+  userId: number,
+  categoryId: number | null | undefined,
+): void {
   if (categoryId === null || categoryId === undefined) return;
-  if (!findCategory(db, categoryId)) {
+  if (!findCategory(db, userId, categoryId)) {
     throw new ValidationError(`分类 ${categoryId} 不存在`);
   }
 }
 
 export function listTodoItems(
   query: TodoListQueryInput,
+  userId: number,
   db: SqliteDatabase = getDatabase(),
 ): TodoListResult {
   const limit = query.limit ?? DEFAULT_LIMIT;
@@ -43,10 +48,10 @@ export function listTodoItems(
   let dueFrom: string | undefined;
   let dueTo: string | undefined;
   if (query.due === 'today') {
-    dueFrom = todayDateKey(readDisplayTimezone(db));
+    dueFrom = todayDateKey(readDisplayTimezone(db, userId));
     dueTo = dueFrom;
   } else if (query.due === 'week') {
-    dueFrom = todayDateKey(readDisplayTimezone(db));
+    dueFrom = todayDateKey(readDisplayTimezone(db, userId));
     // 「本周」= 今天起 7 天（含当天）
     dueTo = addDaysToDateKey(dueFrom, 6);
   }
@@ -58,18 +63,26 @@ export function listTodoItems(
     filters.dueTo = dueTo;
   }
 
-  const { items, total } = repo.listTodos(db, filters);
+  const { items, total } = repo.listTodos(db, userId, filters);
   return { items, total, limit, offset };
 }
 
-export function getTodoOrThrow(id: number, db: SqliteDatabase = getDatabase()): Todo {
-  const todo = repo.findTodo(db, id);
+export function getTodoOrThrow(
+  id: number,
+  userId: number,
+  db: SqliteDatabase = getDatabase(),
+): Todo {
+  const todo = repo.findTodo(db, userId, id);
   if (!todo) throw new NotFoundError(`待办 ${id} 不存在`);
   return todo;
 }
 
-export function createTodo(input: TodoCreateInput, db: SqliteDatabase = getDatabase()): Todo {
-  assertCategoryExists(db, input.categoryId);
+export function createTodo(
+  input: TodoCreateInput,
+  userId: number,
+  db: SqliteDatabase = getDatabase(),
+): Todo {
+  assertCategoryExists(db, userId, input.categoryId);
   const model: repo.TodoWriteModel = {
     title: input.title,
     notes: input.notes ?? '',
@@ -77,19 +90,20 @@ export function createTodo(input: TodoCreateInput, db: SqliteDatabase = getDatab
     priority: (input.priority ?? 'normal') as Priority,
     dueDate: input.dueDate ?? null,
     categoryId: input.categoryId ?? null,
-    sortOrder: input.sortOrder ?? repo.nextSortOrder(db),
+    sortOrder: input.sortOrder ?? repo.nextSortOrder(db, userId),
     completedAt: null,
   };
-  return repo.insertTodo(db, model);
+  return repo.insertTodo(db, userId, model);
 }
 
 export function updateTodoById(
   id: number,
   patch: TodoUpdateInput,
+  userId: number,
   db: SqliteDatabase = getDatabase(),
 ): Todo {
-  const existing = getTodoOrThrow(id, db);
-  if (patch.categoryId !== undefined) assertCategoryExists(db, patch.categoryId);
+  const existing = getTodoOrThrow(id, userId, db);
+  if (patch.categoryId !== undefined) assertCategoryExists(db, userId, patch.categoryId);
 
   // done 显式切换时同步 completedAt；只改其他字段则保留原完成时间
   const completedAt =
@@ -106,19 +120,27 @@ export function updateTodoById(
     completedAt,
   };
 
-  const updated = repo.updateTodo(db, id, model);
+  const updated = repo.updateTodo(db, userId, id, model);
   if (!updated) throw new NotFoundError(`待办 ${id} 不存在`);
   return updated;
 }
 
-export function deleteTodoById(id: number, db: SqliteDatabase = getDatabase()): void {
-  if (!repo.deleteTodo(db, id)) throw new NotFoundError(`待办 ${id} 不存在`);
+export function deleteTodoById(
+  id: number,
+  userId: number,
+  db: SqliteDatabase = getDatabase(),
+): void {
+  if (!repo.deleteTodo(db, userId, id)) throw new NotFoundError(`待办 ${id} 不存在`);
 }
 
 /** 按给定顺序写 sort_order；不存在的 id 忽略，返回重排后的完整列表。 */
-export function reorderTodos(ids: readonly number[], db: SqliteDatabase = getDatabase()): Todo[] {
+export function reorderTodos(
+  ids: readonly number[],
+  userId: number,
+  db: SqliteDatabase = getDatabase(),
+): Todo[] {
   ids.forEach((id, index) => {
-    repo.updateSortOrder(db, id, (index + 1) * 10);
+    repo.updateSortOrder(db, userId, id, (index + 1) * 10);
   });
-  return repo.listAllTodos(db);
+  return repo.listAllTodos(db, userId);
 }

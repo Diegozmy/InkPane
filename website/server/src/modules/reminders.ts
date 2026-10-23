@@ -10,6 +10,7 @@ import { Router } from 'express';
 import { getDatabase } from '../db/client.js';
 import { get } from '../db/query.js';
 import { asyncHandler } from '../http/async-handler.js';
+import { requireUser } from '../http/auth.js';
 import { reminderQuerySchema } from '../domain/schemas.js';
 import { MS_PER_MINUTE } from '../domain/time.js';
 import type { ReminderItem } from '../domain/types.js';
@@ -19,10 +20,11 @@ const DEFAULT_WINDOW_MINUTES = 60;
 const MAX_LOOKAHEAD_MINUTES = 20_160; // 14 天
 
 /** 库中配置的最大提前提醒量，决定需要向前预读多久的日程。 */
-function maxConfiguredLeadMinutes(): number {
+function maxConfiguredLeadMinutes(userId: number): number {
   const row = get<{ value: number | null }>(
     getDatabase(),
-    'SELECT MAX(remind_minutes_before) AS value FROM events WHERE status <> \'cancelled\'',
+    "SELECT MAX(remind_minutes_before) AS value FROM events WHERE user_id = ? AND status <> 'cancelled'",
+    [userId],
   );
   const value = Number(row?.value ?? 0);
   if (!Number.isFinite(value) || value <= 0) return 0;
@@ -35,7 +37,11 @@ export interface ReminderQuery {
   windowMinutes?: number;
 }
 
-export function listDueReminders(query: ReminderQuery, now: Date = new Date()): ReminderItem[] {
+export function listDueReminders(
+  query: ReminderQuery,
+  userId: number,
+  now: Date = new Date(),
+): ReminderItem[] {
   const windowStart = query.from ? new Date(query.from) : now;
   const windowMinutes = query.windowMinutes ?? DEFAULT_WINDOW_MINUTES;
   const windowEnd = query.to
@@ -46,7 +52,7 @@ export function listDueReminders(query: ReminderQuery, now: Date = new Date()): 
   if (windowEnd.getTime() <= windowStart.getTime()) return [];
 
   // 提前量可能远大于轮询窗口，因此把展开区间向后延伸最大提前量，避免漏报
-  const leadMinutes = maxConfiguredLeadMinutes();
+  const leadMinutes = maxConfiguredLeadMinutes(userId);
   const expandEnd = new Date(windowEnd.getTime() + leadMinutes * MS_PER_MINUTE);
 
   const { items } = queryOccurrences(
@@ -56,7 +62,7 @@ export function listDueReminders(query: ReminderQuery, now: Date = new Date()): 
       includeCancelled: false,
       limit: 1500,
     },
-    getDatabase(),
+    userId,
   );
 
   const reminders: ReminderItem[] = [];
@@ -93,7 +99,7 @@ export function createRemindersRouter(): Router {
     '/due',
     asyncHandler((req, res) => {
       const query = reminderQuerySchema.parse(req.query);
-      res.json({ data: listDueReminders(query) });
+      res.json({ data: listDueReminders(query, requireUser(req).userId) });
     }),
   );
 

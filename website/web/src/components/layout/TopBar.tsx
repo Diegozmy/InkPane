@@ -1,8 +1,9 @@
 /** 顶栏：品牌、主导航、连接状态与主题切换。 */
 
 import type { ReactElement } from 'react';
-import { NavLink, useLocation } from 'react-router-dom';
+import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { cn } from '@/lib/cn';
+import { useLogout, useMe } from '@/api/use-auth';
 import { Icon, type IconName } from '@/components/ui/icon';
 import { IconButton, Menu } from '@/components/ui';
 import type { ThemeMode } from '@/store/ui-store';
@@ -45,7 +46,6 @@ export interface TopBarProps {
 }
 
 export function TopBar({
-  health,
   isOffline,
   theme,
   onChangeTheme,
@@ -55,6 +55,13 @@ export function TopBar({
   showFilters = true,
 }: TopBarProps): ReactElement {
   const { pathname } = useLocation();
+  const navigate = useNavigate();
+  const me = useMe();
+  const logout = useLogout();
+  const isAdmin = me.data?.user.role === 'admin';
+  const navItems = isAdmin
+    ? [...NAV_ITEMS, { to: '/users', label: '用户', icon: 'users' as const, match: '/users' }]
+    : NAV_ITEMS;
 
   return (
     <header className="topbar">
@@ -80,7 +87,7 @@ export function TopBar({
       </NavLink>
 
       <nav className="topbar__nav" aria-label="主导航">
-        {NAV_ITEMS.map((item) => {
+        {navItems.map((item) => {
           const active =
             item.match === '/calendar' ? pathname.startsWith('/calendar') : pathname === item.to;
           return (
@@ -113,7 +120,7 @@ export function TopBar({
 
         <span
           className={cn('connection-dot', isOffline ? 'connection-dot--offline' : 'connection-dot--online')}
-          title={isOffline ? '无法连接后端服务' : `后端正常 · 共 ${health?.eventCount ?? 0} 条日程`}
+          title={isOffline ? '无法连接后端服务' : '后端正常'}
         >
           <Icon name={isOffline ? 'offline' : 'online'} size={13} />
           <span className="connection-dot__text">{isOffline ? '未连接' : '已连接'}</span>
@@ -140,6 +147,52 @@ export function TopBar({
             />
           )}
         />
+
+        {me.data?.user && (
+          <Menu
+            label="账户菜单"
+            items={[
+              {
+                key: 'account',
+                label: '账户与设置',
+                icon: 'settings' as const,
+                onSelect: () => navigate('/settings'),
+              },
+              ...(isAdmin
+                ? [
+                    {
+                      key: 'users',
+                      label: '用户管理',
+                      icon: 'users' as const,
+                      onSelect: () => navigate('/users'),
+                    },
+                  ]
+                : []),
+              {
+                key: 'logout',
+                label: '退出登录',
+                icon: 'sign-out' as const,
+                onSelect: () => {
+                  logout.mutate(undefined, {
+                    onSuccess: () => navigate('/login', { replace: true }),
+                  });
+                },
+              },
+            ]}
+            trigger={({ toggle, ref }) => (
+              <button
+                ref={ref}
+                type="button"
+                className="topbar__user"
+                onClick={toggle}
+                aria-label={`账户：${me.data?.user.displayName}`}
+              >
+                <Icon name="user-circle" size={18} />
+                <span className="topbar__user-name">{me.data?.user.displayName}</span>
+              </button>
+            )}
+          />
+        )}
       </div>
     </header>
   );

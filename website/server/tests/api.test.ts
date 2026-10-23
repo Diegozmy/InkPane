@@ -1,24 +1,25 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import request from 'supertest';
 import type { Express } from 'express';
 import { createApp } from '../src/app.js';
 import { closeDatabase, openDatabase, setDatabaseForTesting } from '../src/db/client.js';
 import { runMigrations } from '../src/db/migrations.js';
+import { setupTestAdmin } from './helpers/auth.js';
 
 const TZ = 'Asia/Shanghai';
 const SHANGHAI_MONDAY_9AM = '2025-06-02T01:00:00.000Z'; // 2025-06-02 09:00 +08
 const SHANGHAI_MONDAY_10AM = '2025-06-02T02:00:00.000Z';
 
 let app: Express;
+let agent: Awaited<ReturnType<typeof setupTestAdmin>>;
 
 async function createCategory(name = '工作', color = '#3b6fd4'): Promise<number> {
-  const response = await request(app).post('/api/categories').send({ name, color });
+  const response = await agent.post('/api/categories').send({ name, color });
   expect(response.status).toBe(201);
   return response.body.data.id as number;
 }
 
 async function createEvent(body: Record<string, unknown>): Promise<number> {
-  const response = await request(app)
+  const response = await agent
     .post('/api/events')
     .send({
       title: '默认标题',
@@ -34,17 +35,18 @@ async function createEvent(body: Record<string, unknown>): Promise<number> {
 async function listOccurrences(params: Record<string, string | number | boolean>): Promise<
   { startAt: string; eventId: number; occurrenceKey: string; isModified: boolean; title: string }[]
 > {
-  const response = await request(app).get('/api/occurrences').query(params);
+  const response = await agent.get('/api/occurrences').query(params);
   expect(response.status).toBe(200);
   return response.body.data;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   closeDatabase();
   const db = openDatabase(':memory:');
   runMigrations(db);
   setDatabaseForTesting(db);
   app = createApp();
+  agent = await setupTestAdmin(app);
 });
 
 afterAll(() => {
@@ -54,11 +56,10 @@ afterAll(() => {
 
 describe('健康检查', () => {
   it('返回运行状态与结构版本', async () => {
-    const response = await request(app).get('/api/health');
+    const response = await agent.get('/api/health');
     expect(response.status).toBe(200);
     expect(response.body.data.status).toBe('ok');
     expect(response.body.data.schemaVersion).toBeGreaterThanOrEqual(1);
-    expect(response.body.data.eventCount).toBe(0);
   });
 });
 
@@ -66,32 +67,32 @@ describe('分类接口', () => {
   it('可以创建、列出、更新与删除分类', async () => {
     const id = await createCategory('工作', '#3b6fd4');
 
-    const list = await request(app).get('/api/categories');
+    const list = await agent.get('/api/categories');
     expect(list.body.data).toHaveLength(1);
     expect(list.body.data[0]).toMatchObject({ id, name: '工作', color: '#3b6fd4' });
 
-    const updated = await request(app)
+    const updated = await agent
       .patch(`/api/categories/${id}`)
       .send({ name: '工作事项', color: '#2f9e6e' });
     expect(updated.status).toBe(200);
     expect(updated.body.data).toMatchObject({ name: '工作事项', color: '#2f9e6e' });
 
-    const removed = await request(app).delete(`/api/categories/${id}`);
+    const removed = await agent.delete(`/api/categories/${id}`);
     expect(removed.status).toBe(200);
     expect(removed.body.data).toMatchObject({ id, detachedEventCount: 0 });
 
-    expect((await request(app).get('/api/categories')).body.data).toHaveLength(0);
+    expect((await agent.get('/api/categories')).body.data).toHaveLength(0);
   });
 
   it('同名分类返回 409 而不是写入重复数据', async () => {
     await createCategory('会议', '#5b6b7f');
-    const duplicate = await request(app).post('/api/categories').send({ name: '会议', color: '#111111' });
+    const duplicate = await agent.post('/api/categories').send({ name: '会议', color: '#111111' });
     expect(duplicate.status).toBe(409);
     expect(duplicate.body.error.code).toBe('CONFLICT');
   });
 
   it('非法颜色返回 422 并给出字段级错误', async () => {
-    const response = await request(app).post('/api/categories').send({ name: '测试', color: 'blue' });
+    const response = await agent.post('/api/categories').send({ name: '测试', color: 'blue' });
     expect(response.status).toBe(422);
     expect(response.body.error.code).toBe('VALIDATION_FAILED');
     expect(response.body.error.details[0].path).toBe('color');
@@ -101,7 +102,7 @@ describe('分类接口', () => {
     const categoryId = await createCategory();
     await createEvent({ title: '带分类的日程', categoryId });
 
-    const removed = await request(app).delete(`/api/categories/${categoryId}`);
+    const removed = await agent.delete(`/api/categories/${categoryId}`);
     expect(removed.body.data.detachedEventCount).toBe(1);
 
     const occurrences = await listOccurrences({
@@ -126,7 +127,7 @@ describe('日程增删改查', () => {
   });
 
   it('结束时间早于开始时间返回 422', async () => {
-    const response = await request(app).post('/api/events').send({
+    const response = await agent.post('/api/events').send({
       title: '错误时间',
       startAt: '2025-06-02T10:00:00.000Z',
       endAt: '2025-06-02T09:00:00.000Z',
@@ -137,7 +138,7 @@ describe('日程增删改查', () => {
   });
 
   it('标题为空返回 422', async () => {
-    const response = await request(app).post('/api/events').send({
+    const response = await agent.post('/api/events').send({
       title: '   ',
       startAt: SHANGHAI_MONDAY_9AM,
       endAt: SHANGHAI_MONDAY_10AM,
@@ -147,7 +148,7 @@ describe('日程增删改查', () => {
 
   it('更新日程会同步生效到区间查询', async () => {
     const id = await createEvent({ title: '原标题' });
-    const updated = await request(app)
+    const updated = await agent
       .patch(`/api/events/${id}`)
       .send({ title: '新标题', priority: 'high' });
     expect(updated.status).toBe(200);
@@ -162,7 +163,7 @@ describe('日程增删改查', () => {
 
   it('删除日程返回 204 并从查询结果移除', async () => {
     const id = await createEvent({ title: '待删除' });
-    const removed = await request(app).delete(`/api/events/${id}`);
+    const removed = await agent.delete(`/api/events/${id}`);
     expect(removed.status).toBe(204);
 
     const occurrences = await listOccurrences({
@@ -173,13 +174,13 @@ describe('日程增删改查', () => {
   });
 
   it('不存在的日程返回 404', async () => {
-    expect((await request(app).get('/api/events/9999')).status).toBe(404);
-    expect((await request(app).patch('/api/events/9999').send({ title: 'x' })).status).toBe(404);
-    expect((await request(app).delete('/api/events/9999')).status).toBe(404);
+    expect((await agent.get('/api/events/9999')).status).toBe(404);
+    expect((await agent.patch('/api/events/9999').send({ title: 'x' })).status).toBe(404);
+    expect((await agent.delete('/api/events/9999')).status).toBe(404);
   });
 
   it('引用不存在的分类返回 422', async () => {
-    const response = await request(app).post('/api/events').send({
+    const response = await agent.post('/api/events').send({
       title: '错误分类',
       startAt: SHANGHAI_MONDAY_9AM,
       endAt: SHANGHAI_MONDAY_10AM,
@@ -215,7 +216,7 @@ describe('重复日程与实例操作', () => {
     const target = occurrences[2];
     expect(target).toBeDefined();
 
-    const moved = await request(app)
+    const moved = await agent
       .post(`/api/events/${id}/move`)
       .send({
         occurrenceKey: target?.occurrenceKey,
@@ -249,7 +250,7 @@ describe('重复日程与实例操作', () => {
     const target = occurrences[2];
     expect(target).toBeDefined();
 
-    const moved = await request(app)
+    const moved = await agent
       .post(`/api/events/${id}/move`)
       .send({
         occurrenceKey: target?.occurrenceKey,
@@ -280,7 +281,7 @@ describe('重复日程与实例操作', () => {
     const target = occurrences[2];
     expect(target).toBeDefined();
 
-    const moved = await request(app)
+    const moved = await agent
       .post(`/api/events/${id}/move`)
       .send({
         occurrenceKey: target?.occurrenceKey,
@@ -310,7 +311,7 @@ describe('重复日程与实例操作', () => {
     expect(eventIds.size).toBe(2);
 
     // 原序列被截断：主记录的重复规则改为按日期截止
-    const master = await request(app).get(`/api/events/${id}`);
+    const master = await agent.get(`/api/events/${id}`);
     expect(master.body.data.rrule.until).toBe('2025-06-15');
   });
 
@@ -321,7 +322,7 @@ describe('重复日程与实例操作', () => {
       to: '2025-07-01T00:00:00.000Z',
     });
 
-    const cancelled = await request(app)
+    const cancelled = await agent
       .post(`/api/events/${id}/cancel-occurrence`)
       .send({ occurrenceKey: occurrences[1]?.occurrenceKey, scope: 'single' });
     expect(cancelled.status).toBe(200);
@@ -345,7 +346,7 @@ describe('重复日程与实例操作', () => {
       to: '2025-07-01T00:00:00.000Z',
     });
 
-    await request(app)
+    await agent
       .post(`/api/events/${id}/cancel-occurrence`)
       .send({ occurrenceKey: occurrences[2]?.occurrenceKey, scope: 'future' });
 
@@ -364,7 +365,7 @@ describe('重复日程与实例操作', () => {
     });
     const key = occurrences[1]?.occurrenceKey ?? '';
 
-    const overridden = await request(app)
+    const overridden = await agent
       .put(`/api/events/${id}/override`)
       .send({ occurrenceKey: key, title: '特别版周会', location: '线上' });
     expect(overridden.status).toBe(200);
@@ -377,7 +378,7 @@ describe('重复日程与实例操作', () => {
     expect(target?.title).toBe('特别版周会');
     expect(target?.isModified).toBe(true);
 
-    const reset = await request(app).delete(
+    const reset = await agent.delete(
       `/api/events/${id}/override/${encodeURIComponent(key)}`,
     );
     expect(reset.status).toBe(200);
@@ -397,10 +398,10 @@ describe('重复日程与实例操作', () => {
     });
     const key = occurrences[1]?.occurrenceKey ?? '';
 
-    await request(app).put(`/api/events/${id}/override`).send({ occurrenceKey: key, title: '临时改名' });
-    await request(app).patch(`/api/events/${id}`).send({ rrule: null });
+    await agent.put(`/api/events/${id}/override`).send({ occurrenceKey: key, title: '临时改名' });
+    await agent.patch(`/api/events/${id}`).send({ rrule: null });
 
-    const overrides = await request(app).get(`/api/events/${id}/overrides`);
+    const overrides = await agent.get(`/api/events/${id}/overrides`);
     expect(overrides.body.data).toHaveLength(0);
 
     const after = await listOccurrences({
@@ -469,7 +470,7 @@ describe('查询、筛选与统计', () => {
   });
 
   it('区间跨度超过上限时返回 400', async () => {
-    const response = await request(app).get('/api/occurrences').query({
+    const response = await agent.get('/api/occurrences').query({
       from: '2024-01-01T00:00:00.000Z',
       to: '2026-01-01T00:00:00.000Z',
     });
@@ -478,7 +479,7 @@ describe('查询、筛选与统计', () => {
   });
 
   it('区间终点早于起点时返回 400', async () => {
-    const response = await request(app).get('/api/occurrences').query({
+    const response = await agent.get('/api/occurrences').query({
       from: '2025-06-10T00:00:00.000Z',
       to: '2025-06-01T00:00:00.000Z',
     });
@@ -496,7 +497,7 @@ describe('查询、筛选与统计', () => {
       priority: 'urgent',
     });
 
-    const response = await request(app).get('/api/stats/summary').query({
+    const response = await agent.get('/api/stats/summary').query({
       from: '2025-06-01T00:00:00.000Z',
       to: '2025-07-01T00:00:00.000Z',
     });
@@ -513,7 +514,7 @@ describe('提醒接口', () => {
   it('只在提醒触发窗口内返回待提醒日程', async () => {
     await createEvent({ title: '评审', remindMinutesBefore: 30 });
 
-    const inWindow = await request(app).get('/api/reminders/due').query({
+    const inWindow = await agent.get('/api/reminders/due').query({
       from: '2025-06-02T00:25:00.000Z',
       to: '2025-06-02T00:35:00.000Z',
     });
@@ -525,7 +526,7 @@ describe('提醒接口', () => {
       fireAt: '2025-06-02T00:30:00.000Z',
     });
 
-    const outOfWindow = await request(app).get('/api/reminders/due').query({
+    const outOfWindow = await agent.get('/api/reminders/due').query({
       from: '2025-06-01T00:00:00.000Z',
       to: '2025-06-01T01:00:00.000Z',
     });
@@ -534,7 +535,7 @@ describe('提醒接口', () => {
 
   it('未设置提醒的日程不会出现在提醒列表', async () => {
     await createEvent({ title: '无提醒' });
-    const response = await request(app).get('/api/reminders/due').query({
+    const response = await agent.get('/api/reminders/due').query({
       from: '2025-06-02T00:00:00.000Z',
       to: '2025-06-02T01:00:00.000Z',
     });
@@ -551,11 +552,11 @@ describe('日程主记录列表', () => {
       endAt: '2025-06-03T02:00:00.000Z',
     });
 
-    const sorted = await request(app).get('/api/events').query({ sort: 'title', limit: 10 });
+    const sorted = await agent.get('/api/events').query({ sort: 'title', limit: 10 });
     expect(sorted.body.data.map((item: { title: string }) => item.title)).toEqual(['A 日程', 'B 日程']);
     expect(sorted.body.meta.total).toBe(2);
 
-    const paged = await request(app).get('/api/events').query({ limit: 1, offset: 1, sort: 'title' });
+    const paged = await agent.get('/api/events').query({ limit: 1, offset: 1, sort: 'title' });
     expect(paged.body.data).toHaveLength(1);
     expect(paged.body.meta).toMatchObject({ total: 2, limit: 1, offset: 1 });
   });
@@ -563,14 +564,14 @@ describe('日程主记录列表', () => {
 
 describe('错误处理', () => {
   it('未知接口返回 404 JSON', async () => {
-    const response = await request(app).get('/api/does-not-exist');
+    const response = await agent.get('/api/does-not-exist');
     expect(response.status).toBe(404);
     expect(response.body.error.code).toBe('NOT_FOUND');
     expect(response.body.error.requestId).toBeTruthy();
   });
 
   it('非法 JSON 请求体返回 400', async () => {
-    const response = await request(app)
+    const response = await agent
       .post('/api/events')
       .set('Content-Type', 'application/json')
       .send('{"title": ');
@@ -579,7 +580,7 @@ describe('错误处理', () => {
   });
 
   it('请求会带上 requestId 便于排查', async () => {
-    const response = await request(app).get('/api/health').set('X-Request-Id', 'trace-123');
+    const response = await agent.get('/api/health').set('X-Request-Id', 'trace-123');
     expect(response.headers['x-request-id']).toBe('trace-123');
   });
 });

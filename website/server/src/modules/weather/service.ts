@@ -20,7 +20,6 @@ import { fetchWeatherPayload, searchCities, type WeatherSearchOutcome } from './
 import { readWeatherSettings, type WeatherSettings } from './settings.js';
 
 export const WEATHER_CACHE_TTL_MS = 15 * 60 * 1000;
-const CACHE_ID = 1;
 const EMPTY_CONDITION = '暂无数据';
 
 interface WeatherCacheRow {
@@ -32,11 +31,11 @@ interface WeatherCacheRow {
  * 缓存读写
  * ------------------------------------------------------------------ */
 
-function readCachedSnapshot(db: SqliteDatabase): WeatherSnapshot | null {
+function readCachedSnapshot(db: SqliteDatabase, userId: number): WeatherSnapshot | null {
   const row = get<WeatherCacheRow>(
     db,
-    'SELECT payload, fetched_at FROM weather_cache WHERE id = ?',
-    [CACHE_ID],
+    'SELECT payload, fetched_at FROM weather_cache WHERE user_id = ?',
+    [userId],
   );
   if (!row) return null;
   try {
@@ -53,18 +52,18 @@ function readCachedSnapshot(db: SqliteDatabase): WeatherSnapshot | null {
   }
 }
 
-function writeCachedSnapshot(db: SqliteDatabase, snapshot: WeatherSnapshot): void {
+function writeCachedSnapshot(db: SqliteDatabase, userId: number, snapshot: WeatherSnapshot): void {
   run(
     db,
-    `INSERT INTO weather_cache (id, payload, fetched_at) VALUES (?, ?, ?)
-     ON CONFLICT (id) DO UPDATE SET payload = excluded.payload, fetched_at = excluded.fetched_at`,
-    [CACHE_ID, JSON.stringify(snapshot), snapshot.fetchedAt],
+    `INSERT INTO weather_cache (user_id, payload, fetched_at) VALUES (?, ?, ?)
+     ON CONFLICT (user_id) DO UPDATE SET payload = excluded.payload, fetched_at = excluded.fetched_at`,
+    [userId, JSON.stringify(snapshot), snapshot.fetchedAt],
   );
 }
 
-/** 清空缓存：修改城市/开关后立即失效，下次请求重新联网。 */
-export function clearWeatherCache(db: SqliteDatabase = getDatabase()): void {
-  run(db, 'DELETE FROM weather_cache WHERE id = ?', [CACHE_ID]);
+/** 清空某个用户的缓存：修改城市/开关后立即失效，下次请求重新联网。 */
+export function clearWeatherCache(db: SqliteDatabase, userId: number): void {
+  run(db, 'DELETE FROM weather_cache WHERE user_id = ?', [userId]);
 }
 
 export function isCacheFresh(fetchedAt: string, nowMs: number = Date.now()): boolean {
@@ -132,6 +131,7 @@ function fallbackSnapshot(
 /** 联网刷新；失败返回 null，由调用方决定缓存/回退。 */
 async function refreshFromNetwork(
   db: SqliteDatabase,
+  userId: number,
   settings: WeatherSettings,
   timeZone: string,
 ): Promise<WeatherSnapshot | null> {
@@ -153,10 +153,13 @@ async function refreshFromNetwork(
       today: payload.today,
       forecast: payload.forecast,
     };
-    writeCachedSnapshot(db, snapshot);
+    writeCachedSnapshot(db, userId, snapshot);
     return snapshot;
   } catch (error) {
-    logger.warn('天气数据刷新失败', { error: String(error) });
+    logger.warn('天气数据刷新失败', {
+      userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
     return null;
   }
 }
@@ -170,16 +173,19 @@ function cachedResponse(cached: WeatherSnapshot, message: string): WeatherSnapsh
 }
 
 /** GET /api/weather：命中缓存直接返回，过期则尝试刷新。 */
-export async function getWeatherSnapshot(db: SqliteDatabase = getDatabase()): Promise<WeatherSnapshot> {
-  const settings = readWeatherSettings(db);
-  const timeZone = readDisplayTimezone(db);
-  const cached = readCachedSnapshot(db);
+export async function getWeatherSnapshot(
+  userId: number,
+  db: SqliteDatabase = getDatabase(),
+): Promise<WeatherSnapshot> {
+  const settings = readWeatherSettings(db, userId);
+  const timeZone = readDisplayTimezone(db, userId);
+  const cached = readCachedSnapshot(db, userId);
 
   if (cached && isCacheFresh(cached.fetchedAt)) {
     return { ...cached, stale: false, source: 'cache' };
   }
 
-  const refreshed = await refreshFromNetwork(db, settings, timeZone);
+  const refreshed = await refreshFromNetwork(db, userId, settings, timeZone);
   if (refreshed) return refreshed;
 
   if (cached) return cachedResponse(cached, '天气服务暂时不可用，显示的是上次缓存');
@@ -188,13 +194,14 @@ export async function getWeatherSnapshot(db: SqliteDatabase = getDatabase()): Pr
 
 /** POST /api/weather/refresh：强制联网，失败照样按回退规则返回。 */
 export async function refreshWeatherSnapshot(
+  userId: number,
   db: SqliteDatabase = getDatabase(),
 ): Promise<WeatherSnapshot> {
-  const settings = readWeatherSettings(db);
-  const timeZone = readDisplayTimezone(db);
-  const cached = readCachedSnapshot(db);
+  const settings = readWeatherSettings(db, userId);
+  const timeZone = readDisplayTimezone(db, userId);
+  const cached = readCachedSnapshot(db, userId);
 
-  const refreshed = await refreshFromNetwork(db, settings, timeZone);
+  const refreshed = await refreshFromNetwork(db, userId, settings, timeZone);
   if (refreshed) return refreshed;
 
   if (cached) return cachedResponse(cached, '天气服务暂时不可用，显示的是上次缓存');
@@ -205,20 +212,35 @@ export async function refreshWeatherSnapshot(
  * 设备屏幕用：只读缓存，绝不联网。
  * 开关关闭或从未成功获取时返回 null（契约允许），避免屏幕拉取被网络拖慢。
  */
-export function getWeatherForScreen(db: SqliteDatabase = getDatabase()): WeatherSnapshot | null {
-  const settings = readWeatherSettings(db);
+export function getWeatherForScreen(
+  userId: number,
+  db: SqliteDatabase = getDatabase(),
+): WeatherSnapshot | null {
+  const settings = readWeatherSettings(db, userId);
   if (!settings.enabled) return null;
 
-  const cached = readCachedSnapshot(db);
+  const cached = readCachedSnapshot(db, userId);
   if (!cached) return null;
 
   if (isCacheFresh(cached.fetchedAt)) {
     return { ...cached, stale: false, source: 'cache' };
   }
-  return { ...cached, stale: true, source: 'cache', message: '天气数据已过期，等待控制台刷新' };
+  return { ...cached, stale: true, source: 'cache', message: '天气数据已过期，等待后台刷新' };
 }
 
 /** 城市搜索；失败不抛错，返回空结果 + 提示。 */
 export function searchWeatherCities(query: string): Promise<WeatherSearchOutcome> {
   return searchCities(query);
+}
+
+/** 调度器用：判断该用户是否需要刷新。 */
+export function weatherNeedsRefresh(
+  db: SqliteDatabase,
+  userId: number,
+  nowMs: number = Date.now(),
+): boolean {
+  const settings = readWeatherSettings(db, userId);
+  if (!settings.enabled) return false;
+  const cached = readCachedSnapshot(db, userId);
+  return cached === null || !isCacheFresh(cached.fetchedAt, nowMs);
 }

@@ -3,11 +3,14 @@
  *
  * 关键点是「每节课的起止时间」：学校系统只给节次号（第一节…第九节），
  * 不给时间，所以时间必须由用户配置；并且按需求支持周五使用一整套独立时间表。
+ * 多用户后每个用户各有一份设置。
  */
 
 import { z } from 'zod';
 import type { SqliteDatabase } from '../../db/client.js';
 import { get, run } from '../../db/query.js';
+import { config } from '../../config.js';
+import { ValidationError } from '../../http/errors.js';
 import { nowIso } from '../../lib/clock.js';
 
 const SETTINGS_KEY = 'course-sync';
@@ -74,37 +77,22 @@ export const DEFAULT_SETTINGS: CourseSyncSettings = {
 };
 
 /* ------------------------------------------------------------------ *
- * 通用键值读写
- * ------------------------------------------------------------------ */
-
-interface SettingRow {
-  value: string;
-}
-
-export function readSetting(db: SqliteDatabase, key: string): string | null {
-  const row = get<SettingRow>(db, 'SELECT value FROM app_settings WHERE key = ?', [key]);
-  return row?.value ?? null;
-}
-
-export function writeSetting(db: SqliteDatabase, key: string, value: string): void {
-  run(
-    db,
-    `INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)
-     ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-    [key, value, nowIso()],
-  );
-}
-
-/* ------------------------------------------------------------------ *
  * 课程同步设置
  * ------------------------------------------------------------------ */
 
 /** 读取设置；字段缺失或非法时用默认值补齐，保证升级后不会因为老数据而报错。 */
-export function readCourseSyncSettings(db: SqliteDatabase): CourseSyncSettings {
-  const raw = readSetting(db, SETTINGS_KEY);
-  if (!raw) return { ...DEFAULT_SETTINGS };
+export function readCourseSyncSettings(
+  db: SqliteDatabase,
+  userId: number,
+): CourseSyncSettings {
+  const row = get<{ value: string }>(
+    db,
+    'SELECT value FROM app_settings WHERE user_id = ? AND key = ?',
+    [userId, SETTINGS_KEY],
+  );
+  if (!row) return { ...DEFAULT_SETTINGS };
   try {
-    const parsed: unknown = JSON.parse(raw);
+    const parsed: unknown = JSON.parse(row.value);
     const result = courseSyncSettingsSchema.safeParse({ ...DEFAULT_SETTINGS, ...(parsed as object) });
     return result.success ? result.data : { ...DEFAULT_SETTINGS };
   } catch {
@@ -114,12 +102,50 @@ export function readCourseSyncSettings(db: SqliteDatabase): CourseSyncSettings {
 
 export function writeCourseSyncSettings(
   db: SqliteDatabase,
+  userId: number,
   patch: Partial<CourseSyncSettings>,
 ): CourseSyncSettings {
-  const merged = { ...readCourseSyncSettings(db), ...patch };
+  const merged = { ...readCourseSyncSettings(db, userId), ...patch };
   const validated = courseSyncSettingsSchema.parse(merged);
-  writeSetting(db, SETTINGS_KEY, JSON.stringify(validated));
+  assertCourseBaseUrlAllowed(validated.baseUrl);
+  run(
+    db,
+    `INSERT INTO app_settings (user_id, key, value, updated_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT (user_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    [userId, SETTINGS_KEY, JSON.stringify(validated), nowIso()],
+  );
   return validated;
+}
+
+/** 阻止课程同步被当成 SSRF 跳板；校园内网场景需显式开启。 */
+export function assertCourseBaseUrlAllowed(raw: string): void {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ValidationError('学校系统地址不是合法 URL');
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new ValidationError('学校系统地址必须使用 http 或 https');
+  }
+  if (config.courseAllowPrivateHosts) return;
+  if (config.isTest) return;
+
+  const host = url.hostname.toLowerCase();
+  const isPrivate =
+    host === 'localhost' ||
+    host === '0.0.0.0' ||
+    host === '::1' ||
+    host === '[::1]' ||
+    /^127\./.test(host) ||
+    /^10\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^169\.254\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    host.endsWith('.local');
+  if (isPrivate) {
+    throw new ValidationError('学校系统地址指向本机或私网，已拒绝；如确需使用请设置 COURSE_ALLOW_PRIVATE_HOSTS=true');
+  }
 }
 
 /**

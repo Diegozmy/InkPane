@@ -6,7 +6,7 @@
   "type": "module",
   "main": "dist/index.js",
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=22.13.0"
   },
   "scripts": {
     "dev": "tsx watch --clear-screen=false src/index.ts",

@@ -6,14 +6,15 @@
  */
 
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
-import request from 'supertest';
 import type { Express } from 'express';
 import { createApp } from '../src/app.js';
 import { closeDatabase, getDatabase, openDatabase, setDatabaseForTesting } from '../src/db/client.js';
 import { runMigrations } from '../src/db/migrations.js';
+import { setupTestAdmin } from './helpers/auth.js';
 import { mapWeatherCode, setWeatherFetchForTests } from '../src/modules/weather/provider.js';
 
 let app: Express;
+let agent: Awaited<ReturnType<typeof setupTestAdmin>>;
 let fetchCalls: string[] = [];
 
 const FORECAST_HOST = 'https://api.open-meteo.com/v1/forecast';
@@ -73,12 +74,13 @@ function mockFetchByUrl(handlers: {
   });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   closeDatabase();
   const db = openDatabase(':memory:');
   runMigrations(db);
   setDatabaseForTesting(db);
   app = createApp();
+  agent = await setupTestAdmin(app);
   fetchCalls = [];
   setWeatherFetchForTests(null);
 });
@@ -112,7 +114,7 @@ describe('天气快照', () => {
   it('首次请求联网并映射成统一快照', async () => {
     mockFetchSuccess(sampleOpenMeteo());
 
-    const response = await request(app).get('/api/weather');
+    const response = await agent.get('/api/weather');
     expect(response.status).toBe(200);
     const snapshot = response.body.data;
 
@@ -170,10 +172,10 @@ describe('天气快照', () => {
   it('15 分钟内重复请求命中缓存，不再联网', async () => {
     mockFetchSuccess(sampleOpenMeteo());
 
-    const first = await request(app).get('/api/weather');
+    const first = await agent.get('/api/weather');
     expect(first.body.data.source).toBe('open-meteo');
 
-    const second = await request(app).get('/api/weather');
+    const second = await agent.get('/api/weather');
     expect(second.status).toBe(200);
     expect(second.body.data.source).toBe('cache');
     expect(second.body.data.stale).toBe(false);
@@ -182,29 +184,29 @@ describe('天气快照', () => {
 
   it('缓存过期后刷新成功，返回新数据', async () => {
     mockFetchSuccess(sampleOpenMeteo());
-    await request(app).get('/api/weather');
+    await agent.get('/api/weather');
 
     // 直接把缓存时间改到很久以前，模拟 TTL 过期
     getDatabase()
-      .prepare('UPDATE weather_cache SET fetched_at = ? WHERE id = 1')
+      .prepare('UPDATE weather_cache SET fetched_at = ? WHERE user_id = (SELECT id FROM users ORDER BY id LIMIT 1)')
       .run('2000-01-01T00:00:00.000Z');
 
     mockFetchSuccess(sampleOpenMeteo());
-    const refreshed = await request(app).get('/api/weather');
+    const refreshed = await agent.get('/api/weather');
     expect(refreshed.body.data.source).toBe('open-meteo');
     expect(fetchCalls).toHaveLength(2);
   });
 
   it('缓存过期且刷新失败时回退上次缓存并标记 stale', async () => {
     mockFetchSuccess(sampleOpenMeteo());
-    await request(app).get('/api/weather');
+    await agent.get('/api/weather');
 
     getDatabase()
-      .prepare('UPDATE weather_cache SET fetched_at = ? WHERE id = 1')
+      .prepare('UPDATE weather_cache SET fetched_at = ? WHERE user_id = (SELECT id FROM users ORDER BY id LIMIT 1)')
       .run('2000-01-01T00:00:00.000Z');
 
     mockFetchFailure();
-    const fallback = await request(app).get('/api/weather');
+    const fallback = await agent.get('/api/weather');
     expect(fallback.status).toBe(200);
     expect(fallback.body.data.source).toBe('cache');
     expect(fallback.body.data.stale).toBe(true);
@@ -217,7 +219,7 @@ describe('天气快照', () => {
   it('从未成功获取时返回 fallback 快照，绝不 500', async () => {
     mockFetchFailure();
 
-    const response = await request(app).get('/api/weather');
+    const response = await agent.get('/api/weather');
     expect(response.status).toBe(200);
     const snapshot = response.body.data;
     expect(snapshot.source).toBe('fallback');
@@ -231,16 +233,16 @@ describe('天气快照', () => {
 
   it('POST /refresh 强制联网，失败时仍按回退规则返回', async () => {
     mockFetchSuccess(sampleOpenMeteo());
-    await request(app).get('/api/weather');
+    await agent.get('/api/weather');
     expect(fetchCalls).toHaveLength(1);
 
-    const forced = await request(app).post('/api/weather/refresh');
+    const forced = await agent.post('/api/weather/refresh');
     expect(forced.status).toBe(200);
     expect(forced.body.data.source).toBe('open-meteo');
     expect(fetchCalls).toHaveLength(2);
 
     mockFetchFailure();
-    const failed = await request(app).post('/api/weather/refresh');
+    const failed = await agent.post('/api/weather/refresh');
     expect(failed.status).toBe(200);
     expect(failed.body.data.source).toBe('cache');
     expect(failed.body.data.stale).toBe(true);
@@ -266,7 +268,7 @@ describe('城市搜索', () => {
       }),
     });
 
-    const response = await request(app).get('/api/weather/search').query({ q: '上海' });
+    const response = await agent.get('/api/weather/search').query({ q: '上海' });
     expect(response.status).toBe(200);
     expect(response.body.data.results).toHaveLength(1);
     expect(response.body.data.results[0]).toEqual({
@@ -286,24 +288,24 @@ describe('城市搜索', () => {
   it('网络失败返回空结果与 warning 而不是 500', async () => {
     mockFetchFailure();
 
-    const response = await request(app).get('/api/weather/search').query({ q: '杭州' });
+    const response = await agent.get('/api/weather/search').query({ q: '杭州' });
     expect(response.status).toBe(200);
     expect(response.body.data.results).toEqual([]);
     expect(response.body.meta.warning).toBeTruthy();
   });
 
   it('关键词为空或超长返回 422', async () => {
-    expect((await request(app).get('/api/weather/search')).status).toBe(422);
-    expect((await request(app).get('/api/weather/search').query({ q: ' ' })).status).toBe(422);
+    expect((await agent.get('/api/weather/search')).status).toBe(422);
+    expect((await agent.get('/api/weather/search').query({ q: ' ' })).status).toBe(422);
     expect(
-      (await request(app).get('/api/weather/search').query({ q: 'x'.repeat(51) })).status,
+      (await agent.get('/api/weather/search').query({ q: 'x'.repeat(51) })).status,
     ).toBe(422);
   });
 });
 
 describe('天气设置', () => {
   it('返回默认城市、坐标与开关', async () => {
-    const response = await request(app).get('/api/weather/settings');
+    const response = await agent.get('/api/weather/settings');
     expect(response.status).toBe(200);
     expect(response.body.data).toMatchObject({
       city: '上海',
@@ -317,10 +319,10 @@ describe('天气设置', () => {
 
   it('修改设置后立即生效，并清空天气缓存', async () => {
     mockFetchSuccess(sampleOpenMeteo());
-    await request(app).get('/api/weather');
+    await agent.get('/api/weather');
     expect(fetchCalls).toHaveLength(1);
 
-    const updated = await request(app)
+    const updated = await agent
       .put('/api/weather/settings')
       .send({ city: '北京', latitude: 39.9042, longitude: 116.4074, enabled: false });
     expect(updated.status).toBe(200);
@@ -331,27 +333,27 @@ describe('天气设置', () => {
       enabled: false,
     });
 
-    const readBack = await request(app).get('/api/weather/settings');
+    const readBack = await agent.get('/api/weather/settings');
     expect(readBack.body.data.city).toBe('北京');
 
     // 缓存已被清空，下一次 GET 会重新联网
-    const refreshed = await request(app).get('/api/weather');
+    const refreshed = await agent.get('/api/weather');
     expect(refreshed.body.data.source).toBe('open-meteo');
     expect(refreshed.body.data.city).toBe('北京');
     expect(fetchCalls).toHaveLength(2);
   });
 
   it('坐标越界与空请求体返回 422', async () => {
-    const lat = await request(app).put('/api/weather/settings').send({ latitude: 100 });
+    const lat = await agent.put('/api/weather/settings').send({ latitude: 100 });
     expect(lat.status).toBe(422);
 
-    const lon = await request(app).put('/api/weather/settings').send({ longitude: -181 });
+    const lon = await agent.put('/api/weather/settings').send({ longitude: -181 });
     expect(lon.status).toBe(422);
 
-    const empty = await request(app).put('/api/weather/settings').send({});
+    const empty = await agent.put('/api/weather/settings').send({});
     expect(empty.status).toBe(422);
 
-    const emptyCity = await request(app).put('/api/weather/settings').send({ city: '   ' });
+    const emptyCity = await agent.put('/api/weather/settings').send({ city: '   ' });
     expect(emptyCity.status).toBe(422);
   });
 });

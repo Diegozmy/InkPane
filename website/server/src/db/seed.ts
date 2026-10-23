@@ -1,14 +1,15 @@
 /**
  * 演示数据。
  *
- * 仅在 events 表为空时写入，因此可以安全地在每次启动时调用。
+ * 仅在指定用户的事件表为空时写入，因此可以安全地在初始化/启动时调用。
  * 所有时间都相对“今天”生成，保证第一次打开页面就能看到内容饱满的日历。
  */
 
 import { countEvents } from '../modules/events/repository.js';
 import { createCategory, listCategories } from '../modules/categories.js';
 import { createEvent } from '../modules/events/service.js';
-import { systemTimeZone, toDateKey, wallTimeToInstant, dateKeyToUtcDate } from '../domain/time.js';
+import { readDisplayTimezone } from '../modules/display/settings.js';
+import { toDateKey, wallTimeToInstant, dateKeyToUtcDate } from '../domain/time.js';
 import type { SqliteDatabase } from './client.js';
 
 export interface SeedResult {
@@ -55,19 +56,23 @@ function instantAt(dateKey: string, hour: number, minute = 0, timeZone: string):
   ).toISOString();
 }
 
-export function seedDemoData(db: SqliteDatabase, now: Date = new Date()): SeedResult {
-  if (countEvents(db) > 0) {
+export function seedDemoData(
+  db: SqliteDatabase,
+  userId: number,
+  now: Date = new Date(),
+): SeedResult {
+  if (countEvents(db, userId) > 0) {
     return { seeded: false, categoryCount: 0, eventCount: 0 };
   }
 
-  const timeZone = systemTimeZone();
+  const timeZone = readDisplayTimezone(db, userId);
   const today = toDateKey(now, timeZone);
 
   const categories = new Map<string, number>();
-  const existing = listCategories(db);
+  const existing = listCategories(db, userId);
   if (existing.length === 0) {
     for (const seed of SEED_CATEGORIES) {
-      const created = createCategory(seed, db);
+      const created = createCategory(seed, userId, db);
       categories.set(seed.name, created.id);
     }
   } else {
@@ -82,7 +87,7 @@ export function seedDemoData(db: SqliteDatabase, now: Date = new Date()): SeedRe
 
   let created = 0;
   const add = (input: Parameters<typeof createEvent>[0]): void => {
-    createEvent(input, db);
+    createEvent(input, userId, db);
     created += 1;
   };
 

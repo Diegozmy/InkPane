@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactElement } from 'react';
 import { format } from 'date-fns';
 import { useNavigate } from 'react-router-dom';
-import { useDeviceStatus, useWeather, useWeatherSearch, useWeatherSettings } from '@/api/use-workspace';
+import { useDevices } from '@/api/use-devices';
+import { useWeather, useWeatherSearch, useWeatherSettings } from '@/api/use-workspace';
 import { useRefreshWeather, useUpdateWeatherSettings } from '@/api/use-workspace-mutations';
 import { AppShell } from '@/components/layout/AppShell';
 import { useShellTopBar } from '@/hooks/use-shell';
@@ -16,7 +17,8 @@ export function WeatherPage(): ReactElement {
   const navigate = useNavigate();
   const weather = useWeather();
   const settings = useWeatherSettings();
-  const device = useDeviceStatus();
+  const devices = useDevices();
+  const indoor = devices.data?.[0];
   const updateSettings = useUpdateWeatherSettings();
   const refreshWeather = useRefreshWeather();
 
@@ -38,7 +40,6 @@ export function WeatherPage(): ReactElement {
   }, [settings.data]);
 
   const snapshot = weather.data;
-  const indoor = device.data;
 
   const headline = useMemo(() => {
     if (!snapshot) return null;
@@ -229,8 +230,8 @@ export function WeatherPage(): ReactElement {
             <section className="card card--quiet" aria-label="室内环境">
               <div className="section-head">
                 <span className="section-head__title">室内环境</span>
-                <Badge tone={indoor?.paired ? 'success' : 'neutral'}>
-                  {indoor?.paired ? '设备在线' : '未配对'}
+                <Badge tone={indoor?.online ? 'success' : 'neutral'}>
+                  {indoor?.online ? '设备在线' : '未配对'}
                 </Badge>
               </div>
               <p className="page-hint">

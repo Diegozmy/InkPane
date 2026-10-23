@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { AuthGate } from '@/components/auth/AuthGate';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { EventDetailPanel } from '@/components/event/EventDetailPanel';
 import { EventDialog } from '@/components/event/EventDialog';
@@ -11,8 +12,11 @@ import { CalendarPage } from '@/views/CalendarPage';
 import { CourseSyncPage } from '@/views/CourseSyncPage';
 import { DashboardPage } from '@/views/DashboardPage';
 import { DevicePage } from '@/views/DevicePage';
+import { LoginPage } from '@/views/LoginPage';
 import { SettingsPage } from '@/views/SettingsPage';
+import { SetupPage } from '@/views/SetupPage';
 import { TodosPage } from '@/views/TodosPage';
+import { UsersPage } from '@/views/UsersPage';
 import { WeatherPage } from '@/views/WeatherPage';
 
 const queryClient = new QueryClient({
@@ -48,6 +52,7 @@ function AppRuntime() {
         <Route path="/device" element={<DevicePage />} />
         <Route path="/courses" element={<CourseSyncPage />} />
         <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/users" element={<UsersPage />} />
         <Route path="*" element={<Navigate to="/today" replace />} />
       </Routes>
 
@@ -64,7 +69,18 @@ export function App() {
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
         <BrowserRouter>
-          <AppRuntime />
+          <Routes>
+            <Route path="/setup" element={<SetupPage />} />
+            <Route path="/login" element={<LoginPage />} />
+            <Route
+              path="*"
+              element={
+                <AuthGate>
+                  <AppRuntime />
+                </AuthGate>
+              }
+            />
+          </Routes>
         </BrowserRouter>
       </QueryClientProvider>
     </ErrorBoundary>

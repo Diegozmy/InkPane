@@ -50,9 +50,34 @@ if (!['development', 'production', 'test'].includes(nodeEnv)) {
 const logLevelRaw = readString('LOG_LEVEL', 'info').toLowerCase() as LogLevel;
 const logLevel: LogLevel = LOG_LEVELS.includes(logLevelRaw) ? logLevelRaw : 'info';
 
+function readPositiveInt(key: string, fallback: number): number {
+  const raw = process.env[key];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`环境变量 ${key} 必须是正整数，当前值：${raw}`);
+  }
+  return value;
+}
+
 function resolveDatabaseFile(raw: string): string {
   if (raw === ':memory:') return raw;
   return isAbsolute(raw) ? raw : resolve(SERVER_ROOT, raw);
+}
+
+const corsOrigins = readString('CORS_ORIGIN', 'http://localhost:5173,http://127.0.0.1:5173')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+if (corsOrigins.includes('*')) {
+  throw new Error('CORS_ORIGIN 不能包含 *：控制台使用 Cookie 会话，必须显式列出允许的来源');
+}
+
+const bootstrapAdminUsername = readString('INKPANE_ADMIN_USERNAME', '');
+const bootstrapAdminPassword = readString('INKPANE_ADMIN_PASSWORD', '');
+if ((bootstrapAdminUsername === '') !== (bootstrapAdminPassword === '')) {
+  throw new Error('INKPANE_ADMIN_USERNAME 与 INKPANE_ADMIN_PASSWORD 必须同时设置');
 }
 
 export const config = {
@@ -63,13 +88,18 @@ export const config = {
   host: readString('HOST', '127.0.0.1'),
   logLevel,
   databaseFile: resolveDatabaseFile(readString('DATABASE_FILE', '../data/inkpane.sqlite')),
-  corsOrigins: readString('CORS_ORIGIN', 'http://localhost:5173,http://127.0.0.1:5173')
-    .split(',')
-    .map((origin) => origin.trim())
-    .filter(Boolean),
+  corsOrigins,
+  publicOrigin: readString('PUBLIC_ORIGIN', ''),
   bodyLimit: readString('BODY_LIMIT', '256kb'),
   serveStatic: readBoolean('SERVE_STATIC', false),
   seedOnEmpty: readBoolean('SEED_ON_EMPTY', true),
+  sessionTtlDays: readPositiveInt('SESSION_TTL_DAYS', 30),
+  cookieSecure: readBoolean('COOKIE_SECURE', false),
+  trustProxy: readBoolean('TRUST_PROXY', false),
+  bootstrapAdminUsername,
+  bootstrapAdminPassword,
+  courseAllowPrivateHosts: readBoolean('COURSE_ALLOW_PRIVATE_HOSTS', false),
+  maxDevicesPerUser: 20,
   /** 单次查询允许展开的重复日程实例上限，防止恶意/异常规则打满内存 */
   maxOccurrencesPerQuery: 1500,
 } as const;

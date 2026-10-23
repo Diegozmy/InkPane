@@ -5,7 +5,6 @@ import { api } from '@/lib/api';
 import { queryKeys } from './query-keys';
 import type {
   DeviceScreenPayload,
-  DeviceStatus,
   DisplayConfig,
   Todo,
   TodoMeta,
@@ -112,23 +111,3 @@ export function useScreenPreview(enabled = true) {
 }
 
 /* ------------------------------ 设备 ------------------------------ */
-
-export function useDeviceStatus(enabled = true) {
-  return useQuery<DeviceStatus>({
-    queryKey: queryKeys.device,
-    queryFn: ({ signal }) => api.deviceStatus(signal),
-    enabled,
-    staleTime: 10_000,
-    refetchInterval: 30_000,
-    retry: 1,
-  });
-}
-
-export function useDeviceToken() {
-  return useQuery<{ token: string }>({
-    queryKey: queryKeys.deviceToken,
-    queryFn: ({ signal }) => api.deviceToken(signal),
-    staleTime: 60_000,
-    retry: 1,
-  });
-}

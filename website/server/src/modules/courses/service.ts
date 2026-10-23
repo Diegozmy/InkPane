@@ -14,13 +14,13 @@ import { nowIso } from '../../lib/clock.js';
 import { logger } from '../../lib/logger.js';
 import {
   addDaysToDateKey,
-  systemTimeZone,
   toDateKey,
   weekdayOfDateKey,
   wallTimeToInstant,
 } from '../../domain/time.js';
 import { createCategory, listCategories } from '../categories.js';
 import { createEvent, getEvent, updateEvent } from '../events/service.js';
+import { readDisplayTimezone } from '../display/settings.js';
 import type { EventRecord, RecurrenceRule } from '../../domain/types.js';
 import { SchoolPortalClient, SchoolPortalError } from './client.js';
 import type { SchoolCredentials, SchoolTimetable } from './client.js';
@@ -280,8 +280,9 @@ function toSyncRun(row: SyncRunRow): SyncRun {
   };
 }
 
-function startRun(db: SqliteDatabase): number {
-  return run(db, `INSERT INTO sync_runs (source, started_at, status) VALUES (?, ?, 'running')`, [
+function startRun(db: SqliteDatabase, userId: number): number {
+  return run(db, `INSERT INTO sync_runs (user_id, source, started_at, status) VALUES (?, ?, ?, 'running')`, [
+    userId,
     COURSE_SOURCE,
     nowIso(),
   ]).lastInsertRowid;
@@ -289,6 +290,7 @@ function startRun(db: SqliteDatabase): number {
 
 function finishRun(
   db: SqliteDatabase,
+  userId: number,
   id: number,
   patch: { status: 'success' | 'failed'; message?: string; created?: number; updated?: number; removed?: number; total?: number },
 ): void {
@@ -296,7 +298,7 @@ function finishRun(
     db,
     `UPDATE sync_runs SET finished_at = ?, status = ?, message = ?,
        created_count = ?, updated_count = ?, removed_count = ?, total_count = ?
-     WHERE id = ?`,
+     WHERE id = ? AND user_id = ?`,
     [
       nowIso(),
       patch.status,
@@ -306,15 +308,16 @@ function finishRun(
       patch.removed ?? 0,
       patch.total ?? 0,
       id,
+      userId,
     ],
   );
 }
 
-export function latestSyncRun(db: SqliteDatabase): SyncRun | null {
+export function latestSyncRun(db: SqliteDatabase, userId: number): SyncRun | null {
   const row = get<SyncRunRow>(
     db,
-    'SELECT * FROM sync_runs WHERE source = ? ORDER BY id DESC LIMIT 1',
-    [COURSE_SOURCE],
+    'SELECT * FROM sync_runs WHERE user_id = ? AND source = ? ORDER BY id DESC LIMIT 1',
+    [userId, COURSE_SOURCE],
   );
   return row ? toSyncRun(row) : null;
 }
@@ -329,32 +332,34 @@ interface SlotLinkRow {
   title: string;
 }
 
-function listSlotLinks(db: SqliteDatabase): SlotLinkRow[] {
+function listSlotLinks(db: SqliteDatabase, userId: number): SlotLinkRow[] {
   return all<SlotLinkRow>(
     db,
-    'SELECT external_key, event_id, title FROM course_slot_links WHERE source = ?',
-    [COURSE_SOURCE],
+    'SELECT external_key, event_id, title FROM course_slot_links WHERE user_id = ? AND source = ?',
+    [userId, COURSE_SOURCE],
   );
 }
 
 function upsertSlotLink(
   db: SqliteDatabase,
+  userId: number,
   externalKey: string,
   eventId: number,
   title: string,
 ): void {
   run(
     db,
-    `INSERT INTO course_slot_links (source, external_key, event_id, title, updated_at)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT (source, external_key) DO UPDATE SET
+    `INSERT INTO course_slot_links (user_id, source, external_key, event_id, title, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT (user_id, source, external_key) DO UPDATE SET
        event_id = excluded.event_id, title = excluded.title, updated_at = excluded.updated_at`,
-    [COURSE_SOURCE, externalKey, eventId, title, nowIso()],
+    [userId, COURSE_SOURCE, externalKey, eventId, title, nowIso()],
   );
 }
 
-function deleteSlotLink(db: SqliteDatabase, externalKey: string): void {
-  run(db, 'DELETE FROM course_slot_links WHERE source = ? AND external_key = ?', [
+function deleteSlotLink(db: SqliteDatabase, userId: number, externalKey: string): void {
+  run(db, 'DELETE FROM course_slot_links WHERE user_id = ? AND source = ? AND external_key = ?', [
+    userId,
     COURSE_SOURCE,
     externalKey,
   ]);
@@ -364,19 +369,23 @@ function deleteSlotLink(db: SqliteDatabase, externalKey: string): void {
  * 分类
  * ------------------------------------------------------------------ */
 
-function ensureCourseCategory(db: SqliteDatabase, settings: CourseSyncSettings): number {
-  const existing = listCategories(db);
+function ensureCourseCategory(
+  db: SqliteDatabase,
+  userId: number,
+  settings: CourseSyncSettings,
+): number {
+  const existing = listCategories(db, userId);
   if (settings.categoryId !== null) {
     const hit = existing.find((category) => category.id === settings.categoryId);
     if (hit) return hit.id;
   }
   const named = existing.find((category) => category.name === CATEGORY_NAME);
   if (named) {
-    writeCourseSyncSettings(db, { categoryId: named.id });
+    writeCourseSyncSettings(db, userId, { categoryId: named.id });
     return named.id;
   }
-  const created = createCategory({ name: CATEGORY_NAME, color: CATEGORY_COLOR, icon: 'book-open' }, db);
-  writeCourseSyncSettings(db, { categoryId: created.id });
+  const created = createCategory({ name: CATEGORY_NAME, color: CATEGORY_COLOR, icon: 'book-open' }, userId, db);
+  writeCourseSyncSettings(db, userId, { categoryId: created.id });
   return created.id;
 }
 
@@ -392,28 +401,43 @@ export interface PreviewOptions {
   rawHtml?: string;
 }
 
-function resolveCredentials(db: SqliteDatabase, override?: SchoolCredentials): SchoolCredentials {
-  if (override && override.username.trim().length > 0 && override.password.length > 0) return override;
-  const stored = readCredentials(db);
+function resolveCredentials(
+  db: SqliteDatabase,
+  userId: number,
+  settings: CourseSyncSettings,
+  override?: SchoolCredentials,
+): SchoolCredentials {
+  if (override && override.username.trim().length > 0 && override.password.length > 0) {
+    return override;
+  }
+  const stored = readCredentials(db, userId);
   if (!stored) {
     throw new ValidationError('尚未保存学校系统账号密码，请先在「课程同步」里填写', {
       hint: '也可以在本次请求里带上 username / password 临时使用，不落库',
     });
   }
+  if (stored.baseUrl && stored.baseUrl !== settings.baseUrl) {
+    throw new ValidationError('学校系统地址已变更，请重新输入密码后再同步', {
+      hint: '为避免把已保存的密码发送到新地址，修改 baseUrl 后必须重新保存凭据',
+    });
+  }
   return { username: stored.username, password: stored.password };
 }
 
-export async function previewCourses(options: PreviewOptions = {}): Promise<CoursePreview> {
+export async function previewCourses(
+  userId: number,
+  options: PreviewOptions = {},
+): Promise<CoursePreview> {
   const db = options.db ?? getDatabase();
-  const settings = readCourseSyncSettings(db);
-  const timezone = systemTimeZone();
+  const settings = readCourseSyncSettings(db, userId);
+  const timezone = readDisplayTimezone(db, userId);
 
   let timetable: SchoolTimetable;
   try {
     if (options.rawHtml !== undefined) {
       timetable = buildTimetable(settings.baseUrl, options.rawHtml, nowIso());
     } else {
-      const credentials = resolveCredentials(db, options.credentials);
+      const credentials = resolveCredentials(db, userId, settings, options.credentials);
       const fetcher = options.fetcher ?? defaultFetcher;
       const raw: TimetableFetchResult = await fetcher(credentials, settings.baseUrl);
       timetable = buildTimetable(raw.baseUrl, raw.html, raw.fetchedAt);
@@ -424,7 +448,7 @@ export async function previewCourses(options: PreviewOptions = {}): Promise<Cour
     throw error;
   }
 
-  const known = new Set(listSlotLinks(db).map((link) => link.external_key));
+  const known = new Set(listSlotLinks(db, userId).map((link) => link.external_key));
   return buildPreview({ timetable, settings, knownExternalKeys: known, timezone });
 }
 
@@ -454,23 +478,26 @@ function recurrenceFor(preview: CoursePreview): RecurrenceRule {
 }
 
 /** 执行一次导入。整段写在事务里，失败不会留下半套数据。 */
-export async function importCourses(options: PreviewOptions = {}): Promise<ImportResult> {
+export async function importCourses(
+  userId: number,
+  options: PreviewOptions = {},
+): Promise<ImportResult> {
   const db = options.db ?? getDatabase();
-  const runId = startRun(db);
+  const runId = startRun(db, userId);
 
   try {
-    const preview = await previewCourses(options);
-    const settings = readCourseSyncSettings(db);
-    const timezone = systemTimeZone();
+    const preview = await previewCourses(userId, options);
+    const settings = readCourseSyncSettings(db, userId);
+    const timezone = readDisplayTimezone(db, userId);
     const rule = recurrenceFor(preview);
-    const existingLinks = new Map(listSlotLinks(db).map((link) => [link.external_key, link]));
+    const existingLinks = new Map(listSlotLinks(db, userId).map((link) => [link.external_key, link]));
 
     let created = 0;
     let updated = 0;
     let removed = 0;
 
     transaction(db, () => {
-      const categoryId = ensureCourseCategory(db, settings);
+      const categoryId = ensureCourseCategory(db, userId, settings);
       const seen = new Set<string>();
 
       for (const slot of preview.slots) {
@@ -494,32 +521,32 @@ export async function importCourses(options: PreviewOptions = {}): Promise<Impor
 
         const link = existingLinks.get(slot.externalKey);
         if (link) {
-          const current: EventRecord | null = tryGetEvent(db, link.event_id);
+          const current: EventRecord | null = tryGetEvent(db, userId, link.event_id);
           if (current) {
-            updateEvent(link.event_id, payload, db);
-            upsertSlotLink(db, slot.externalKey, link.event_id, slot.courseName);
+            updateEvent(link.event_id, payload, userId, db);
+            upsertSlotLink(db, userId, slot.externalKey, link.event_id, slot.courseName);
             updated += 1;
             continue;
           }
           // 映射指向的日程已被手动删除，按新建处理
-          deleteSlotLink(db, slot.externalKey);
+          deleteSlotLink(db, userId, slot.externalKey);
         }
 
-        const event = createEvent(payload, db);
-        upsertSlotLink(db, slot.externalKey, event.id, slot.courseName);
+        const event = createEvent(payload, userId, db);
+        upsertSlotLink(db, userId, slot.externalKey, event.id, slot.courseName);
         created += 1;
       }
 
       // 课表里已经消失的条目：删除对应日程与映射
       for (const link of existingLinks.values()) {
         if (seen.has(link.external_key)) continue;
-        deleteSlotLink(db, link.external_key);
-        tryDeleteEvent(db, link.event_id);
+        deleteSlotLink(db, userId, link.external_key);
+        tryDeleteEvent(db, userId, link.event_id);
         removed += 1;
       }
     });
 
-    finishRun(db, runId, {
+    finishRun(db, userId, runId, {
       status: 'success',
       message: `${preview.termName ?? '未知学程'}：新建 ${created}、更新 ${updated}、删除 ${removed}`,
       created,
@@ -535,11 +562,11 @@ export async function importCourses(options: PreviewOptions = {}): Promise<Impor
       created,
       updated,
       removed,
-      categoryId: readCourseSyncSettings(db).categoryId ?? 0,
+      categoryId: readCourseSyncSettings(db, userId).categoryId ?? 0,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    finishRun(db, runId, { status: 'failed', message });
+    finishRun(db, userId, runId, { status: 'failed', message });
     // 用户可修复的问题（账号错、未排课、网络不通）记为 warn；真正的内部异常才是 error
     if (error instanceof AppError && error.status < 500) {
       logger.warn('课程同步未完成', { reason: message });
@@ -550,17 +577,17 @@ export async function importCourses(options: PreviewOptions = {}): Promise<Impor
   }
 }
 
-function tryGetEvent(db: SqliteDatabase, id: number): EventRecord | null {
+function tryGetEvent(db: SqliteDatabase, userId: number, id: number): EventRecord | null {
   try {
-    return getEvent(id, db);
+    return getEvent(id, userId, db);
   } catch {
     return null;
   }
 }
 
-function tryDeleteEvent(db: SqliteDatabase, id: number): void {
+function tryDeleteEvent(db: SqliteDatabase, userId: number, id: number): void {
   try {
-    run(db, 'DELETE FROM events WHERE id = ?', [id]);
+    run(db, 'DELETE FROM events WHERE id = ? AND user_id = ?', [id, userId]);
   } catch (error) {
     logger.warn('删除课程日程失败', { eventId: id, error: String(error) });
   }
@@ -580,17 +607,20 @@ export interface CourseSyncStatus {
   serverTime: string;
 }
 
-export function courseSyncStatus(db: SqliteDatabase = getDatabase()): CourseSyncStatus {
-  const settings = readCourseSyncSettings(db);
+export function courseSyncStatus(
+  userId: number,
+  db: SqliteDatabase = getDatabase(),
+): CourseSyncStatus {
+  const settings = readCourseSyncSettings(db, userId);
   const row = get<{ count: number }>(
     db,
-    'SELECT COUNT(*) AS count FROM course_slot_links WHERE source = ?',
-    [COURSE_SOURCE],
+    'SELECT COUNT(*) AS count FROM course_slot_links WHERE user_id = ? AND source = ?',
+    [userId, COURSE_SOURCE],
   );
   return {
-    credentials: describeCredentials(db),
+    credentials: describeCredentials(db, userId),
     settings,
-    lastRun: latestSyncRun(db),
+    lastRun: latestSyncRun(db, userId),
     linkedCount: Number(row?.count ?? 0),
     autoSyncEnabled: settings.autoSync,
     schedulerIntervalMs: settings.syncIntervalHours * 3_600_000,

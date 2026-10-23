@@ -299,10 +299,49 @@ var privateIv = 'hmpqwBEFM126$<?|';
 用运行中标记防止并发；失败只记日志并等下一周期重试，不会破坏已有日程。
 `setInterval` 与启动延时都 `unref()`，不会阻止进程退出。
 
+## 多用户与多设备（v4）
+
+### 账户模型
+
+- `users`：用户名（NOCASE 唯一）、scrypt 密码哈希、`role`（admin/user）、`status`。
+- `sessions`：只存会话令牌的 SHA-256，HttpOnly Cookie 下发；30 天有效，可撤销。
+- `devices`：每台硬件一行，存令牌哈希与遥测；设备令牌解析出 `user_id` 后再组装屏幕。
+- 初始化：迁移会创建一个 `pending_setup` 管理员；`/api/setup` 认领后变为活跃管理员。
+  之后账号只能由管理员创建，不开放自助注册。
+
+### 租户隔离
+
+所有用户数据表（`categories` / `events` / `todos` / `app_settings` / `weather_cache` /
+`sync_credentials` / `course_slot_links` / `sync_runs` / `devices`）都带 `user_id`。
+仓储函数显式接收 `userId`，所有 SQL 带 `WHERE user_id = ?`；跨用户的 `:id` 一律 404。
+实例覆盖（`event_overrides`）通过已校验归属的 `event_id` 访问。
+
+### 显示与天气
+
+- 布局、刷新间隔、时区都按用户保存在 `app_settings`，同一用户的设备共用。
+- 设备拉屏仍只读该用户的天气缓存；后台天气调度器每 15 分钟按用户刷新，
+  避免“控制台没打开时天气永远不更新”。
+- 时区写入 `display.timezone`，所有“今天/月历/待办到期/课程导入”都使用用户时区。
+
+### 课程同步
+
+- 凭据、设置、映射与同步记录按用户隔离。
+- `sync_credentials.base_url` 记录凭据对应的学校地址；地址变更后旧密码不再被使用，
+  必须重新输入，避免把已保存密码发往新地址。
+- `remember=false` 只写入进程内 12 小时缓存，不落库。
+
+### 设备令牌
+
+- 完整令牌只在创建/轮换时返回一次；数据库只存 SHA-256 与前 4/后 4 位前缀。
+- 旧版单例 `device.token` 在 v4 迁移时哈希后写入 `devices`，旧固件无需改配置即可继续拉取。
+- `GET /api/device/screen`、`POST /api/device/telemetry` 只认 `X-Device-Token`；
+  控制台设备管理走 `/api/devices`（会话鉴权）。
+
 ## 已知取舍
 
-- **单用户、无鉴权。** 定位是本地个人日程工具，因此没有账号体系。若要多人使用，
-  需要在 `events` / `categories` 上加 `owner_id` 并在中间件里做鉴权。
+- **单机/局域网部署，不内置 TLS。** 管理接口已要求登录；跨网访问请在前面加 HTTPS 反向代理。
+- **管理员不能读取用户内容数据。** 用户管理只返回账号元数据与设备数量。
+- **每个用户一套布局。** 若未来需要每设备独立布局，新增 `device_settings` 覆盖层即可。
 - **重复日程的查询在应用层展开。** 没有把展开结果物化成表。个人规模（数百到数千条日程）
   下性能充裕，且避免了「规则改了要重算物化表」的一致性问题。若数据量增长到十万级，
   应改为查询时按需物化或引入展开缓存。
@@ -311,6 +350,5 @@ var privateIv = 'hmpqwBEFM126$<?|';
   表单里只保留另外两档。
 - **提醒靠前端轮询而非服务端推送。** 免去了 WebSocket 与推送证书，代价是页面必须处于
   打开状态。对于需要「关掉页面也能收到提醒」的场景，应改为服务端调度 + Web Push。
-- **`node:sqlite` 在部分 Node 版本仍标记为实验特性。** 22.5 以下需要
-  `--experimental-sqlite`，因此 `engines` 要求 `>= 22.5`；若要完全规避实验特性，
-  把 `src/db/client.ts` 换成 `better-sqlite3` 即可，其余代码不用动。
+- **`node:sqlite` 在部分 Node 版本仍标记为实验特性。** 建议使用 Node 22.13+ 或 24 LTS；
+  若要完全规避实验特性，把 `src/db/client.ts` 换成 `better-sqlite3` 即可。

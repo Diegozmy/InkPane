@@ -1,9 +1,8 @@
 /**
  * 重置数据库：npm run db:reset
  *
- * 会删除当前配置的 SQLite 文件（含 WAL/SHM 附属文件）后重新建表并写入演示数据。
- * 删除前会校验目标路径确实等于 DATABASE_FILE 解析后的绝对路径，
- * 且拒绝 ':memory:'，避免误删。
+ * 会删除当前配置的 SQLite 文件（含 WAL/SHM 附属文件）后重新建表。
+ * 初始化管理员通过 /api/setup 完成；若配置了环境变量管理员，重启服务即可。
  */
 
 import { existsSync, rmSync } from 'node:fs';
@@ -12,7 +11,7 @@ import { config } from '../config.js';
 import { logger } from '../lib/logger.js';
 import { closeDatabase, getDatabase } from './client.js';
 import { runMigrations } from './migrations.js';
-import { seedDemoData } from './seed.js';
+import { get } from './query.js';
 
 function resetDatabase(): void {
   if (config.databaseFile === ':memory:') {
@@ -37,9 +36,9 @@ function resetDatabase(): void {
   const result = runMigrations(db);
   console.log(`已重建数据库结构（版本 ${result.to}）`);
 
-  const seeded = seedDemoData(db);
-  if (seeded.seeded) {
-    console.log(`已写入 ${seeded.categoryCount} 个分类、${seeded.eventCount} 条演示日程`);
+  const owner = get<{ id: number }>(db, "SELECT id FROM users WHERE status = 'pending_setup' LIMIT 1");
+  if (owner) {
+    console.log('数据库已初始化，打开控制台通过 /setup 创建管理员。');
   }
 }
 

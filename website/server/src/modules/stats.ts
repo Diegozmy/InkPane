@@ -1,12 +1,14 @@
 /** 统计模块：为「今日概览」与仪表盘提供聚合数据。 */
 
 import { Router } from 'express';
-import { getDatabase } from '../db/client.js';
+import { getDatabase, type SqliteDatabase } from '../db/client.js';
 import { listCategories } from './categories.js';
 import { asyncHandler } from '../http/async-handler.js';
+import { requireUser } from '../http/auth.js';
 import { statsQuerySchema } from '../domain/schemas.js';
-import { systemTimeZone, toDateKey } from '../domain/time.js';
+import { toDateKey } from '../domain/time.js';
 import type { Occurrence, Priority, StatsSummary } from '../domain/types.js';
+import { readDisplayTimezone } from './display/settings.js';
 import { queryOccurrences, resolveRange } from './events/service.js';
 
 const UPCOMING_LIMIT = 6;
@@ -15,9 +17,11 @@ const PRIORITY_RANK: Record<Priority, number> = { urgent: 0, high: 1, normal: 2,
 
 export function buildSummary(
   input: { from?: string; to?: string; timezone?: string },
+  userId: number,
   now: Date = new Date(),
+  db: SqliteDatabase = getDatabase(),
 ): StatsSummary {
-  const timezone = input.timezone ?? systemTimeZone();
+  const timezone = input.timezone ?? readDisplayTimezone(db, userId);
   const range = resolveRange(input.from, input.to);
   const { items } = queryOccurrences(
     {
@@ -26,10 +30,11 @@ export function buildSummary(
       includeCancelled: false,
       limit: 2000,
     },
-    getDatabase(),
+    userId,
+    db,
   );
 
-  const categories = new Map(listCategories().map((category) => [category.id, category]));
+  const categories = new Map(listCategories(db, userId).map((category) => [category.id, category]));
 
   const categoryBuckets = new Map<number | null, { count: number; name: string; color: string }>();
   const priorityBuckets = new Map<Priority, number>();
@@ -102,7 +107,7 @@ export function createStatsRouter(): Router {
     '/summary',
     asyncHandler((req, res) => {
       const query = statsQuerySchema.parse(req.query);
-      res.json({ data: buildSummary(query) });
+      res.json({ data: buildSummary(query, requireUser(req).userId) });
     }),
   );
 

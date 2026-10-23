@@ -3,8 +3,14 @@
 import { Router } from 'express';
 import { getDatabase } from '../../db/client.js';
 import { asyncHandler } from '../../http/async-handler.js';
+import { requireUser } from '../../http/auth.js';
 import { SchoolPortalClient } from './client.js';
-import { readCredentials, deleteCredentials, saveCredentials } from './credentials.js';
+import {
+  readCredentials,
+  deleteCredentials,
+  rememberEphemeralCredentials,
+  saveCredentials,
+} from './credentials.js';
 import {
   courseSyncStatus,
   credentialsInputSchema,
@@ -22,8 +28,8 @@ export function createCoursesRouter(): Router {
 
   router.get(
     '/status',
-    asyncHandler((_req, res) => {
-      res.json({ data: courseSyncStatus() });
+    asyncHandler((req, res) => {
+      res.json({ data: courseSyncStatus(requireUser(req).userId) });
     }),
   );
 
@@ -31,8 +37,8 @@ export function createCoursesRouter(): Router {
 
   router.get(
     '/settings',
-    asyncHandler((_req, res) => {
-      res.json({ data: readCourseSyncSettings(getDatabase()) });
+    asyncHandler((req, res) => {
+      res.json({ data: readCourseSyncSettings(getDatabase(), requireUser(req).userId) });
     }),
   );
 
@@ -40,7 +46,15 @@ export function createCoursesRouter(): Router {
     '/settings',
     asyncHandler((req, res) => {
       const patch = settingsPatchSchema.parse(req.body);
-      res.json({ data: writeCourseSyncSettings(getDatabase(), patch) });
+      const db = getDatabase();
+      const userId = requireUser(req).userId;
+      const before = readCourseSyncSettings(db, userId);
+      const updated = writeCourseSyncSettings(db, userId, patch);
+      // 地址变更后绝不能让旧密码被发往新地址；要求用户重新输入凭据。
+      if (patch.baseUrl !== undefined && patch.baseUrl !== before.baseUrl) {
+        deleteCredentials(db, userId);
+      }
+      res.json({ data: updated });
     }),
   );
 
@@ -50,19 +64,34 @@ export function createCoursesRouter(): Router {
     '/credentials',
     asyncHandler((req, res) => {
       const input = credentialsInputSchema.parse(req.body);
-      saveCredentials(getDatabase(), {
-        username: input.username,
-        password: input.password,
-        remember: input.remember ?? true,
-      });
-      res.json({ data: courseSyncStatus().credentials });
+      const db = getDatabase();
+      const userId = requireUser(req).userId;
+      const settings = readCourseSyncSettings(db, userId);
+      const remember = input.remember ?? true;
+      if (remember) {
+        saveCredentials(db, userId, {
+          username: input.username,
+          password: input.password,
+          baseUrl: settings.baseUrl,
+          remember: true,
+        });
+      } else {
+        // 不保存到磁盘：清掉旧凭据，只保留进程内 12 小时缓存。
+        deleteCredentials(db, userId);
+        rememberEphemeralCredentials(userId, {
+          username: input.username,
+          password: input.password,
+          baseUrl: settings.baseUrl,
+        });
+      }
+      res.json({ data: courseSyncStatus(userId, db).credentials });
     }),
   );
 
   router.delete(
     '/credentials',
-    asyncHandler((_req, res) => {
-      res.json({ data: { removed: deleteCredentials(getDatabase()) } });
+    asyncHandler((req, res) => {
+      res.json({ data: { removed: deleteCredentials(getDatabase(), requireUser(req).userId) } });
     }),
   );
 
@@ -71,7 +100,9 @@ export function createCoursesRouter(): Router {
     '/test-login',
     asyncHandler(async (req, res) => {
       const input = credentialsInputSchema.parse(req.body);
-      const settings = readCourseSyncSettings(getDatabase());
+      const db = getDatabase();
+      const userId = requireUser(req).userId;
+      const settings = readCourseSyncSettings(db, userId);
       const client = new SchoolPortalClient({ baseUrl: settings.baseUrl });
       try {
         await client.login({ username: input.username, password: input.password });
@@ -92,7 +123,7 @@ export function createCoursesRouter(): Router {
         input.username && input.password
           ? { username: input.username, password: input.password }
           : undefined;
-      const preview = await previewCourses({
+      const preview = await previewCourses(requireUser(req).userId, {
         ...(inline ? { credentials: inline } : {}),
         ...(input.rawHtml !== undefined ? { rawHtml: input.rawHtml } : {}),
       });
@@ -108,7 +139,7 @@ export function createCoursesRouter(): Router {
         input.username && input.password
           ? { username: input.username, password: input.password }
           : undefined;
-      const result = await importCourses({
+      const result = await importCourses(requireUser(req).userId, {
         ...(inline ? { credentials: inline } : {}),
         ...(input.rawHtml !== undefined ? { rawHtml: input.rawHtml } : {}),
       });
@@ -124,8 +155,8 @@ export function createCoursesRouter(): Router {
   /** 手动触发一次完整同步（等价于自动同步跑一轮）。 */
   router.post(
     '/sync-now',
-    asyncHandler(async (_req, res) => {
-      const result = await runCourseSyncNow();
+    asyncHandler(async (req, res) => {
+      const result = await runCourseSyncNow(requireUser(req).userId);
       res.json({ data: result });
     }),
   );
@@ -133,14 +164,12 @@ export function createCoursesRouter(): Router {
   /** 是否已保存凭据（不返回密码，只返回脱敏信息）。 */
   router.get(
     '/credentials',
-    asyncHandler((_req, res) => {
-      const stored = readCredentials(getDatabase());
+    asyncHandler((req, res) => {
+      const stored = readCredentials(getDatabase(), requireUser(req).userId);
       res.json({
         data: {
           configured: stored !== null,
-          username: stored?.username ?? null,
-          remember: stored?.remember ?? false,
-          updatedAt: stored?.updatedAt ?? null,
+          ...courseSyncStatus(requireUser(req).userId).credentials,
         },
       });
     }),

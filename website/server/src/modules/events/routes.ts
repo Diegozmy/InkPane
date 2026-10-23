@@ -2,6 +2,7 @@
 
 import { Router } from 'express';
 import { asyncHandler } from '../../http/async-handler.js';
+import { requireUser } from '../../http/auth.js';
 import {
   cancelOccurrenceSchema,
   eventCreateSchema,
@@ -33,7 +34,7 @@ export function createEventsRouter(): Router {
     '/',
     asyncHandler((req, res) => {
       const query = listEventsQuerySchema.parse(req.query);
-      const result = browseEvents(query);
+      const result = browseEvents(query, requireUser(req).userId);
       res.json({
         data: result.items,
         meta: { total: result.total, limit: result.limit, offset: result.offset },
@@ -45,7 +46,7 @@ export function createEventsRouter(): Router {
     '/',
     asyncHandler((req, res) => {
       const input = eventCreateSchema.parse(req.body);
-      res.status(201).json({ data: createEvent(input) });
+      res.status(201).json({ data: createEvent(input, requireUser(req).userId) });
     }),
   );
 
@@ -53,7 +54,7 @@ export function createEventsRouter(): Router {
     '/:id',
     asyncHandler((req, res) => {
       const { id } = idParamSchema.parse(req.params);
-      res.json({ data: getEvent(id) });
+      res.json({ data: getEvent(id, requireUser(req).userId) });
     }),
   );
 
@@ -62,7 +63,7 @@ export function createEventsRouter(): Router {
     asyncHandler((req, res) => {
       const { id } = idParamSchema.parse(req.params);
       const patch = eventUpdateSchema.parse(req.body);
-      res.json({ data: updateEvent(id, patch) });
+      res.json({ data: updateEvent(id, patch, requireUser(req).userId) });
     }),
   );
 
@@ -70,7 +71,7 @@ export function createEventsRouter(): Router {
     '/:id',
     asyncHandler((req, res) => {
       const { id } = idParamSchema.parse(req.params);
-      deleteEvent(id);
+      deleteEvent(id, requireUser(req).userId);
       res.status(204).end();
     }),
   );
@@ -79,7 +80,7 @@ export function createEventsRouter(): Router {
     '/:id/overrides',
     asyncHandler((req, res) => {
       const { id } = idParamSchema.parse(req.params);
-      res.json({ data: listEventOverrides(id) });
+      res.json({ data: listEventOverrides(id, requireUser(req).userId) });
     }),
   );
 
@@ -88,7 +89,7 @@ export function createEventsRouter(): Router {
     asyncHandler((req, res) => {
       const { id } = idParamSchema.parse(req.params);
       const input = moveOccurrenceSchema.parse(req.body);
-      const result = moveOccurrence(id, input);
+      const result = moveOccurrence(id, input, requireUser(req).userId);
       res.json({
         data: {
           scope: result.scope,
@@ -105,7 +106,7 @@ export function createEventsRouter(): Router {
     asyncHandler((req, res) => {
       const { id } = idParamSchema.parse(req.params);
       const input = cancelOccurrenceSchema.parse(req.body);
-      const result = cancelOccurrence(id, input);
+      const result = cancelOccurrence(id, input, requireUser(req).userId);
       res.json({
         data: {
           scope: result.scope,
@@ -122,7 +123,7 @@ export function createEventsRouter(): Router {
     asyncHandler((req, res) => {
       const { id } = idParamSchema.parse(req.params);
       const input = overrideSchema.parse(req.body);
-      res.json({ data: upsertOccurrenceOverride(id, input) });
+      res.json({ data: upsertOccurrenceOverride(id, input, requireUser(req).userId) });
     }),
   );
 
@@ -131,7 +132,9 @@ export function createEventsRouter(): Router {
     asyncHandler((req, res) => {
       const { id } = idParamSchema.parse(req.params);
       const occurrenceKey = String(req.params['occurrenceKey'] ?? '');
-      res.json({ data: { removed: resetOccurrenceOverride(id, occurrenceKey) } });
+      res.json({
+        data: { removed: resetOccurrenceOverride(id, occurrenceKey, requireUser(req).userId) },
+      });
     }),
   );
 
@@ -146,7 +149,7 @@ export function createOccurrencesRouter(): Router {
     '/',
     asyncHandler((req, res) => {
       const query = occurrenceQuerySchema.parse(req.query);
-      const result = queryOccurrences(query);
+      const result = queryOccurrences(query, requireUser(req).userId);
       res.json({
         data: result.items,
         meta: {

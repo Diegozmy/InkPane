@@ -6,11 +6,11 @@
  */
 
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
-import request from 'supertest';
 import type { Express } from 'express';
 import { createApp } from '../src/app.js';
 import { closeDatabase, getDatabase, openDatabase, setDatabaseForTesting } from '../src/db/client.js';
 import { runMigrations } from '../src/db/migrations.js';
+import { setupTestAdmin } from './helpers/auth.js';
 
 const TERM_ID = '102';
 const TERM_NAME = '2026-2027学年第一学程';
@@ -18,6 +18,7 @@ const TERM_START = '2026-08-31'; // 周一
 const PASSWORD = 'Wjy090317';
 
 let app: Express;
+let agent: Awaited<ReturnType<typeof setupTestAdmin>>;
 
 interface FixtureSlot {
   weekday: number;
@@ -60,22 +61,23 @@ function makeTimetableHtml(slots: FixtureSlot[], options: { withDates?: boolean 
 }
 
 async function setSettings(patch: Record<string, unknown>): Promise<void> {
-  const response = await request(app).patch('/api/courses/settings').send(patch);
+  const response = await agent.patch('/api/courses/settings').send(patch);
   expect(response.status).toBe(200);
 }
 
 async function importWith(html: string): Promise<Record<string, unknown>> {
-  const response = await request(app).post('/api/courses/import').send({ rawHtml: html });
+  const response = await agent.post('/api/courses/import').send({ rawHtml: html });
   expect(response.status).toBe(200);
   return response.body.data as Record<string, unknown>;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   closeDatabase();
   const db = openDatabase(':memory:');
   runMigrations(db);
   setDatabaseForTesting(db);
   app = createApp();
+  agent = await setupTestAdmin(app);
 });
 
 afterAll(() => {
@@ -85,7 +87,7 @@ afterAll(() => {
 
 describe('课程同步设置', () => {
   it('默认返回一套可用的节次时间与关闭的自动同步', async () => {
-    const response = await request(app).get('/api/courses/settings');
+    const response = await agent.get('/api/courses/settings');
     expect(response.status).toBe(200);
     expect(response.body.data.periods.length).toBeGreaterThanOrEqual(8);
     expect(response.body.data.fridaySeparate).toBe(false);
@@ -103,7 +105,7 @@ describe('课程同步设置', () => {
       autoSync: true,
       syncIntervalHours: 12,
     });
-    const response = await request(app).get('/api/courses/settings');
+    const response = await agent.get('/api/courses/settings');
     expect(response.body.data).toMatchObject({
       fridaySeparate: true,
       termStartDate: TERM_START,
@@ -116,7 +118,7 @@ describe('课程同步设置', () => {
   });
 
   it('拒绝结束时间早于开始时间的节次', async () => {
-    const response = await request(app)
+    const response = await agent
       .patch('/api/courses/settings')
       .send({ periods: [{ index: 1, start: '10:00', end: '09:00' }] });
     expect(response.status).toBe(422);
@@ -125,14 +127,14 @@ describe('课程同步设置', () => {
 
 describe('凭据保存', () => {
   it('保存后可以读到账号，但永远不回传密码；库里也不存明文', async () => {
-    const saved = await request(app)
+    const saved = await agent
       .put('/api/courses/credentials')
       .send({ username: '20240116', password: PASSWORD, remember: true });
     expect(saved.status).toBe(200);
     expect(saved.body.data).toMatchObject({ username: '20240116', remember: true });
     expect(JSON.stringify(saved.body)).not.toContain(PASSWORD);
 
-    const status = await request(app).get('/api/courses/status');
+    const status = await agent.get('/api/courses/status');
     expect(status.body.data.credentials).toMatchObject({
       username: '20240116',
       hasPassword: true,
@@ -143,7 +145,7 @@ describe('凭据保存', () => {
     // 直接查库：密文里不能出现明文
     const db = getDatabase();
     const row = db
-      .prepare('SELECT username, secret FROM sync_credentials WHERE id = 1')
+      .prepare('SELECT username, secret FROM sync_credentials WHERE user_id = (SELECT id FROM users ORDER BY id LIMIT 1)')
       .get() as { username: string; secret: string };
     expect(row.username).toBe('20240116');
     expect(row.secret).not.toContain(PASSWORD);
@@ -151,15 +153,15 @@ describe('凭据保存', () => {
   });
 
   it('可以删除已保存的凭据', async () => {
-    await request(app).put('/api/courses/credentials').send({ username: 'u', password: 'p' });
-    const removed = await request(app).delete('/api/courses/credentials');
+    await agent.put('/api/courses/credentials').send({ username: 'u', password: 'p' });
+    const removed = await agent.delete('/api/courses/credentials');
     expect(removed.body.data.removed).toBe(true);
-    const status = await request(app).get('/api/courses/status');
+    const status = await agent.get('/api/courses/status');
     expect(status.body.data.credentials.hasPassword).toBe(false);
   });
 
   it('未保存凭据又要求联网导入时返回 422 且给出指引', async () => {
-    const response = await request(app).post('/api/courses/import').send({});
+    const response = await agent.post('/api/courses/import').send({});
     expect(response.status).toBe(422);
     expect(response.body.error.message).toContain('尚未保存');
   });
@@ -173,7 +175,7 @@ describe('课表预览', () => {
       { weekday: 5, period: 2, name: '高三数学1-1', teacher: '蔡晙晔', room: '301' },
     ]);
 
-    const response = await request(app).post('/api/courses/preview').send({ rawHtml: html });
+    const response = await agent.post('/api/courses/preview').send({ rawHtml: html });
     expect(response.status).toBe(200);
     const preview = response.body.data;
     expect(preview.termId).toBe(TERM_ID);
@@ -198,7 +200,7 @@ describe('课表预览', () => {
 
   it('未配置学期起始日时按当周推断并给出提醒', async () => {
     const html = makeTimetableHtml([{ weekday: 1, period: 1, name: '语文' }]);
-    const response = await request(app).post('/api/courses/preview').send({ rawHtml: html });
+    const response = await agent.post('/api/courses/preview').send({ rawHtml: html });
     expect(response.body.data.termStartInferred).toBe(true);
     expect(response.body.data.warnings.join(' ')).toContain('第一周');
   });
@@ -215,7 +217,7 @@ describe('课表预览', () => {
       { weekday: 5, period: 1, name: '周五数学' },
     ]);
 
-    const preview = (await request(app).post('/api/courses/preview').send({ rawHtml: html })).body.data;
+    const preview = (await agent.post('/api/courses/preview').send({ rawHtml: html })).body.data;
     const monday = preview.slots.find((slot: { weekday: number }) => slot.weekday === 1);
     const friday = preview.slots.find((slot: { weekday: number }) => slot.weekday === 5);
 
@@ -232,7 +234,7 @@ describe('课表预览', () => {
       { weekday: 1, period: 1, name: '第一节' },
       { weekday: 1, period: 3, name: '第三节' },
     ]);
-    const preview = (await request(app).post('/api/courses/preview').send({ rawHtml: html })).body.data;
+    const preview = (await agent.post('/api/courses/preview').send({ rawHtml: html })).body.data;
     expect(preview.slots.find((slot: { period: number }) => slot.period === 3).timeFallback).toBe(true);
     expect(preview.warnings.join(' ')).toContain('顺延');
   });
@@ -250,11 +252,11 @@ describe('导入与幂等同步', () => {
     const result = await importWith(html);
     expect(result).toMatchObject({ created: 3, updated: 0, removed: 0 });
 
-    const categories = await request(app).get('/api/categories');
+    const categories = await agent.get('/api/categories');
     const course = categories.body.data.find((item: { name: string }) => item.name === '课程');
     expect(course).toBeDefined();
 
-    const events = await request(app).get('/api/events').query({ limit: 50 });
+    const events = await agent.get('/api/events').query({ limit: 50 });
     expect(events.body.meta.total).toBe(3);
     const first = events.body.data.find((item: { title: string }) => item.title === '高三语文1-1');
     expect(first.location).toBe('301');
@@ -269,7 +271,7 @@ describe('导入与幂等同步', () => {
     const second = await importWith(html);
     expect(second).toMatchObject({ created: 0, updated: 3, removed: 0 });
 
-    const events = await request(app).get('/api/events').query({ limit: 50 });
+    const events = await agent.get('/api/events').query({ limit: 50 });
     expect(events.body.meta.total).toBe(3);
   });
 
@@ -283,7 +285,7 @@ describe('导入与幂等同步', () => {
     const result = await importWith(reduced);
     expect(result).toMatchObject({ created: 0, updated: 1, removed: 2 });
 
-    const events = await request(app).get('/api/events').query({ limit: 50 });
+    const events = await agent.get('/api/events').query({ limit: 50 });
     expect(events.body.meta.total).toBe(1);
   });
 
@@ -292,7 +294,7 @@ describe('导入与幂等同步', () => {
     await importWith(makeTimetableHtml([{ weekday: 1, period: 1, name: '旧课名' }]));
     await importWith(makeTimetableHtml([{ weekday: 1, period: 1, name: '新课名' }]));
 
-    const events = await request(app).get('/api/events').query({ limit: 50 });
+    const events = await agent.get('/api/events').query({ limit: 50 });
     expect(events.body.data.map((item: { title: string }) => item.title)).toEqual(['新课名']);
   });
 
@@ -300,7 +302,7 @@ describe('导入与幂等同步', () => {
     await setSettings({ termStartDate: TERM_START, totalWeeks: 4 });
     await importWith(makeTimetableHtml([{ weekday: 1, period: 1, name: '语文' }]));
 
-    const occurrences = await request(app).get('/api/occurrences').query({
+    const occurrences = await agent.get('/api/occurrences').query({
       from: new Date(2026, 7, 30).toISOString(),
       to: new Date(2026, 9, 1).toISOString(),
     });
@@ -317,14 +319,14 @@ describe('导入与幂等同步', () => {
     await setSettings({ termStartDate: TERM_START });
     await importWith(html);
 
-    const events = await request(app).get('/api/events').query({ limit: 50 });
+    const events = await agent.get('/api/events').query({ limit: 50 });
     const target = events.body.data.find((item: { title: string }) => item.title === '高三英语1-1');
-    await request(app).delete(`/api/events/${target.id}`);
+    await agent.delete(`/api/events/${target.id}`);
 
     const result = await importWith(html);
     expect(result).toMatchObject({ created: 1, updated: 2, removed: 0 });
 
-    const after = await request(app).get('/api/events').query({ limit: 50 });
+    const after = await agent.get('/api/events').query({ limit: 50 });
     expect(after.body.meta.total).toBe(3);
   });
 
@@ -332,7 +334,7 @@ describe('导入与幂等同步', () => {
     await setSettings({ termStartDate: TERM_START });
     await importWith(html);
 
-    const status = await request(app).get('/api/courses/status');
+    const status = await agent.get('/api/courses/status');
     expect(status.body.data.lastRun).toMatchObject({ status: 'success', created: 3, total: 3 });
     expect(status.body.data.linkedCount).toBe(3);
     expect(status.body.data.settings.termStartDate).toBe(TERM_START);
@@ -342,13 +344,13 @@ describe('导入与幂等同步', () => {
     await setSettings({ termStartDate: TERM_START });
     await importWith(html);
 
-    const broken = await request(app).post('/api/courses/import').send({ rawHtml: '<table><tr><td>空</td></tr></table>' });
+    const broken = await agent.post('/api/courses/import').send({ rawHtml: '<table><tr><td>空</td></tr></table>' });
     expect(broken.status).toBe(400);
 
-    const status = await request(app).get('/api/courses/status');
+    const status = await agent.get('/api/courses/status');
     expect(status.body.data.lastRun.status).toBe('failed');
 
-    const events = await request(app).get('/api/events').query({ limit: 50 });
+    const events = await agent.get('/api/events').query({ limit: 50 });
     expect(events.body.meta.total).toBe(3);
   });
 });

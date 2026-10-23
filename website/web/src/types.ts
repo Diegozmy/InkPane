@@ -182,7 +182,6 @@ export interface HealthInfo {
   status: string;
   env: string;
   schemaVersion: number;
-  eventCount: number;
   uptimeSeconds: number;
   serverTime: string;
 }
@@ -442,6 +441,7 @@ export interface DisplayModuleMeta {
 export interface DisplayConfig {
   layout: DisplayLayout;
   refreshMinutes: number;
+  timezone: string;
   modules: DisplayModuleMeta[];
   width: number;
   height: number;
@@ -484,9 +484,11 @@ export interface DeviceMonth {
 }
 
 export interface DeviceScreenPayload {
+  schemaVersion: number;
   generatedAt: string;
   timezone: string;
   etag: string;
+  device: { id: number; name: string } | null;
   screen: {
     width: number;
     height: number;
@@ -499,6 +501,9 @@ export interface DeviceScreenPayload {
     weekday: string;
     date: string;
     dateLabel: string;
+    epochSeconds: number;
+    utcOffsetMinutes: number;
+    localIso: string;
   };
   month: DeviceMonth;
   weather: WeatherSnapshot | null;
@@ -507,26 +512,52 @@ export interface DeviceScreenPayload {
   todos: DeviceTodo[];
 }
 
-export interface DeviceStatus {
-  paired: boolean;
+export type UserRole = 'admin' | 'user';
+export type UserStatus = 'pending_setup' | 'active' | 'disabled';
+
+export interface AuthUser {
+  id: number;
+  username: string;
+  displayName: string;
+  role: UserRole;
+  status: UserStatus;
+  timezone: string;
+}
+
+export interface AuthSession {
+  user: AuthUser;
+  setupRequired: boolean;
+}
+
+export interface SetupStatus {
+  required: boolean;
+}
+
+export interface UserSummary extends AuthUser {
+  createdAt: string;
+  updatedAt: string;
+  lastLoginAt: string | null;
+  deviceCount: number;
+}
+
+export interface DeviceSummary {
+  id: number;
   name: string;
-  tokenPreview: string;
+  tokenPrefix: string;
   lastSeenAt: string | null;
+  online: boolean;
   firmware: string | null;
   batteryPercent: number | null;
   batteryVoltage: number | null;
   rssi: number | null;
   indoorTemperature: number | null;
   indoorHumidity: number | null;
-  screenVersion: string;
-  refreshMinutes: number;
-  layoutUpdatedAt: string;
-  serverTime: string;
+  createdAt: string;
 }
 
-export interface DeviceSettingsPayload {
-  name?: string;
-  refreshMinutes?: number;
+export interface CreatedDevice {
+  device: DeviceSummary;
+  token: string;
 }
 
 export interface DeviceTelemetryPayload {

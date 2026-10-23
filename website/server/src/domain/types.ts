@@ -317,6 +317,7 @@ export interface DisplayModuleCatalogItem {
 export interface DisplayConfig {
   layout: DisplayLayout;
   refreshMinutes: number;
+  timezone: string;
   modules: DisplayModuleCatalogItem[];
   width: number;
   height: number;
@@ -354,6 +355,12 @@ export interface DeviceNow {
   weekday: string;
   date: string;
   dateLabel: string;
+  /** 服务端当前 Unix 秒，供设备校准 RTC */
+  epochSeconds: number;
+  /** 用户显示时区相对 UTC 的偏移分钟数（东八区为 480） */
+  utcOffsetMinutes: number;
+  /** 用户时区下的本地墙上时间，含秒；用于直接写 RTC */
+  localIso: string;
 }
 
 export interface DeviceMonth {
@@ -374,11 +381,18 @@ export interface DeviceScreen {
   layout: DisplayLayout;
 }
 
+export interface DeviceIdentity {
+  id: number;
+  name: string;
+}
+
 /** ESP32 拉取的完整屏幕数据。 */
 export interface DeviceScreenPayload {
+  schemaVersion: number;
   generatedAt: string;
   timezone: string;
   etag: string;
+  device: DeviceIdentity | null;
   screen: DeviceScreen;
   now: DeviceNow;
   month: DeviceMonth;
@@ -398,7 +412,23 @@ export interface DeviceTelemetry {
   uptimeSeconds?: number;
 }
 
-/** 控制台「设备」页展示的状态。 */
+/** 控制台「设备」页展示的状态（多设备版）。 */
+export interface DeviceSummary {
+  id: number;
+  name: string;
+  tokenPrefix: string;
+  lastSeenAt: string | null;
+  online: boolean;
+  firmware: string | null;
+  batteryPercent: number | null;
+  batteryVoltage: number | null;
+  rssi: number | null;
+  indoorTemperature: number | null;
+  indoorHumidity: number | null;
+  createdAt: string;
+}
+
+/** 兼容旧类型名的字段集合；新代码使用 DeviceSummary。 */
 export interface DeviceStatus {
   paired: boolean;
   name: string;

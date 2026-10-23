@@ -3,6 +3,9 @@ import type { Filters } from '@/types';
 /** React Query 缓存键集中定义，避免散落的字符串数组导致失效不干净。 */
 export const queryKeys = {
   health: ['health'] as const,
+  setupStatus: ['setup', 'status'] as const,
+  me: ['auth', 'me'] as const,
+  users: ['users'] as const,
   categories: ['categories'] as const,
   events: (params: Record<string, unknown>) => ['events', params] as const,
   occurrences: (params: Record<string, unknown>) => ['occurrences', params] as const,
@@ -13,8 +16,7 @@ export const queryKeys = {
   weatherSearch: (query: string) => ['weather', 'search', query] as const,
   display: ['display'] as const,
   screen: ['display', 'screen'] as const,
-  device: ['device'] as const,
-  deviceToken: ['device', 'token'] as const,
+  devices: ['devices'] as const,
 };
 
 export interface RangeParams {

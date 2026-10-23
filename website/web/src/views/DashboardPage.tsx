@@ -4,7 +4,8 @@ import { useMemo, type ReactElement } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { format, getISOWeek } from 'date-fns';
 import { useCategories } from '@/api/use-calendar-data';
-import { useDeviceStatus, useScreenPreview } from '@/api/use-workspace';
+import { useDevices } from '@/api/use-devices';
+import { useScreenPreview } from '@/api/use-workspace';
 import { useToggleTodo } from '@/api/use-workspace-mutations';
 import { ScreenPreview } from '@/components/device/ScreenPreview';
 import { AppShell } from '@/components/layout/AppShell';
@@ -30,7 +31,8 @@ export function DashboardPage(): ReactElement {
   const navigate = useNavigate();
   const now = useNow(20_000);
   const screen = useScreenPreview();
-  const device = useDeviceStatus();
+  const devices = useDevices();
+  const primaryDevice = devices.data?.[0];
   const categories = useCategories();
   const toggleTodo = useToggleTodo();
 
@@ -249,11 +251,11 @@ export function DashboardPage(): ReactElement {
             <div className="device-card__meta">
               <div className="device-card__meta-row">
                 <span>状态</span>
-                <strong>{device.data?.paired ? '已配对' : '等待配对'}</strong>
+                <strong>{primaryDevice?.online ? '已配对' : '等待配对'}</strong>
               </div>
               <div className="device-card__meta-row">
                 <span>电量</span>
-                <strong>{device.data?.batteryPercent != null ? `${device.data.batteryPercent}%` : '—'}</strong>
+                <strong>{primaryDevice?.batteryPercent != null ? `${primaryDevice.batteryPercent}%` : '—'}</strong>
               </div>
               <div className="device-card__meta-row">
                 <span>刷新间隔</span>

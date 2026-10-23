@@ -4,17 +4,21 @@ import type { Server } from 'node:http';
 import { config } from './config.js';
 import { logger } from './lib/logger.js';
 import { closeDatabase, getDatabase } from './db/client.js';
-import { isDatabaseEmpty, runMigrations, schemaVersion } from './db/migrations.js';
+import { runMigrations, schemaVersion } from './db/migrations.js';
 import { seedDemoData } from './db/seed.js';
+import { countEvents } from './modules/events/repository.js';
 import { ensureUtcAvailable } from './domain/time.js';
 import { createApp } from './app.js';
+import { bootstrapAdminFromEnv } from './modules/auth/service.js';
+import { cleanupSessions } from './modules/auth/sessions.js';
 import { startCourseSyncScheduler } from './modules/courses/scheduler.js';
+import { startWeatherScheduler } from './modules/weather/scheduler.js';
 
-let stopScheduler: (() => void) | null = null;
+const stopHandlers: (() => void)[] = [];
 
 function shutdown(server: Server, signal: string): void {
   logger.info('收到退出信号，开始优雅关闭', { signal });
-  stopScheduler?.();
+  for (const stop of stopHandlers) stop();
   const forceExit = setTimeout(() => {
     logger.warn('关闭超时，强制退出');
     process.exit(1);
@@ -29,20 +33,28 @@ function shutdown(server: Server, signal: string): void {
   });
 }
 
-function main(): void {
+async function main(): Promise<void> {
   try {
     ensureUtcAvailable();
 
     const db = getDatabase();
     runMigrations(db);
 
-    if (config.seedOnEmpty && isDatabaseEmpty(db)) {
-      const result = seedDemoData(db);
-      if (result.seeded) {
-        logger.info('已写入演示数据', {
-          categories: result.categoryCount,
-          events: result.eventCount,
-        });
+    const bootstrapped = await bootstrapAdminFromEnv(
+      db,
+      config.bootstrapAdminUsername,
+      config.bootstrapAdminPassword,
+    );
+    if (bootstrapped) {
+      logger.info('已通过环境变量初始化管理员', { userId: bootstrapped.id });
+      if (config.seedOnEmpty && countEvents(db, bootstrapped.id) === 0) {
+        const result = seedDemoData(db, bootstrapped.id);
+        if (result.seeded) {
+          logger.info('已写入演示数据', {
+            categories: result.categoryCount,
+            events: result.eventCount,
+          });
+        }
       }
     }
 
@@ -57,8 +69,20 @@ function main(): void {
       });
     });
 
-    // 课程自动同步：开启后按配置的间隔轮询学校系统
-    stopScheduler = startCourseSyncScheduler();
+    stopHandlers.push(startCourseSyncScheduler());
+    stopHandlers.push(startWeatherScheduler());
+
+    const sessionCleanup = setInterval(() => {
+      try {
+        cleanupSessions(db);
+      } catch (error) {
+        logger.warn('清理过期会话失败', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }, 60 * 60 * 1000);
+    sessionCleanup.unref();
+    stopHandlers.push(() => clearInterval(sessionCleanup));
 
     server.on('error', (error: NodeJS.ErrnoException) => {
       if (error.code === 'EADDRINUSE') {
@@ -89,4 +113,4 @@ function main(): void {
   }
 }
 
-main();
+void main();

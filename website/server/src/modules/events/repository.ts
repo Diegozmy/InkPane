@@ -81,41 +81,58 @@ function eventWriteValues(model: EventWriteModel): SqlValue[] {
  * 事件
  * ------------------------------------------------------------------ */
 
-export function countEvents(db: SqliteDatabase): number {
-  const row = get<{ count: number }>(db, 'SELECT COUNT(*) AS count FROM events');
+export function countEvents(db: SqliteDatabase, userId: number): number {
+  const row = get<{ count: number }>(
+    db,
+    'SELECT COUNT(*) AS count FROM events WHERE user_id = ?',
+    [userId],
+  );
   return Number(row?.count ?? 0);
 }
 
-export function findEventById(db: SqliteDatabase, id: number): EventRecord | null {
-  const row = get<EventRow>(db, `SELECT ${EVENT_COLUMNS} FROM events WHERE id = ?`, [id]);
+export function findEventById(db: SqliteDatabase, userId: number, id: number): EventRecord | null {
+  const row = get<EventRow>(
+    db,
+    `SELECT ${EVENT_COLUMNS} FROM events WHERE id = ? AND user_id = ?`,
+    [id, userId],
+  );
   return row ? toEventRecord(row) : null;
 }
 
-export function insertEvent(db: SqliteDatabase, model: EventWriteModel): EventRecord {
+export function insertEvent(
+  db: SqliteDatabase,
+  userId: number,
+  model: EventWriteModel,
+): EventRecord {
   const timestamp = NOW();
   const result = run(
     db,
-    `INSERT INTO events (${EVENT_WRITE_CLAUSE.replace(/ = \?/g, '')}, created_at, updated_at)
-     VALUES (${new Array(14).fill('?').join(', ')}, ?, ?)`,
-    [...eventWriteValues(model), timestamp, timestamp],
+    `INSERT INTO events (user_id, ${EVENT_WRITE_CLAUSE.replace(/ = \?/g, '')}, created_at, updated_at)
+     VALUES (?, ${new Array(14).fill('?').join(', ')}, ?, ?)`,
+    [userId, ...eventWriteValues(model), timestamp, timestamp],
   );
-  const created = findEventById(db, result.lastInsertRowid);
+  const created = findEventById(db, userId, result.lastInsertRowid);
   if (!created) throw new Error('事件写入后无法读回，数据库可能已损坏');
   return created;
 }
 
-export function updateEvent(db: SqliteDatabase, id: number, model: EventWriteModel): EventRecord | null {
+export function updateEvent(
+  db: SqliteDatabase,
+  userId: number,
+  id: number,
+  model: EventWriteModel,
+): EventRecord | null {
   const result = run(
     db,
-    `UPDATE events SET ${EVENT_WRITE_CLAUSE}, updated_at = ? WHERE id = ?`,
-    [...eventWriteValues(model), NOW(), id],
+    `UPDATE events SET ${EVENT_WRITE_CLAUSE}, updated_at = ? WHERE id = ? AND user_id = ?`,
+    [...eventWriteValues(model), NOW(), id, userId],
   );
   if (result.changes === 0) return null;
-  return findEventById(db, id);
+  return findEventById(db, userId, id);
 }
 
-export function deleteEvent(db: SqliteDatabase, id: number): boolean {
-  const result = run(db, 'DELETE FROM events WHERE id = ?', [id]);
+export function deleteEvent(db: SqliteDatabase, userId: number, id: number): boolean {
+  const result = run(db, 'DELETE FROM events WHERE id = ? AND user_id = ?', [id, userId]);
   return result.changes > 0;
 }
 
@@ -130,9 +147,13 @@ export interface EventBrowseQuery {
   sort: 'startAt' | '-startAt' | 'createdAt' | '-createdAt' | 'title' | '-title';
 }
 
-export function listEvents(db: SqliteDatabase, query: EventBrowseQuery): { items: EventRecord[]; total: number } {
-  const where: string[] = [];
-  const params: SqlValue[] = [];
+export function listEvents(
+  db: SqliteDatabase,
+  userId: number,
+  query: EventBrowseQuery,
+): { items: EventRecord[]; total: number } {
+  const where: string[] = ['user_id = ?'];
+  const params: SqlValue[] = [userId];
 
   if (query.search) {
     const like = `%${query.search.replace(/[%_]/g, (match) => `\\${match}`)}%`;
@@ -191,19 +212,20 @@ export function listEvents(db: SqliteDatabase, query: EventBrowseQuery): { items
  */
 export function findCandidateEvents(
   db: SqliteDatabase,
+  userId: number,
   range: { fromIso: string; toIso: string; fromDateKey: string; toDateKey: string; includeCancelled: boolean },
 ): EventRecord[] {
   const statusClause = range.includeCancelled ? '' : "status <> 'cancelled' AND ";
   const rows = all<EventRow>(
     db,
     `SELECT ${EVENT_COLUMNS} FROM events
-     WHERE ${statusClause}(
+     WHERE user_id = ? AND ${statusClause}(
        rrule IS NOT NULL
        OR (all_day = 0 AND start_at < ? AND end_at >= ?)
        OR (all_day = 1 AND start_at <= ? AND end_at >= ?)
      )
      ORDER BY start_at ASC, id ASC`,
-    [range.toIso, range.fromIso, range.toDateKey, range.fromDateKey],
+    [userId, range.toIso, range.fromIso, range.toDateKey, range.fromDateKey],
   );
   return rows.map(toEventRecord);
 }
@@ -211,9 +233,10 @@ export function findCandidateEvents(
 /** 供统计使用：取出区间内所有相关事件（含全天）。 */
 export function findEventsForStats(
   db: SqliteDatabase,
+  userId: number,
   range: { fromIso: string; toIso: string; fromDateKey: string; toDateKey: string },
 ): EventRecord[] {
-  return findCandidateEvents(db, { ...range, includeCancelled: false });
+  return findCandidateEvents(db, userId, { ...range, includeCancelled: false });
 }
 
 export interface EventTimelinePoint {
@@ -228,6 +251,7 @@ export interface EventTimelinePoint {
 
 export function listUpcomingRaw(
   db: SqliteDatabase,
+  userId: number,
   fromIso: string,
   limit: number,
 ): EventTimelinePoint[] {
@@ -236,10 +260,10 @@ export function listUpcomingRaw(
     `SELECT id, title, all_day AS allDay, start_at AS startAt, end_at AS endAt,
             timezone, status
      FROM events
-     WHERE status <> 'cancelled' AND rrule IS NULL AND all_day = 0 AND start_at >= ?
+     WHERE user_id = ? AND status <> 'cancelled' AND rrule IS NULL AND all_day = 0 AND start_at >= ?
      ORDER BY start_at ASC
      LIMIT ?`,
-    [fromIso, limit],
+    [userId, fromIso, limit],
   ).map((row) => ({ ...row, allDay: Number(row.allDay) === 1 }));
 }
 

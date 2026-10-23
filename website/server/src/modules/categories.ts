@@ -6,6 +6,7 @@ import { all, get, run } from '../db/query.js';
 import { CATEGORY_COLUMNS, toCategory, type CategoryRow } from '../db/rows.js';
 import { ConflictError, NotFoundError, ValidationError } from '../http/errors.js';
 import { asyncHandler } from '../http/async-handler.js';
+import { requireUser } from '../http/auth.js';
 import { categoryCreateSchema, categoryUpdateSchema, idParamSchema } from '../domain/schemas.js';
 import type { Category } from '../domain/types.js';
 
@@ -13,15 +14,21 @@ import type { Category } from '../domain/types.js';
 
 const DEFAULT_SORT_STEP = 10;
 
-export function listCategories(db: SqliteDatabase = getDatabase()): Category[] {
+export function listCategories(db: SqliteDatabase, userId: number): Category[] {
   return all<CategoryRow>(
     db,
-    `SELECT ${CATEGORY_COLUMNS} FROM categories ORDER BY sort_order ASC, id ASC`,
+    `SELECT ${CATEGORY_COLUMNS} FROM categories
+     WHERE user_id = ? ORDER BY sort_order ASC, id ASC`,
+    [userId],
   ).map(toCategory);
 }
 
-export function findCategory(db: SqliteDatabase, id: number): Category | null {
-  const row = get<CategoryRow>(db, `SELECT ${CATEGORY_COLUMNS} FROM categories WHERE id = ?`, [id]);
+export function findCategory(db: SqliteDatabase, userId: number, id: number): Category | null {
+  const row = get<CategoryRow>(
+    db,
+    `SELECT ${CATEGORY_COLUMNS} FROM categories WHERE id = ? AND user_id = ?`,
+    [id, userId],
+  );
   return row ? toCategory(row) : null;
 }
 
@@ -33,22 +40,27 @@ function isUniqueViolation(error: unknown): boolean {
 
 export function createCategory(
   input: { name: string; color: string; icon?: string | null; sortOrder?: number },
+  userId: number,
   db: SqliteDatabase = getDatabase(),
 ): Category {
   const timestamp = new Date().toISOString();
   const sortOrder =
     input.sortOrder ??
-    (get<{ value: number | null }>(db, 'SELECT MAX(sort_order) AS value FROM categories')?.value ??
+    (get<{ value: number | null }>(
+      db,
+      'SELECT MAX(sort_order) AS value FROM categories WHERE user_id = ?',
+      [userId],
+    )?.value ??
       0) + DEFAULT_SORT_STEP;
 
   try {
     const result = run(
       db,
-      `INSERT INTO categories (name, color, icon, sort_order, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [input.name, input.color, input.icon ?? null, sortOrder, timestamp, timestamp],
+      `INSERT INTO categories (user_id, name, color, icon, sort_order, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [userId, input.name, input.color, input.icon ?? null, sortOrder, timestamp, timestamp],
     );
-    const created = findCategory(db, result.lastInsertRowid);
+    const created = findCategory(db, userId, result.lastInsertRowid);
     if (!created) throw new Error('分类写入后无法读回');
     return created;
   } catch (error) {
@@ -62,16 +74,17 @@ export function createCategory(
 export function updateCategory(
   id: number,
   patch: { name?: string; color?: string; icon?: string | null; sortOrder?: number },
+  userId: number,
   db: SqliteDatabase = getDatabase(),
 ): Category {
-  const existing = findCategory(db, id);
+  const existing = findCategory(db, userId, id);
   if (!existing) throw new NotFoundError(`分类 ${id} 不存在`);
 
   try {
     run(
       db,
       `UPDATE categories SET name = ?, color = ?, icon = ?, sort_order = ?, updated_at = ?
-       WHERE id = ?`,
+       WHERE id = ? AND user_id = ?`,
       [
         patch.name ?? existing.name,
         patch.color ?? existing.color,
@@ -79,6 +92,7 @@ export function updateCategory(
         patch.sortOrder ?? existing.sortOrder,
         new Date().toISOString(),
         id,
+        userId,
       ],
     );
   } catch (error) {
@@ -88,7 +102,7 @@ export function updateCategory(
     throw error;
   }
 
-  const updated = findCategory(db, id);
+  const updated = findCategory(db, userId, id);
   if (!updated) throw new NotFoundError(`分类 ${id} 不存在`);
   return updated;
 }
@@ -100,40 +114,43 @@ export interface DeleteCategoryResult {
 
 export function deleteCategory(
   id: number,
+  userId: number,
   db: SqliteDatabase = getDatabase(),
 ): DeleteCategoryResult {
-  const existing = findCategory(db, id);
+  const existing = findCategory(db, userId, id);
   if (!existing) throw new NotFoundError(`分类 ${id} 不存在`);
 
   const affected = get<{ count: number }>(
     db,
-    'SELECT COUNT(*) AS count FROM events WHERE category_id = ?',
-    [id],
+    'SELECT COUNT(*) AS count FROM events WHERE category_id = ? AND user_id = ?',
+    [id, userId],
   );
 
   // 外键为 ON DELETE SET NULL，删除分类后原事件会变为“未分类”而非被删除
-  run(db, 'DELETE FROM categories WHERE id = ?', [id]);
+  run(db, 'DELETE FROM categories WHERE id = ? AND user_id = ?', [id, userId]);
 
   return { id, detachedEventCount: Number(affected?.count ?? 0) };
 }
 
 export function reorderCategories(
   orderedIds: readonly number[],
+  userId: number,
   db: SqliteDatabase = getDatabase(),
 ): Category[] {
-  const existing = new Set(listCategories(db).map((category) => category.id));
+  const existing = new Set(listCategories(db, userId).map((category) => category.id));
   for (const id of orderedIds) {
     if (!existing.has(id)) throw new ValidationError(`分类 ${id} 不存在，无法排序`);
   }
   const timestamp = new Date().toISOString();
   orderedIds.forEach((id, index) => {
-    run(db, 'UPDATE categories SET sort_order = ?, updated_at = ? WHERE id = ?', [
+    run(db, 'UPDATE categories SET sort_order = ?, updated_at = ? WHERE id = ? AND user_id = ?', [
       (index + 1) * DEFAULT_SORT_STEP,
       timestamp,
       id,
+      userId,
     ]);
   });
-  return listCategories(db);
+  return listCategories(db, userId);
 }
 
 /* ------------------------------ 路由 ------------------------------ */
@@ -143,8 +160,8 @@ export function createCategoriesRouter(): Router {
 
   router.get(
     '/',
-    asyncHandler((_req, res) => {
-      res.json({ data: listCategories() });
+    asyncHandler((req, res) => {
+      res.json({ data: listCategories(getDatabase(), requireUser(req).userId) });
     }),
   );
 
@@ -152,7 +169,7 @@ export function createCategoriesRouter(): Router {
     '/',
     asyncHandler((req, res) => {
       const input = categoryCreateSchema.parse(req.body);
-      const created = createCategory(input);
+      const created = createCategory(input, requireUser(req).userId);
       res.status(201).json({ data: created });
     }),
   );
@@ -164,7 +181,7 @@ export function createCategoriesRouter(): Router {
       if (!Array.isArray(body?.ids) || body.ids.some((id) => typeof id !== 'number')) {
         throw new ValidationError('请求体需为 { ids: number[] }');
       }
-      res.json({ data: reorderCategories(body.ids as number[]) });
+      res.json({ data: reorderCategories(body.ids as number[], requireUser(req).userId) });
     }),
   );
 
@@ -172,7 +189,8 @@ export function createCategoriesRouter(): Router {
     '/:id',
     asyncHandler((req, res) => {
       const { id } = idParamSchema.parse(req.params);
-      const category = findCategory(getDatabase(), id);
+      const userId = requireUser(req).userId;
+      const category = findCategory(getDatabase(), userId, id);
       if (!category) throw new NotFoundError(`分类 ${id} 不存在`);
       res.json({ data: category });
     }),
@@ -183,7 +201,7 @@ export function createCategoriesRouter(): Router {
     asyncHandler((req, res) => {
       const { id } = idParamSchema.parse(req.params);
       const input = categoryUpdateSchema.parse(req.body);
-      res.json({ data: updateCategory(id, input) });
+      res.json({ data: updateCategory(id, input, requireUser(req).userId) });
     }),
   );
 
@@ -191,7 +209,7 @@ export function createCategoriesRouter(): Router {
     '/:id',
     asyncHandler((req, res) => {
       const { id } = idParamSchema.parse(req.params);
-      res.json({ data: deleteCategory(id) });
+      res.json({ data: deleteCategory(id, requireUser(req).userId) });
     }),
   );
 

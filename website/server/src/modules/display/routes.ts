@@ -6,7 +6,9 @@
  */
 
 import { Router } from 'express';
+import { getDatabase } from '../../db/client.js';
 import { asyncHandler } from '../../http/async-handler.js';
+import { requireUser } from '../../http/auth.js';
 import { AppError } from '../../http/errors.js';
 import { displayUpdateSchema, type DisplayUpdateInput } from '../../domain/schemas.js';
 import { getDisplayConfig, updateDisplayConfig } from './service.js';
@@ -32,8 +34,8 @@ export function createDisplayRouter(): Router {
 
   router.get(
     '/',
-    asyncHandler((_req, res) => {
-      res.json({ data: getDisplayConfig() });
+    asyncHandler((req, res) => {
+      res.json({ data: getDisplayConfig(requireUser(req).userId) });
     }),
   );
 
@@ -41,15 +43,15 @@ export function createDisplayRouter(): Router {
     '/',
     asyncHandler((req, res) => {
       const input = parseDisplayUpdate(req.body);
-      res.json({ data: updateDisplayConfig(input) });
+      res.json({ data: updateDisplayConfig(input, requireUser(req).userId) });
     }),
   );
 
   /** 控制台预览：与设备拉取到的结构完全一致，但不需要设备令牌、也不触发联网刷新。 */
   router.get(
     '/screen',
-    asyncHandler((_req, res) => {
-      res.json({ data: buildDeviceScreenPayload() });
+    asyncHandler((req, res) => {
+      res.json({ data: buildDeviceScreenPayload(requireUser(req).userId, getDatabase(), new Date()) });
     }),
   );
 

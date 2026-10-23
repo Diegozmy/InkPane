@@ -104,6 +104,17 @@ export const errorHandler: ErrorRequestHandler = (
     body.error.code = error.code;
     body.error.message = error.expose ? error.message : '服务器内部错误';
     if (error.details !== undefined) body.error.details = error.details;
+    if (error.status === 429) {
+      const retryAfter =
+        typeof error.details === 'object' &&
+        error.details !== null &&
+        'retryAfterSeconds' in error.details
+          ? Number((error.details as { retryAfterSeconds?: unknown }).retryAfterSeconds)
+          : undefined;
+      if (Number.isFinite(retryAfter) && retryAfter! > 0) {
+        res.setHeader('Retry-After', String(Math.ceil(retryAfter!)));
+      }
+    }
   } else if (error instanceof SyntaxError && 'body' in error) {
     status = 400;
     body.error.code = 'BAD_REQUEST';

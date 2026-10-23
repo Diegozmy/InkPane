@@ -2,6 +2,7 @@
 
 import { Router } from 'express';
 import { asyncHandler } from '../../http/async-handler.js';
+import { requireUser } from '../../http/auth.js';
 import {
   idParamSchema,
   todoCreateSchema,
@@ -25,7 +26,7 @@ export function createTodosRouter(): Router {
     '/',
     asyncHandler((req, res) => {
       const query = todoListQuerySchema.parse(req.query);
-      const result = listTodoItems(query);
+      const result = listTodoItems(query, requireUser(req).userId);
       res.json({
         data: result.items,
         meta: { total: result.total, limit: result.limit, offset: result.offset },
@@ -37,7 +38,7 @@ export function createTodosRouter(): Router {
     '/',
     asyncHandler((req, res) => {
       const input = todoCreateSchema.parse(req.body);
-      res.status(201).json({ data: createTodo(input) });
+      res.status(201).json({ data: createTodo(input, requireUser(req).userId) });
     }),
   );
 
@@ -46,7 +47,7 @@ export function createTodosRouter(): Router {
     '/order',
     asyncHandler((req, res) => {
       const { ids } = todoOrderSchema.parse(req.body);
-      res.json({ data: reorderTodos(ids) });
+      res.json({ data: reorderTodos(ids, requireUser(req).userId) });
     }),
   );
 
@@ -54,7 +55,7 @@ export function createTodosRouter(): Router {
     '/:id',
     asyncHandler((req, res) => {
       const { id } = idParamSchema.parse(req.params);
-      res.json({ data: getTodoOrThrow(id) });
+      res.json({ data: getTodoOrThrow(id, requireUser(req).userId) });
     }),
   );
 
@@ -63,7 +64,7 @@ export function createTodosRouter(): Router {
     asyncHandler((req, res) => {
       const { id } = idParamSchema.parse(req.params);
       const patch = todoUpdateSchema.parse(req.body);
-      res.json({ data: updateTodoById(id, patch) });
+      res.json({ data: updateTodoById(id, patch, requireUser(req).userId) });
     }),
   );
 
@@ -71,7 +72,7 @@ export function createTodosRouter(): Router {
     '/:id',
     asyncHandler((req, res) => {
       const { id } = idParamSchema.parse(req.params);
-      deleteTodoById(id);
+      deleteTodoById(id, requireUser(req).userId);
       res.status(204).end();
     }),
   );
