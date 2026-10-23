@@ -44,6 +44,25 @@ const PERMISSION_TEXT: Record<PermissionState, { label: string; tone: 'success' 
   unsupported: { label: '浏览器不支持', tone: 'neutral' },
 };
 
+const MIN_PASSWORD_LENGTH = 8;
+
+interface Feedback {
+  tone: 'success' | 'danger';
+  title: string;
+  message: string;
+}
+
+/** IANA 时区名是否被当前运行时识别（Intl 是唯一可信的本地校验方式）。 */
+function isValidTimezone(value: string): boolean {
+  if (!value.trim()) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value.trim() });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function InfoRow({ icon, label, value }: { icon: IconName; label: string; value: string }): ReactElement {
   return (
     <div className="row row--between">
@@ -80,8 +99,10 @@ export function SettingsPage(): ReactElement {
   const [displayName, setDisplayName] = useState('');
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
-  const [passwordNotice, setPasswordNotice] = useState<string | null>(null);
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [passwordFeedback, setPasswordFeedback] = useState<Feedback | null>(null);
   const [timezone, setTimezone] = useState('Asia/Shanghai');
+  const [timezoneFeedback, setTimezoneFeedback] = useState<Feedback | null>(null);
 
   useEffect(() => {
     if (me.data?.user) setDisplayName(me.data.user.displayName);
@@ -330,17 +351,42 @@ export function SettingsPage(): ReactElement {
               className="row row--wrap"
               onSubmit={(event) => {
                 event.preventDefault();
-                setPasswordNotice(null);
+                setPasswordFeedback(null);
+                if (newPassword.length < MIN_PASSWORD_LENGTH) {
+                  setPasswordFeedback({
+                    tone: 'danger',
+                    title: '修改失败',
+                    message: `新密码至少 ${MIN_PASSWORD_LENGTH} 位`,
+                  });
+                  return;
+                }
+                if (newPassword !== confirmPassword) {
+                  setPasswordFeedback({
+                    tone: 'danger',
+                    title: '修改失败',
+                    message: '两次输入的新密码不一致',
+                  });
+                  return;
+                }
                 changePassword.mutate(
                   { currentPassword, newPassword },
                   {
                     onSuccess: () => {
                       setCurrentPassword('');
                       setNewPassword('');
-                      setPasswordNotice('密码已更新，其他设备上的登录已失效');
+                      setConfirmPassword('');
+                      setPasswordFeedback({
+                        tone: 'success',
+                        title: '密码已更新',
+                        message: '其他设备上的登录已失效，请用新密码重新登录。',
+                      });
                     },
                     onError: (cause) =>
-                      setPasswordNotice(cause instanceof Error ? cause.message : '修改密码失败'),
+                      setPasswordFeedback({
+                        tone: 'danger',
+                        title: '修改失败',
+                        message: cause instanceof Error ? cause.message : '修改密码失败',
+                      }),
                   },
                 );
               }}
@@ -363,17 +409,58 @@ export function SettingsPage(): ReactElement {
                   onChange={(event) => setNewPassword(event.target.value)}
                 />
               </Field>
-              <Button type="submit" variant="secondary" loading={changePassword.isPending}>
-                修改密码
-              </Button>
+              <Field label="确认新密码" htmlFor="account-confirm-password">
+                <Input
+                  id="account-confirm-password"
+                  type="password"
+                  value={confirmPassword}
+                  autoComplete="new-password"
+                  onChange={(event) => setConfirmPassword(event.target.value)}
+                />
+              </Field>
+              <div className="row" style={{ alignItems: 'flex-end' }}>
+                <Button type="submit" variant="secondary" loading={changePassword.isPending}>
+                  修改密码
+                </Button>
+              </div>
             </form>
-            {passwordNotice && <InlineAlert tone="info" title="提示">{passwordNotice}</InlineAlert>}
+            {passwordFeedback && (
+              <InlineAlert tone={passwordFeedback.tone} title={passwordFeedback.title}>
+                {passwordFeedback.message}
+              </InlineAlert>
+            )}
 
             <form
               className="row row--wrap"
               onSubmit={(event) => {
                 event.preventDefault();
-                updateDisplay.mutate({ timezone: timezone.trim() });
+                setTimezoneFeedback(null);
+                const nextTimezone = timezone.trim();
+                if (!isValidTimezone(nextTimezone)) {
+                  setTimezoneFeedback({
+                    tone: 'danger',
+                    title: '时区无效',
+                    message: '请填写 IANA 时区名称，例如 Asia/Shanghai 或 Europe/Berlin。',
+                  });
+                  return;
+                }
+                updateDisplay.mutate(
+                  { timezone: nextTimezone },
+                  {
+                    onSuccess: () =>
+                      setTimezoneFeedback({
+                        tone: 'success',
+                        title: '时区已保存',
+                        message: `「今天」与设备屏幕的日界线已切换到 ${nextTimezone}。`,
+                      }),
+                    onError: (cause) =>
+                      setTimezoneFeedback({
+                        tone: 'danger',
+                        title: '保存失败',
+                        message: cause instanceof Error ? cause.message : '保存时区失败',
+                      }),
+                  },
+                );
               }}
             >
               <Field label="显示时区" htmlFor="account-timezone" hint="IANA 名称，例如 Asia/Shanghai">
@@ -383,10 +470,17 @@ export function SettingsPage(): ReactElement {
                   onChange={(event) => setTimezone(event.target.value)}
                 />
               </Field>
-              <Button type="submit" variant="secondary" loading={updateDisplay.isPending}>
-                保存时区
-              </Button>
+              <div className="row" style={{ alignItems: 'flex-end' }}>
+                <Button type="submit" variant="secondary" loading={updateDisplay.isPending}>
+                  保存时区
+                </Button>
+              </div>
             </form>
+            {timezoneFeedback && (
+              <InlineAlert tone={timezoneFeedback.tone} title={timezoneFeedback.title}>
+                {timezoneFeedback.message}
+              </InlineAlert>
+            )}
           </div>
         </section>
 

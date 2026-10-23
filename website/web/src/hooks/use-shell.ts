@@ -29,7 +29,6 @@ export function useShellTopBar(options: ShellTopBarOptions = {}): ShellTopBarPro
 
   return useMemo(
     () => ({
-      health: health.data,
       isOffline: health.isError,
       theme,
       onChangeTheme: setTheme,
@@ -37,7 +36,7 @@ export function useShellTopBar(options: ShellTopBarOptions = {}): ShellTopBarPro
       activeFilterCount: activeFilterCount(filters),
       showFilters,
     }),
-    [health.data, health.isError, theme, setTheme, openFilters, filters, showFilters],
+    [health.isError, theme, setTheme, openFilters, filters, showFilters],
   );
 }
 

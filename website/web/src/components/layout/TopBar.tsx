@@ -7,7 +7,6 @@ import { useLogout, useMe } from '@/api/use-auth';
 import { Icon, type IconName } from '@/components/ui/icon';
 import { IconButton, Menu } from '@/components/ui';
 import type { ThemeMode } from '@/store/ui-store';
-import type { HealthInfo } from '@/types';
 
 interface NavItem {
   to: string;
@@ -33,7 +32,6 @@ const THEME_LABELS: Record<ThemeMode, string> = {
 };
 
 export interface TopBarProps {
-  health: HealthInfo | undefined;
   isOffline: boolean;
   theme: ThemeMode;
   onChangeTheme: (mode: ThemeMode) => void;

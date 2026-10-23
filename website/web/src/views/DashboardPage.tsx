@@ -251,7 +251,7 @@ export function DashboardPage(): ReactElement {
             <div className="device-card__meta">
               <div className="device-card__meta-row">
                 <span>状态</span>
-                <strong>{primaryDevice?.online ? '已配对' : '等待配对'}</strong>
+                <strong>{primaryDevice ? (primaryDevice.online ? '在线' : '离线') : '未添加设备'}</strong>
               </div>
               <div className="device-card__meta-row">
                 <span>电量</span>

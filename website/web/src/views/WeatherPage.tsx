@@ -231,7 +231,7 @@ export function WeatherPage(): ReactElement {
               <div className="section-head">
                 <span className="section-head__title">室内环境</span>
                 <Badge tone={indoor?.online ? 'success' : 'neutral'}>
-                  {indoor?.online ? '设备在线' : '未配对'}
+                  {indoor ? (indoor.online ? '在线' : '离线') : '未添加设备'}
                 </Badge>
               </div>
               <p className="page-hint">

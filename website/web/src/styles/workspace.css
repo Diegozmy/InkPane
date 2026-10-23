@@ -485,8 +485,7 @@ button.today-list__row:hover {
 /* ============================== 待办 ============================== */
 
 .todos-layout,
-.weather-layout,
-.device-layout {
+.weather-layout {
   display: grid;
   grid-template-columns: minmax(0, 7fr) minmax(300px, 4fr);
   gap: var(--space-4);
@@ -497,14 +496,9 @@ button.today-list__row:hover {
   grid-template-columns: minmax(0, 8fr) minmax(320px, 4fr);
 }
 
-.device-layout {
-  grid-template-columns: minmax(0, 8fr) minmax(330px, 4fr);
-}
-
 @media (max-width: 1080px) {
   .todos-layout,
-  .weather-layout,
-  .device-layout {
+  .weather-layout {
     grid-template-columns: minmax(0, 1fr);
   }
 }

@@ -531,6 +531,8 @@ export interface AuthSession {
 
 export interface SetupStatus {
   required: boolean;
+  /** 服务端要求初始化时提供一次性初始化码（通常仅非回环访问时开启） */
+  codeRequired: boolean;
 }
 
 export interface UserSummary extends AuthUser {

@@ -2,7 +2,7 @@
 
 import { useState, type FormEvent, type ReactElement } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
-import { useLogin, useSetupStatus } from '@/api/use-auth';
+import { useLogin, useMe, useSetupStatus } from '@/api/use-auth';
 import { Button, Field, InlineAlert, Input } from '@/components/ui';
 import { ApiError } from '@/lib/api';
 
@@ -10,12 +10,15 @@ export function LoginPage(): ReactElement {
   const navigate = useNavigate();
   const location = useLocation();
   const setup = useSetupStatus();
+  const me = useMe();
   const login = useLogin();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   if (setup.data?.required) return <Navigate to="/setup" replace />;
+  // 已经有会话时直接进入控制台，避免「已登录还停留在登录页」。
+  if (me.data) return <Navigate to="/today" replace />;
 
   const submit = (event: FormEvent): void => {
     event.preventDefault();

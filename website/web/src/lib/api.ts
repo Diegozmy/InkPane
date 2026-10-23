@@ -40,6 +40,16 @@ import type {
 
 const API_BASE = (import.meta.env.VITE_API_BASE ?? '/api').replace(/\/$/, '');
 
+/**
+ * 401 全局事件只用来处理「登录态失效」。
+ * 登录失败本身也是 401，初始化接口需要拿到原始错误，二者都不应触发退出跳转。
+ */
+const UNAUTHORIZED_EVENT_SKIP_PREFIXES = ['/auth/login', '/setup'] as const;
+
+function shouldBroadcastUnauthorized(path: string): boolean {
+  return !UNAUTHORIZED_EVENT_SKIP_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
+
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
@@ -147,7 +157,7 @@ async function requestEnvelope<T>(path: string, options: RequestOptions = {}): P
         error?: { message?: string; code?: string; details?: unknown; requestId?: string };
       }
     )?.error;
-    if (response.status === 401 && typeof window !== 'undefined') {
+    if (response.status === 401 && typeof window !== 'undefined' && shouldBroadcastUnauthorized(path)) {
       window.dispatchEvent(new Event('inkpane:unauthorized'));
     }
     throw new ApiError(
@@ -190,6 +200,8 @@ export const api = {
     password: string;
     displayName?: string;
     timezone?: string;
+    /** 服务端开启初始化码校验时必填 */
+    code?: string;
   }) => request<AuthSession>('/setup', { method: 'POST', body: payload }),
   login: (payload: { username: string; password: string }) =>
     request<AuthSession>('/auth/login', { method: 'POST', body: payload }),

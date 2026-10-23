@@ -43,6 +43,7 @@ export function useSetup() {
       password: string;
       displayName?: string;
       timezone?: string;
+      code?: string;
     }) => api.setup(payload),
     onSuccess: (session: AuthSession) => {
       queryClient.setQueryData(queryKeys.me, session);
