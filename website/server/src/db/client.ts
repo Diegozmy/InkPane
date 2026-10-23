@@ -1,7 +1,7 @@
 /**
  * SQLite 连接管理。
  *
- * 使用 Node 内置的 node:sqlite（Node >= 22.5），因此整个项目零原生依赖，
+ * 使用 Node 内置的 node:sqlite（Node >= 22.13），因此整个项目零原生依赖，
  * 无需 node-gyp / Visual Studio 即可安装。所有 SQL 访问都经由本模块，
  * 未来若要换成 better-sqlite3 只需改这一个文件。
  */

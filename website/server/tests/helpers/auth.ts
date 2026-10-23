@@ -2,16 +2,25 @@
 
 import request from 'supertest';
 import type { Express } from 'express';
+import { __resetSetupCodeForTests } from '../../src/modules/auth/setup-code.js';
+import { __resetSetupRateLimitForTests } from '../../src/modules/auth/routes.js';
 
 export const TEST_ADMIN = { username: 'admin', password: 'admin-password-123' };
 
+/** 与 vitest.config.ts 中的 INKPANE_SETUP_CODE 保持一致。 */
+export const TEST_SETUP_CODE = 'test-setup-code';
+
 export async function setupTestAdmin(app: Express) {
+  // 每个用例通常使用新的内存数据库；验证码状态与限流计数都是进程级的，测试间需要重置。
+  __resetSetupCodeForTests();
+  __resetSetupRateLimitForTests();
   const agent = request.agent(app);
   const response = await agent.post('/api/setup').send({
     username: TEST_ADMIN.username,
     password: TEST_ADMIN.password,
     displayName: '测试管理员',
     timezone: 'Asia/Shanghai',
+    code: TEST_SETUP_CODE,
   });
   if (response.status !== 201) {
     throw new Error(`初始化测试管理员失败：${response.status} ${JSON.stringify(response.body)}`);

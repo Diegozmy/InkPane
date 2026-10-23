@@ -26,6 +26,7 @@ import { SchoolPortalClient, SchoolPortalError } from './client.js';
 import type { SchoolCredentials, SchoolTimetable } from './client.js';
 import { buildTimetable, slotExternalKey } from './parser.js';
 import { COURSE_SOURCE, describeCredentials, readCredentials } from './credentials.js';
+import { assertCourseUrlResolvable } from './url-guard.js';
 import {
   readCourseSyncSettings,
   resolvePeriodTime,
@@ -437,6 +438,8 @@ export async function previewCourses(
     if (options.rawHtml !== undefined) {
       timetable = buildTimetable(settings.baseUrl, options.rawHtml, nowIso());
     } else {
+      // 自动同步调度器也走这里，因此校验不能只放在 HTTP 路由层。
+      await assertCourseUrlResolvable(settings.baseUrl);
       const credentials = resolveCredentials(db, userId, settings, options.credentials);
       const fetcher = options.fetcher ?? defaultFetcher;
       const raw: TimetableFetchResult = await fetcher(credentials, settings.baseUrl);

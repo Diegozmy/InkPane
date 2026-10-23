@@ -12,10 +12,15 @@
  *  - 业务接口必须用 POST。GET 会被控制器守卫拦下并返回「非法请求!」。
  */
 
+import { assertCourseUrlResolvable } from './url-guard.js';
+
 const DEFAULT_BASE_URL = 'http://ws8.yucai.sh.cn';
 const LOGIN_PATH = '/Login-checkLogin';
 const TIMETABLE_PATH = '/Xskebiao';
 const REQUEST_TIMEOUT_MS = 20_000;
+/** 手动跟随重定向的最大跳数：学校站点正常只有 1 跳，留 3 跳足够且能挡住重定向环。 */
+const MAX_REDIRECTS = 3;
+const REDIRECT_STATUSES = [301, 302, 303, 307, 308] as const;
 
 export class SchoolPortalError extends Error {
   readonly kind: 'network' | 'auth' | 'protocol' | 'parse' | 'credentials';
@@ -130,61 +135,89 @@ export async function encryptLoginPayload(plaintext: string, secrets: PageSecret
 export interface SchoolClientOptions {
   baseUrl?: string;
   timeoutMs?: number;
+  /**
+   * 每一跳（初始请求 + 每次重定向）发出前的 URL 校验。
+   * 默认做课程 URL 的 SSRF 校验（字面量 + DNS）；测试可注入自定义实现。
+   */
+  validateUrl?: (rawUrl: string) => Promise<void>;
 }
 
 export class SchoolPortalClient {
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
+  private readonly validateUrl: (rawUrl: string) => Promise<void>;
   private readonly jar = new CookieJar();
   private loggedIn = false;
 
   constructor(options: SchoolClientOptions = {}) {
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, '');
     this.timeoutMs = options.timeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.validateUrl =
+      options.validateUrl ??
+      (async (rawUrl: string) => {
+        await assertCourseUrlResolvable(rawUrl);
+      });
+  }
+
+  /** 相对路径按 baseUrl 解析；绝对 URL（重定向 https://…）原样解析。 */
+  private resolveUrl(input: string, base: string | URL = this.baseUrl): URL {
+    try {
+      return new URL(input);
+    } catch {
+      return new URL(input, base);
+    }
   }
 
   private async request(
     path: string,
     init: { method?: string; body?: string; follow?: boolean; referer?: string; json?: boolean } = {},
   ): Promise<Response> {
-    const url = `${this.baseUrl}${path}`;
-    const headers: Record<string, string> = {
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
-      'Accept-Language': 'zh-CN,zh;q=0.9',
-      Referer: init.referer ?? `${this.baseUrl}/index-index`,
-    };
-    const cookie = this.jar.header();
-    if (cookie) headers['Cookie'] = cookie;
-    if (init.json) {
-      headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8';
-      headers['X-Requested-With'] = 'XMLHttpRequest';
-    }
+    let target = this.resolveUrl(path);
+    const method = init.method ?? 'GET';
+    const referer = init.referer ?? `${this.baseUrl}/index-index`;
 
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        method: init.method ?? 'GET',
-        headers,
-        body: init.body,
-        redirect: 'manual',
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      throw new SchoolPortalError('network', '无法连接学校系统，请检查网络是否可访问', reason);
-    }
-    this.jar.absorb(response);
+    for (let hop = 0; ; hop += 1) {
+      // 每一跳都重新校验：重定向目标同样可能是私网/元数据地址（SSRF 重定向绕过）。
+      await this.validateUrl(target.toString());
 
-    // 手动跟随重定向，保证中途设置的 Cookie 不丢
-    if (init.follow && [301, 302, 303, 307, 308].includes(response.status)) {
-      const location = response.headers.get('location');
-      if (location) {
-        const next = location.startsWith('http') ? new URL(location) : new URL(location, this.baseUrl);
-        response = await this.request(`${next.pathname}${next.search}`, { ...init, follow: false });
+      const headers: Record<string, string> = {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+        Referer: referer,
+      };
+      const cookie = this.jar.header();
+      if (cookie) headers['Cookie'] = cookie;
+      if (init.json) {
+        headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8';
+        headers['X-Requested-With'] = 'XMLHttpRequest';
       }
+
+      let response: Response;
+      try {
+        response = await fetch(target, {
+          method,
+          headers,
+          body: init.body,
+          // 禁止 fetch 自动重定向：否则无法在每一跳做 SSRF 校验，也拿不到中途的 Set-Cookie
+          redirect: 'manual',
+          signal: AbortSignal.timeout(this.timeoutMs),
+        });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new SchoolPortalError('network', '无法连接学校系统，请检查网络是否可访问', reason);
+      }
+      this.jar.absorb(response);
+
+      if (!init.follow || !REDIRECT_STATUSES.includes(response.status as (typeof REDIRECT_STATUSES)[number])) {
+        return response;
+      }
+      const location = response.headers.get('location');
+      if (!location) return response;
+      // 超过最大跳数：把最后一个 3xx 原样返回，由调用方按「异常状态」报错。
+      if (hop >= MAX_REDIRECTS) return response;
+      target = this.resolveUrl(location, target);
     }
-    return response;
   }
 
   /** 第一步：取登录页并解析当次密钥。 */

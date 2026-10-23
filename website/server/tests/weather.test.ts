@@ -5,13 +5,14 @@
  * 覆盖成功映射、缓存命中、缓存过期后的刷新/回退、强制刷新、城市搜索失败降级与设置读写。
  */
 
-import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Express } from 'express';
 import { createApp } from '../src/app.js';
 import { closeDatabase, getDatabase, openDatabase, setDatabaseForTesting } from '../src/db/client.js';
 import { runMigrations } from '../src/db/migrations.js';
-import { setupTestAdmin } from './helpers/auth.js';
+import { createTestUser, setupTestAdmin } from './helpers/auth.js';
 import { mapWeatherCode, setWeatherFetchForTests } from '../src/modules/weather/provider.js';
+import { startWeatherScheduler } from '../src/modules/weather/scheduler.js';
 
 let app: Express;
 let agent: Awaited<ReturnType<typeof setupTestAdmin>>;
@@ -303,8 +304,7 @@ describe('城市搜索', () => {
   });
 });
 
-describe('天气设置', () => {
-  it('返回默认城市、坐标与开关', async () => {
+describe('天气设置', () => {  it('返回默认城市、坐标与开关', async () => {
     const response = await agent.get('/api/weather/settings');
     expect(response.status).toBe(200);
     expect(response.body.data).toMatchObject({
@@ -355,5 +355,31 @@ describe('天气设置', () => {
 
     const emptyCity = await agent.put('/api/weather/settings').send({ city: '   ' });
     expect(emptyCity.status).toBe(422);
+  });
+});
+
+describe('后台天气刷新调度器', () => {
+  it('按用户逐个刷新：两个活跃用户各写入一份缓存（假定时器）', async () => {
+    await createTestUser(agent, 'weather-user');
+    mockFetchSuccess(sampleOpenMeteo());
+
+    vi.useFakeTimers();
+    let stop: (() => void) | null = null;
+    try {
+      stop = startWeatherScheduler();
+      // 启动延时 8s 后触发第一轮 tick
+      await vi.advanceTimersByTimeAsync(8_001);
+      // tick 内部是异步的，再让微任务跑完
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(fetchCalls).toHaveLength(2);
+      const row = getDatabase()
+        .prepare('SELECT COUNT(*) AS count FROM weather_cache')
+        .get() as { count: number };
+      expect(row.count).toBe(2);
+    } finally {
+      stop?.();
+      vi.useRealTimers();
+    }
   });
 });

@@ -44,7 +44,10 @@ HTTP 路由调用，也能被命令行脚本（`db:seed`、`db:reset`）复用�
  └─ express.json（体积上限）
  └─ requestContext（分配 requestId 并回写响应头）
  └─ accessLog（只记录写操作、慢请求与错误，避免轮询刷屏）
- └─ 业务路由（Zod 校验 → 服务 → 仓储）
+ └─ 公开路由（/api/setup、/api/auth）：originGuard（写方法 Origin 白名单）
+ └─ 设备路由（/api/device）：X-Device-Token 鉴权
+ └─ 已认证业务区：requireAuth + csrfGuard（同一套 Origin 逻辑）
+ └─ 业务路由（Zod 校验 → 服务 → 仓储；登录/初始化前先过 RateLimiter）
  └─ notFoundHandler / errorHandler（统一错误体）
 ```
 
@@ -293,6 +296,24 @@ var privateIv = 'hmpqwBEFM126$<?|';
 - 另外：学校系统本身是 **HTTP 明文站点**，账号密码在到达校方服务器时不受传输加密保护。
   这是校方系统的限制，应用内已明确提示；能改的只有在校内门户定期更换密码。
 
+### SSRF 防护（URL 校验）
+
+`baseUrl` 允许用户配置，服务端又会主动访问它，天然是 SSRF 入口。`url-guard.ts` 做了两层校验：
+
+1. **字面量（同步）**：只允许 `http` / `https`，禁止 URL 内嵌用户名密码；
+   拒绝回环、私网、链路本地、CGNAT、组播/保留地址与 `localhost` / `.local` 等主机名，
+   同时覆盖 IPv6（`::1`、`fc00::/7`、`fe80::/10`、IPv4-mapped 地址）。
+2. **DNS（异步）**：`dns.lookup(host, { all: true })` 返回的任一地址落在私网即拒绝；
+   解析失败也直接拒绝，避免静默降级。
+
+校验点覆盖 `PUT /credentials`、`POST /test-login`、`POST /preview`、`POST /import`、
+`PATCH /settings`，以及自动同步调度器真正抓取前的服务层（不能只把校验放在 HTTP 路由层）。
+`client.ts` 改为 `redirect: 'manual'` 手动跟随，最多 3 跳，**每一跳**都重新做字面量 + DNS 校验，
+防止“公网地址 302 到内网/元数据地址”的重定向绕过；Cookie 容器与 Referer 行为保持不变。
+
+`COURSE_ALLOW_PRIVATE_HOSTS=true` 可显式放开校园网场景；测试环境（`NODE_ENV=test`）同样短路，
+便于用本地 HTTP 服务复刻校方站点。
+
 ### 自动同步调度
 
 不引入任务队列，只用一个分钟级定时器：每次 tick 才读取设置，因此改开关/间隔立即生效；
@@ -308,6 +329,29 @@ var privateIv = 'hmpqwBEFM126$<?|';
 - `devices`：每台硬件一行，存令牌哈希与遥测；设备令牌解析出 `user_id` 后再组装屏幕。
 - 初始化：迁移会创建一个 `pending_setup` 管理员；`/api/setup` 认领后变为活跃管理员。
   之后账号只能由管理员创建，不开放自助注册。
+
+### 初始化安全与限流
+
+`/api/setup` 是唯一无需会话的管理入口，必须在「还没初始化」的窗口期挡住抢注：
+
+- 当 `HOST` 不是回环地址（默认 `SETUP_REQUIRE_CODE=true`）时要求 6 位验证码：
+  优先使用 `INKPANE_SETUP_CODE`，否则启动时 `crypto.randomInt` 生成并用 `logger.warn` 只打印一次；
+- 校验用 `timingSafeEqual`，缺失/错误返回 `403`；`/api/setup` 成功后验证码失效；
+- `GET /api/setup/status` 返回 `{ required, codeRequired }` 两个独立状态；
+- 同一 IP 每 15 分钟最多 5 次，超限 `429` 并带 `Retry-After`；
+- `/api/setup` 与 `/api/auth` 的写接口同样挂 `originGuard`，无 Origin 的 curl/设备调用放行。
+
+`lib/rate-limit.ts` 是通用固定窗口限流器：`maxEntries=10000`、每 128 次操作做一次过期清理、
+容量满时先清过期项再淘汰最旧 key。登录改为「IP + 用户名，5 次失败 / 15 分钟」（成功清零），
+初始化改为「IP，5 次 / 15 分钟」，两者共用同一实现并保持 `429 RATE_LIMITED` 语义。
+限流状态在进程内，单机/家庭规模足够；多实例部署需换成共享存储。
+
+### 设备屏幕的截断与 totals
+
+`device/screen.ts` 仍查询今日最多 500 条日程用于统计，但对外数组按墨水屏容量截断：
+`events ≤ 32`、`courses ≤ 16`、`todos ≤ 8`；顶层 `eventTotal` / `courseTotal` / `todoTotal`
+给出真实数量（待办用 `countOpenTodos()`）。ETag 的哈希源包含这三个 totals，
+因此数组被截断时“数量变化”仍会正确触发设备刷新。
 
 ### 租户隔离
 
@@ -336,6 +380,15 @@ var privateIv = 'hmpqwBEFM126$<?|';
 - 旧版单例 `device.token` 在 v4 迁移时哈希后写入 `devices`，旧固件无需改配置即可继续拉取。
 - `GET /api/device/screen`、`POST /api/device/telemetry` 只认 `X-Device-Token`；
   控制台设备管理走 `/api/devices`（会话鉴权）。
+
+### 死代码清理
+
+v4 拆分后遗留的空壳与无调用导出已删除，避免后来者误把旧入口当契约：
+
+- 删除 `modules/device/service.ts`、`modules/device/settings.ts`（设备管理在 `modules/devices/`，
+  拉屏组装在 `device/screen.ts`）；
+- 删除无调用的 `deviceTokenPreview`、`optionalSession`、`assertAdmin`、`userExistsByUsername`；
+- `modules/device/` 现在只保留设备拉屏路由、屏幕数据组装、课程 id 查询与设备仓储。
 
 ## 已知取舍
 

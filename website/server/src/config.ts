@@ -65,6 +65,18 @@ function resolveDatabaseFile(raw: string): string {
   return isAbsolute(raw) ? raw : resolve(SERVER_ROOT, raw);
 }
 
+/**
+ * 回环地址判定：仅本机可访问时，初始化验证码默认不强制。
+ * 注意只认标准回环写法，`0.0.0.0` 仍视为对外监听。
+ */
+export function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase();
+  if (normalized.startsWith('[') && normalized.endsWith(']')) {
+    return normalized.slice(1, -1) === '::1';
+  }
+  return normalized === '127.0.0.1' || normalized === '::1' || normalized === 'localhost';
+}
+
 const corsOrigins = readString('CORS_ORIGIN', 'http://localhost:5173,http://127.0.0.1:5173')
   .split(',')
   .map((origin) => origin.trim())
@@ -80,12 +92,14 @@ if ((bootstrapAdminUsername === '') !== (bootstrapAdminPassword === '')) {
   throw new Error('INKPANE_ADMIN_USERNAME 与 INKPANE_ADMIN_PASSWORD 必须同时设置');
 }
 
+const host = readString('HOST', '127.0.0.1');
+
 export const config = {
   nodeEnv,
   isProduction: nodeEnv === 'production',
   isTest: nodeEnv === 'test',
   port: readPort('PORT', 4000),
-  host: readString('HOST', '127.0.0.1'),
+  host,
   logLevel,
   databaseFile: resolveDatabaseFile(readString('DATABASE_FILE', '../data/inkpane.sqlite')),
   corsOrigins,
@@ -98,6 +112,16 @@ export const config = {
   trustProxy: readBoolean('TRUST_PROXY', false),
   bootstrapAdminUsername,
   bootstrapAdminPassword,
+  /**
+   * 首次初始化验证码。设置后不再随机生成，便于在无人值守部署里固定下来。
+   * 只有 SETUP_REQUIRE_CODE=true（默认：HOST 非回环）时才生效。
+   */
+  setupCode: readString('INKPANE_SETUP_CODE', ''),
+  /**
+   * 是否要求 /api/setup 携带验证码。默认在监听非回环地址时为 true：
+   * 开放到局域网时，必须先拿到启动日志里的 6 位码才能认领管理员。
+   */
+  setupRequireCode: readBoolean('SETUP_REQUIRE_CODE', !isLoopbackHost(host)),
   courseAllowPrivateHosts: readBoolean('COURSE_ALLOW_PRIVATE_HOSTS', false),
   maxDevicesPerUser: 20,
   /** 单次查询允许展开的重复日程实例上限，防止恶意/异常规则打满内存 */

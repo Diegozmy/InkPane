@@ -10,6 +10,9 @@ export default defineConfig({
     env: {
       NODE_ENV: 'test',
       LOG_LEVEL: 'error',
+      // 初始化验证码：测试里固定验证码并强制要求，覆盖真实部署的默认分支
+      INKPANE_SETUP_CODE: 'test-setup-code',
+      SETUP_REQUIRE_CODE: 'true',
     },
     coverage: {
       provider: 'v8',

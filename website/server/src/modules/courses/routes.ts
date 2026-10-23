@@ -22,6 +22,7 @@ import {
 } from './service.js';
 import { readCourseSyncSettings, writeCourseSyncSettings } from './settings.js';
 import { runCourseSyncNow } from './scheduler.js';
+import { assertCourseUrlResolvable } from './url-guard.js';
 
 export function createCoursesRouter(): Router {
   const router = Router();
@@ -62,11 +63,12 @@ export function createCoursesRouter(): Router {
 
   router.put(
     '/credentials',
-    asyncHandler((req, res) => {
+    asyncHandler(async (req, res) => {
       const input = credentialsInputSchema.parse(req.body);
       const db = getDatabase();
       const userId = requireUser(req).userId;
       const settings = readCourseSyncSettings(db, userId);
+      await assertCourseUrlResolvable(settings.baseUrl);
       const remember = input.remember ?? true;
       if (remember) {
         saveCredentials(db, userId, {
@@ -103,6 +105,7 @@ export function createCoursesRouter(): Router {
       const db = getDatabase();
       const userId = requireUser(req).userId;
       const settings = readCourseSyncSettings(db, userId);
+      await assertCourseUrlResolvable(settings.baseUrl);
       const client = new SchoolPortalClient({ baseUrl: settings.baseUrl });
       try {
         await client.login({ username: input.username, password: input.password });
@@ -119,11 +122,14 @@ export function createCoursesRouter(): Router {
     '/preview',
     asyncHandler(async (req, res) => {
       const input = previewInputSchema.parse(req.body);
+      const userId = requireUser(req).userId;
+      // 预览/导入都会访问用户配置的地址，先做 SSRF 校验。
+      await assertCourseUrlResolvable(readCourseSyncSettings(getDatabase(), userId).baseUrl);
       const inline =
         input.username && input.password
           ? { username: input.username, password: input.password }
           : undefined;
-      const preview = await previewCourses(requireUser(req).userId, {
+      const preview = await previewCourses(userId, {
         ...(inline ? { credentials: inline } : {}),
         ...(input.rawHtml !== undefined ? { rawHtml: input.rawHtml } : {}),
       });
@@ -135,11 +141,13 @@ export function createCoursesRouter(): Router {
     '/import',
     asyncHandler(async (req, res) => {
       const input = previewInputSchema.parse(req.body);
+      const userId = requireUser(req).userId;
+      await assertCourseUrlResolvable(readCourseSyncSettings(getDatabase(), userId).baseUrl);
       const inline =
         input.username && input.password
           ? { username: input.username, password: input.password }
           : undefined;
-      const result = await importCourses(requireUser(req).userId, {
+      const result = await importCourses(userId, {
         ...(inline ? { credentials: inline } : {}),
         ...(input.rawHtml !== undefined ? { rawHtml: input.rawHtml } : {}),
       });

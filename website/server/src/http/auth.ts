@@ -78,9 +78,13 @@ function isAllowedOrigin(req: Request, origin: string): boolean {
 
 /**
  * 带 Cookie 的写请求必须来自已知来源。
+ *
  * 无 Origin 的请求（curl、设备、服务端调用）放行；浏览器跨站 POST 会带 Origin，从而被挡住。
+ * 该逻辑同时用于公开的 setup/login 路由（`originGuard`）与已认证业务区（`csrfGuard`：
+ * 语义相同，保留别名以表达「CSRF 防护」这一用途；无 Origin 放行是因为这些接口还要靠
+ * SameSite Cookie 与 Bearer/设备令牌鉴权，不能把非浏览器客户端一刀切挡掉）。
  */
-export const csrfGuard: RequestHandler = (req, _res, next) => {
+export const originGuard: RequestHandler = (req, _res, next) => {
   if (!['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method)) {
     next();
     return;
@@ -93,19 +97,11 @@ export const csrfGuard: RequestHandler = (req, _res, next) => {
   next(new ForbiddenError('请求来源不被允许'));
 };
 
-/** 登录/初始化路由用：不抛错，只让调用方知道当前是否已有会话。 */
-export function optionalSession(req: Request, db: SqliteDatabase = getDatabase()): SessionUser | null {
-  return sessionFrom(req, db);
-}
+export const csrfGuard: RequestHandler = originGuard;
 
 export function requireUser(req: Request): SessionUser {
   if (!req.auth) throw new UnauthorizedError('请先登录');
   return req.auth;
-}
-
-export function assertAdmin(req: Request): void {
-  if (!req.auth) throw new UnauthorizedError('请先登录');
-  if (req.auth.role !== 'admin') throw new ForbiddenError('需要管理员权限');
 }
 
 export type { SessionUser };

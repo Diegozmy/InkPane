@@ -397,9 +397,18 @@ export interface DeviceScreenPayload {
   now: DeviceNow;
   month: DeviceMonth;
   weather: WeatherSnapshot | null;
+  /** 今日非课程日程，最多 32 条（按开始时间升序） */
   events: DeviceEvent[];
+  /** 今日课程日程，最多 16 条 */
   courses: DeviceEvent[];
+  /** 未完成待办，最多 8 条 */
   todos: DeviceTodo[];
+  /** 今日非课程日程的真实总数（events 可能被截断） */
+  eventTotal: number;
+  /** 今日课程日程的真实总数（courses 可能被截断） */
+  courseTotal: number;
+  /** 未完成待办的真实总数（todos 可能被截断） */
+  todoTotal: number;
 }
 
 export interface DeviceTelemetry {

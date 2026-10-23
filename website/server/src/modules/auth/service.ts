@@ -392,10 +392,6 @@ export async function authenticate(
   return getAuthUser(db, Number(row.id));
 }
 
-export function userExistsByUsername(db: SqliteDatabase, username: string): boolean {
-  return findUserByUsername(db, username) !== null;
-}
-
 export function updateDisplayName(
   db: SqliteDatabase,
   userId: number,

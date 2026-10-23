@@ -10,6 +10,7 @@ import { countEvents } from './modules/events/repository.js';
 import { ensureUtcAvailable } from './domain/time.js';
 import { createApp } from './app.js';
 import { bootstrapAdminFromEnv } from './modules/auth/service.js';
+import { initializeSetupCode } from './modules/auth/setup-code.js';
 import { cleanupSessions } from './modules/auth/sessions.js';
 import { startCourseSyncScheduler } from './modules/courses/scheduler.js';
 import { startWeatherScheduler } from './modules/weather/scheduler.js';
@@ -57,6 +58,9 @@ async function main(): Promise<void> {
         }
       }
     }
+
+    // 首次初始化保护：仍需 setup 且要求验证码时，生成并打印一次 6 位码。
+    initializeSetupCode(db);
 
     const app = createApp();
     const server = app.listen(config.port, config.host, () => {

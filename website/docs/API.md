@@ -22,25 +22,48 @@ Base URL：`http://127.0.0.1:4000/api`（开发期前端通过 Vite 代理访问
 | `/api/display` | 墨水屏布局、刷新间隔与时区 | 本文「屏幕布局」 |
 | `/api/device` | 设备端拉屏与遥测（令牌鉴权） | 本文「设备」 |
 
-除 `/api/health`、`/api/setup`、`/api/auth/login` 与 `/api/device/*` 外，所有接口都要求
+除 `/api/health`、`/api/setup`、`/api/auth/login`、`/api/auth/logout` 与 `/api/device/*` 外，所有接口都要求
 控制台会话 Cookie；用户数据按会话中的 `user_id` 隔离。`/api/device/screen` 使用
 `X-Device-Token` 鉴权并支持 `ETag` / `304`；设备端的完整对接说明见
 [DEVICE-API.md](DEVICE-API.md)。
+
+会话类接口（如 `/api/auth/me`、`/api/auth/password`）在未登录、会话过期或已被撤销时
+同样返回 `401 UNAUTHORIZED`，并非只有设备接口会返回 401。
 
 ## 初始化与账户
 
 | 方法 | 路径 | 鉴权 | 说明 |
 | --- | --- | --- | --- |
-| `GET` | `/api/setup/status` | 否 | `{ required }`；没有活跃 admin 时为 true |
-| `POST` | `/api/setup` | 否 | `{ username, password, displayName?, timezone? }`；仅 required 时可用 |
+| `GET` | `/api/setup/status` | 否 | `{ required, codeRequired }`；`required` 为 true 表示还没有活跃 admin |
+| `POST` | `/api/setup` | 否 | `{ username, password, displayName?, timezone?, code? }`；仅 `required` 时可用，成功返回 201 |
 | `POST` | `/api/auth/login` | 否 | `{ username, password }`；成功下发 HttpOnly Cookie |
 | `POST` | `/api/auth/logout` | 会话 | 撤销当前会话并清 Cookie |
 | `GET` | `/api/auth/me` | 会话 | 当前用户与 `setupRequired` |
 | `PATCH` | `/api/auth/me` | 会话 | `{ displayName }` |
 | `POST` | `/api/auth/password` | 会话 | `{ currentPassword, newPassword }`；撤销其他会话 |
 
-密码使用 scrypt 哈希；登录失败 15 分钟内 5 次后返回 `429 RATE_LIMITED`。
+### 初始化验证码
+
+服务监听非回环地址（`HOST` 不是 `127.0.0.1` / `::1` / `localhost`）时，
+`SETUP_REQUIRE_CODE` 默认视为 `true`，防止同网段的人抢先调用 `/api/setup` 认领管理员：
+
+- 启动时若仍需初始化，服务端生成 6 位数字验证码并**只打印一次**到日志
+  （`WARN` 级别，字段名 `setupCode`）；
+- 可用 `INKPANE_SETUP_CODE` 固定验证码，适合无人值守部署；
+- 请求体缺少 `code` 或验证码错误时返回 `403 FORBIDDEN`；
+- `/api/setup` 成功后验证码立即失效（系统完成后再次调用会返回 `409 CONFLICT`）；
+- 同一 IP 每 15 分钟最多尝试 5 次，超限返回 `429 RATE_LIMITED` 并带 `Retry-After`；
+- 监听回环地址时默认不需要验证码，可用 `SETUP_REQUIRE_CODE=true` 强制开启。
+
+`GET /api/setup/status` 的 `codeRequired` 表示“当前部署是否要求验证码”，
+与 `required`（是否还需要初始化）相互独立。
+
+密码使用 scrypt 哈希；登录失败 15 分钟内 5 次后返回 `429 RATE_LIMITED`
+（按 `IP + 用户名` 计数，成功登录会清零）。
+
 写请求若带 `Origin` 且不在 `CORS_ORIGIN` / `PUBLIC_ORIGIN` 内，返回 `403 FORBIDDEN`。
+该来源校验覆盖 `/api/setup`、`/api/auth` 的写接口与全部已认证业务接口；
+不带 `Origin` 的请求（curl、设备、服务端调用）放行。`GET` 等只读请求不受影响。
 
 ## 用户管理（管理员）
 
@@ -91,11 +114,13 @@ Base URL：`http://127.0.0.1:4000/api`（开发期前端通过 Vite 代理访问
 | HTTP | code | 含义 |
 | --- | --- | --- |
 | 400 | `BAD_REQUEST` | 参数语义不合法（如区间终点早于起点、区间跨度过大、JSON 解析失败） |
-| 401 | `UNAUTHORIZED` | 设备令牌缺失或无效，仅设备拉屏与遥测接口返回 |
+| 401 | `UNAUTHORIZED` | 会话缺失/过期/被撤销，或设备令牌缺失/无效 |
+| 403 | `FORBIDDEN` | 权限不足（非管理员）、初始化验证码错误或请求来源不被允许 |
 | 404 | `NOT_FOUND` | 资源或接口不存在 |
-| 409 | `CONFLICT` | 唯一约束冲突（如分类重名） |
+| 409 | `CONFLICT` | 唯一约束冲突（如分类重名）或系统已完成初始化 |
 | 413 | `PAYLOAD_TOO_LARGE` | 请求体超出上限 |
 | 422 | `VALIDATION_FAILED` | 数据结构校验未通过，`details` 给出字段级原因 |
+| 429 | `RATE_LIMITED` | 登录/初始化尝试过于频繁；响应头带 `Retry-After`（秒） |
 | 500 | `INTERNAL_ERROR` | 服务端异常，`message` 不暴露内部细节 |
 
 ### 请求头
@@ -557,6 +582,11 @@ Base URL：`http://127.0.0.1:4000/api`（开发期前端通过 Vite 代理访问
 
 `DELETE /api/courses/credentials` 清除已保存的账号。
 
+保存凭据、测试连接、预览、导入以及修改 `baseUrl` 之前，服务端都会对目标地址做
+SSRF 校验：只允许 `http` / `https`，禁止 URL 内嵌用户名密码，拒绝私网/回环/链路本地/ULA
+字面量，并用 `dns.lookup(all)` 检查域名解析结果（任一地址落在私网即拒绝）。
+默认只用于公网校园站点；确需访问校园内网时设置 `COURSE_ALLOW_PRIVATE_HOSTS=true`。
+
 ### `POST /api/courses/test-login`
 
 只验证账号可用性，不保存。
@@ -688,6 +718,7 @@ Base URL：`http://127.0.0.1:4000/api`（开发期前端通过 Vite 代理访问
 | 账号密码被校方拒绝 | 422 | 原样带出校方提示，并给出「核对密码 / 是否需校园网」的建议 |
 | 密码含 `&` 或 `=` | 422 | 校方登录表单无法处理，建议先改密码 |
 | 网络不可达 | 400 | 提示检查网络是否能访问学校系统 |
+| 学校系统地址指向私网/回环/保留地址 | 422 | 已做字面量与 DNS 解析双重校验；校园内网需显式设置 `COURSE_ALLOW_PRIVATE_HOSTS=true` |
 | 课表结构变化 / 未排课 | 400 | 提示可能尚未排课或页面结构已变，并保留原始响应供排查 |
 
 ---
@@ -1127,7 +1158,19 @@ Base URL：`http://127.0.0.1:4000/api`（开发期前端通过 Vite 代理访问
 `If-None-Match` 的值）、`screen`（宽高、`refreshMinutes`、`layout`）、`now`
 （`iso` / `time` / `weekday` / `date` / `dateLabel`）、`month`（`year` / `month` /
 `firstWeekday` / `daysInMonth` / `today` / `marks`）、`weather`（`WeatherSnapshot` 或
-`null`）、`events`、`courses`、`todos`。完整字段说明、ETag 计算范围与完整示例见
+`null`）、`events`、`courses`、`todos`，以及 `eventTotal` / `courseTotal` / `todoTotal`。
+
+数组按屏幕容量截断，**totals 表示截断前的真实数量**：
+
+| 字段 | 上限 | 对应的真实总数 |
+| --- | --- | --- |
+| `events`（今日非课程日程，按开始时间升序） | 32 | `eventTotal` |
+| `courses`（今日课程日程） | 16 | `courseTotal` |
+| `todos`（未完成待办） | 8 | `todoTotal` |
+
+`eventTotal` / `courseTotal` 基于今日最多 500 条日程查询统计，`todoTotal` 为未完成待办全量计数。
+ETag 的哈希源包含这三个 totals：数组被截断时，新增条目或完成一条不在前 8 的待办
+仍会改变 ETag，保证设备不会漏掉“数量变化”。完整字段说明、ETag 计算范围与完整示例见
 [DEVICE-API.md](DEVICE-API.md) 第 6.2、7 节。
 
 ### `POST /api/device/telemetry`

@@ -45,6 +45,22 @@ async function createTodayEvent(body: Record<string, unknown>): Promise<number> 
   return response.body.data.id as number;
 }
 
+function currentUserId(): number {
+  return Number(
+    (getDatabase().prepare('SELECT id FROM users ORDER BY id LIMIT 1').get() as { id: number }).id,
+  );
+}
+
+/** 把日程标记为课程（插入 course_slot_links 映射）。 */
+function linkCourse(eventId: number, title: string, externalKey: string): void {
+  getDatabase()
+    .prepare(
+      `INSERT INTO course_slot_links (user_id, source, external_key, event_id, title, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(currentUserId(), 'test-source', externalKey, eventId, title, new Date().toISOString());
+}
+
 beforeEach(async () => {
   closeDatabase();
   const db = openDatabase(':memory:');
@@ -211,6 +227,78 @@ describe('屏幕载荷与 ETag', () => {
 
     const response = await getScreen(created.token);
     expect(response.body.data.todos).toHaveLength(8);
+  });
+
+  it('数组按屏幕容量截断，并返回真实 totals', async () => {
+    const created = await createTestDevice(agent);
+
+    for (let index = 0; index < 40; index += 1) {
+      await createTodayEvent({ title: `日程 ${index}` });
+    }
+    for (let index = 0; index < 20; index += 1) {
+      const eventId = await createTodayEvent({ title: `课程 ${index}` });
+      linkCourse(eventId, `课程 ${index}`, `test-source:course:${index}`);
+    }
+    for (let index = 0; index < 10; index += 1) {
+      await agent.post('/api/todos').send({ title: `待办 ${index}` });
+    }
+
+    const response = await getScreen(created.token);
+    expect(response.status).toBe(200);
+    const payload = response.body.data;
+
+    expect(payload.events).toHaveLength(32);
+    expect(payload.eventTotal).toBe(40);
+    expect(payload.courses).toHaveLength(16);
+    expect(payload.courseTotal).toBe(20);
+    expect(payload.todos).toHaveLength(8);
+    expect(payload.todoTotal).toBe(10);
+  });
+
+  it('ETag 覆盖 totals：数组已截断时新增条目仍会改变 ETag', async () => {
+    const created = await createTestDevice(agent);
+    for (let index = 0; index < 32; index += 1) {
+      await createTodayEvent({ title: `日程 ${index}` });
+    }
+
+    const first = await getScreen(created.token);
+    expect(first.body.data.events).toHaveLength(32);
+    expect(first.body.data.eventTotal).toBe(32);
+    const etag = first.headers.etag as string;
+
+    // 第 33 条不会出现在数组里，但 eventTotal 变化必须让 ETag 失效
+    await createTodayEvent({ title: '第 33 条' });
+    const second = await getScreen(created.token, { 'If-None-Match': etag });
+    expect(second.status).toBe(200);
+    expect(second.body.data.events).toHaveLength(32);
+    expect(second.body.data.eventTotal).toBe(33);
+    expect(second.headers.etag).not.toBe(etag);
+  });
+
+  it('ETag 覆盖 todoTotal：完成不在前 8 条的待办也会改变 ETag', async () => {
+    const created = await createTestDevice(agent);
+    const todoIds: number[] = [];
+    for (let index = 0; index < 10; index += 1) {
+      const response = await agent.post('/api/todos').send({ title: `待办 ${index}` });
+      todoIds.push(response.body.data.id as number);
+    }
+
+    const first = await getScreen(created.token);
+    expect(first.body.data.todos).toHaveLength(8);
+    expect(first.body.data.todoTotal).toBe(10);
+    const etag = first.headers.etag as string;
+    const visibleIds = (first.body.data.todos as { id: number }[]).map((todo) => todo.id);
+
+    // 最后创建的待办不在前 8 条里，完成它不改变 todos 数组，只改变 todoTotal
+    const hiddenId = todoIds.find((id) => !visibleIds.includes(id));
+    expect(hiddenId).toBeDefined();
+    await agent.patch(`/api/todos/${hiddenId!}`).send({ done: true });
+
+    const second = await getScreen(created.token, { 'If-None-Match': etag });
+    expect(second.status).toBe(200);
+    expect(second.body.data.todos).toEqual(first.body.data.todos);
+    expect(second.body.data.todoTotal).toBe(9);
+    expect(second.headers.etag).not.toBe(etag);
   });
 });
 

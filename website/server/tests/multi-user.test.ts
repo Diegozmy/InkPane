@@ -135,4 +135,60 @@ describe('管理员边界', () => {
     expect(disabled.status).toBe(200);
     expect((await aliceAgent.get('/api/todos')).status).toBe(401);
   });
+
+  it('用户 CRUD：创建、列出、改名、重置密码、停用', async () => {
+    const created = await createTestUser(admin, 'erin');
+
+    const list = await admin.get('/api/users');
+    expect(list.status).toBe(200);
+    expect(
+      (list.body.data as { id: number; username: string }[]).some(
+        (user) => user.id === created.id && user.username === 'erin',
+      ),
+    ).toBe(true);
+
+    const renamed = await admin
+      .patch(`/api/users/${created.id}`)
+      .send({ displayName: 'Erin', role: 'user' });
+    expect(renamed.status).toBe(200);
+    expect(renamed.body.data).toMatchObject({ id: created.id, displayName: 'Erin', role: 'user' });
+
+    // 重置密码会撤销该用户现有会话
+    const oldSession = await loginTestUser(app, 'erin', 'user-password-123');
+    const reset = await admin
+      .post(`/api/users/${created.id}/password`)
+      .send({ password: 'new-password-456' });
+    expect(reset.status).toBe(200);
+    expect((await oldSession.get('/api/auth/me')).status).toBe(401);
+
+    const newSession = await loginTestUser(app, 'erin', 'new-password-456');
+    expect((await newSession.get('/api/auth/me')).status).toBe(200);
+
+    const disabled = await admin.patch(`/api/users/${created.id}`).send({ status: 'disabled' });
+    expect(disabled.status).toBe(200);
+    expect((await newSession.get('/api/auth/me')).status).toBe(401);
+  });
+
+  it('撤销设备后令牌立即 401；停用用户后其设备令牌同样失效', async () => {
+    const user = await createTestUser(admin, 'frank');
+    const frank = await loginTestUser(app, 'frank', 'user-password-123');
+    const device = await createTestDevice(frank, 'Frank 屏');
+
+    const screen = () =>
+      request(app).get('/api/device/screen').set('X-Device-Token', device.token);
+    expect((await screen()).status).toBe(200);
+
+    expect((await frank.delete(`/api/devices/${device.id}`)).status).toBe(200);
+    expect((await screen()).status).toBe(401);
+
+    // 再建一台设备，停用账号后同样 401（设备解析要求用户状态 active）
+    const second = await createTestDevice(frank, 'Frank 第二屏');
+    expect(
+      (await request(app).get('/api/device/screen').set('X-Device-Token', second.token)).status,
+    ).toBe(200);
+    await admin.patch(`/api/users/${user.id}`).send({ status: 'disabled' });
+    expect(
+      (await request(app).get('/api/device/screen').set('X-Device-Token', second.token)).status,
+    ).toBe(401);
+  });
 });

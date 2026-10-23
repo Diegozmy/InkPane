@@ -31,14 +31,18 @@ import {
 import { listCategories } from '../categories.js';
 import { queryOccurrences } from '../events/service.js';
 import { readDisplayLayout, readDisplayTimezone, readRefreshMinutes } from '../display/settings.js';
-import { listOpenTodos } from '../todos/repository.js';
+import { countOpenTodos, listOpenTodos } from '../todos/repository.js';
 import { getWeatherForScreen } from '../weather/service.js';
 import { listCourseEventIds } from '../device/repository.js';
 
 const SCHEMA_VERSION = 1;
-const SCREEN_EVENT_LIMIT = 500;
+/** 今日日程查询上限：只用于统计与截断，设备实际渲染的是下面的输出上限。 */
+const SCREEN_EVENT_QUERY_LIMIT = 500;
 const SCREEN_MONTH_LIMIT = 1500;
-const SCREEN_TODO_LIMIT = 8;
+/** 输出上限：墨迹屏一屏放不下太多条目，也避免响应体过大。 */
+export const SCREEN_EVENT_LIMIT = 32;
+export const SCREEN_COURSE_LIMIT = 16;
+export const SCREEN_TODO_LIMIT = 8;
 
 type DeviceScreenContent = Omit<DeviceScreenPayload, 'etag'>;
 
@@ -109,6 +113,9 @@ function computeEtag(content: DeviceScreenContent): string {
     events: content.events,
     courses: content.courses,
     todos: content.todos,
+    eventTotal: content.eventTotal,
+    courseTotal: content.courseTotal,
+    todoTotal: content.todoTotal,
   };
   return `"${createHash('sha1').update(JSON.stringify(source)).digest('hex')}"`;
 }
@@ -134,7 +141,12 @@ export function buildDeviceScreenPayload(
   const monthRange = zonedMonthRange(timezone, now);
 
   const todayOccurrences = queryOccurrences(
-    { from: dayRange.fromIso, to: dayRange.toIso, includeCancelled: false, limit: SCREEN_EVENT_LIMIT },
+    {
+      from: dayRange.fromIso,
+      to: dayRange.toIso,
+      includeCancelled: false,
+      limit: SCREEN_EVENT_QUERY_LIMIT,
+    },
     userId,
     db,
   ).items;
@@ -153,12 +165,19 @@ export function buildDeviceScreenPayload(
     .sort(compareStartAt)
     .map((occurrence) => toDeviceEvent(occurrence, courseEventIds, categoryColors));
 
+  // 真实总数（截至查询上限）用于 totals；数组本身按屏幕容量截断。
+  const allEvents = deviceEvents.filter((event) => !event.isCourse);
+  const allCourses = deviceEvents.filter((event) => event.isCourse);
+  const events = allEvents.slice(0, SCREEN_EVENT_LIMIT);
+  const courses = allCourses.slice(0, SCREEN_COURSE_LIMIT);
+
   const todos: DeviceTodo[] = listOpenTodos(db, userId, SCREEN_TODO_LIMIT).map((todo) => ({
     id: todo.id,
     title: todo.title,
     priority: todo.priority,
     dueDate: todo.dueDate,
   }));
+  const todoTotal = countOpenTodos(db, userId);
 
   const content: DeviceScreenContent = {
     schemaVersion: SCHEMA_VERSION,
@@ -186,9 +205,12 @@ export function buildDeviceScreenPayload(
       marks: collectMonthMarks(monthOccurrences, monthPrefix, timezone),
     },
     weather: getWeatherForScreen(userId, db),
-    events: deviceEvents.filter((event) => !event.isCourse),
-    courses: deviceEvents.filter((event) => event.isCourse),
+    events,
+    courses,
     todos,
+    eventTotal: allEvents.length,
+    courseTotal: allCourses.length,
+    todoTotal,
   };
 
   return { ...content, etag: computeEtag(content) };

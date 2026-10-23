@@ -14,7 +14,6 @@ import * as repo from './repository.js';
 import {
   generateDeviceToken,
   hashDeviceToken,
-  tokenPrefix,
   DEVICE_TOKEN_PATTERN,
 } from './token.js';
 import { buildDeviceScreenPayload } from '../device/screen.js';
@@ -152,8 +151,4 @@ export function getScreenForDevice(
     id: deviceId,
     name: repo.findDeviceById(db, userId, deviceId)?.name ?? '',
   });
-}
-
-export function deviceTokenPreview(token: string): string {
-  return tokenPrefix(token);
 }

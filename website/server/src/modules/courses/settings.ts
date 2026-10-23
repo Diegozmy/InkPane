@@ -9,9 +9,8 @@
 import { z } from 'zod';
 import type { SqliteDatabase } from '../../db/client.js';
 import { get, run } from '../../db/query.js';
-import { config } from '../../config.js';
-import { ValidationError } from '../../http/errors.js';
 import { nowIso } from '../../lib/clock.js';
+import { assertCourseUrlLiteralAllowed } from './url-guard.js';
 
 const SETTINGS_KEY = 'course-sync';
 
@@ -117,35 +116,15 @@ export function writeCourseSyncSettings(
   return validated;
 }
 
-/** 阻止课程同步被当成 SSRF 跳板；校园内网场景需显式开启。 */
+/**
+ * 同步兜底校验：写入设置时只做「字面量」检查（纯同步）。
+ * 完整的 DNS 校验需要 await，放在 HTTP 路由层与抓取前执行。
+ *
+ * 保留该函数是为了让任何同步写路径都不会漏掉最基础的协议/私网检查；
+ * 校园内网场景可通过 COURSE_ALLOW_PRIVATE_HOSTS=true 显式放开。
+ */
 export function assertCourseBaseUrlAllowed(raw: string): void {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new ValidationError('学校系统地址不是合法 URL');
-  }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new ValidationError('学校系统地址必须使用 http 或 https');
-  }
-  if (config.courseAllowPrivateHosts) return;
-  if (config.isTest) return;
-
-  const host = url.hostname.toLowerCase();
-  const isPrivate =
-    host === 'localhost' ||
-    host === '0.0.0.0' ||
-    host === '::1' ||
-    host === '[::1]' ||
-    /^127\./.test(host) ||
-    /^10\./.test(host) ||
-    /^192\.168\./.test(host) ||
-    /^169\.254\./.test(host) ||
-    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
-    host.endsWith('.local');
-  if (isPrivate) {
-    throw new ValidationError('学校系统地址指向本机或私网，已拒绝；如确需使用请设置 COURSE_ALLOW_PRIVATE_HOSTS=true');
-  }
+  assertCourseUrlLiteralAllowed(raw);
 }
 
 /**

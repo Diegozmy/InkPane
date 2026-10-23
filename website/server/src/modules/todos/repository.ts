@@ -92,6 +92,16 @@ export function listOpenTodos(db: SqliteDatabase, userId: number, limit: number)
   ).map(toTodo);
 }
 
+/** 设备屏幕用：未完成待办的真实总数（不截断，供 totals 与 ETag 使用）。 */
+export function countOpenTodos(db: SqliteDatabase, userId: number): number {
+  const row = get<{ count: number }>(
+    db,
+    'SELECT COUNT(*) AS count FROM todos WHERE done = 0 AND user_id = ?',
+    [userId],
+  );
+  return Number(row?.count ?? 0);
+}
+
 /** 全量列表（重排后返回用），排序与分页列表一致。 */
 export function listAllTodos(db: SqliteDatabase, userId: number): Todo[] {
   return all<TodoRow>(
