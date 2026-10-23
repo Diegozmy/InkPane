@@ -188,7 +188,7 @@ static esp_err_t spi_init(void)
     return spi_bus_add_device(EPD_SPI_HOST, &device, &s_spi);
 }
 
-esp_err_t inkpane_epd_init(void)
+esp_err_t inkpane_epd_init(bool warm)
 {
     inkpane_board_epd_power(true);
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -201,6 +201,12 @@ esp_err_t inkpane_epd_init(void)
         }
         ESP_RETURN_ON_ERROR(gpio_init(), TAG, "gpio");
         s_ready = true;
+    }
+
+    if (warm) {
+        /* ALDO3 stayed on across deep sleep and the controller was never reset,
+         * so its RAM and register configuration are still valid. */
+        return ESP_OK;
     }
 
     hardware_reset();
@@ -262,7 +268,9 @@ esp_err_t inkpane_epd_show_region(const uint8_t *framebuffer, int x, int y, int 
                stride);
     }
 
-    hardware_reset();
+    /* No hardware reset here: on a warm deep-sleep wake the panel rail stayed
+     * powered and the controller keeps its RAM/config; resetting would force a
+     * full re-init and wipe the image. */
     esp_err_t err = ESP_OK;
     if (err == ESP_OK) {
         err = send_command(0x18);

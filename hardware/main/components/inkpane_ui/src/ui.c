@@ -401,7 +401,7 @@ static void draw_weather(inkpane_canvas_t *canvas, const inkpane_rect_t *rect,
 }
 
 static void draw_event_list(inkpane_canvas_t *canvas, const inkpane_rect_t *rect,
-                            const inkpane_event_t *events, int count, bool courses)
+                            const inkpane_event_t *events, int count, int total, bool courses)
 {
     inkpane_canvas_fill(canvas, rect->x, rect->y, rect->w, rect->h, false);
     const inkpane_font_t *small = inkpane_font_small();
@@ -409,19 +409,23 @@ static void draw_event_list(inkpane_canvas_t *canvas, const inkpane_rect_t *rect
     if (small == NULL || title_font == NULL) {
         return;
     }
+    /* `total` may exceed what the payload carried and what fits on screen. */
+    if (total < count) {
+        total = count;
+    }
 
     inkpane_text_draw(canvas, small, rect->x + PAD, rect->y + 2, courses ? "今日课程" : "今日日程",
                       rect->w - 2 * PAD, INKPANE_ALIGN_LEFT, true);
 
     char counter[16];
-    snprintf(counter, sizeof(counter), "%d 项", count);
+    snprintf(counter, sizeof(counter), "%d 项", total);
     inkpane_text_draw(canvas, small, rect->x + PAD, rect->y + 2, counter, rect->w - 2 * PAD,
                       INKPANE_ALIGN_RIGHT, true);
 
     int divider_y = rect->y + (courses ? 22 : 30);
     inkpane_canvas_hline(canvas, rect->x + PAD, divider_y, rect->w - 2 * PAD, true);
 
-    if (count == 0) {
+    if (total == 0) {
         inkpane_text_draw(canvas, title_font, rect->x, rect->y + rect->h / 2 - 12,
                           courses ? "今日无课" : "今天没有日程", rect->w, INKPANE_ALIGN_CENTER, true);
         return;
@@ -431,7 +435,10 @@ static void draw_event_list(inkpane_canvas_t *canvas, const inkpane_rect_t *rect
     int start_y = divider_y + 6;
     int max_rows = (rect->y + rect->h - start_y) / row_h;
     int rows = count < max_rows ? count : max_rows;
-    if (rows > 0 && rows < count) {
+    if (rows < 0) {
+        rows = 0;
+    }
+    if (rows > 0 && rows < total) {
         rows -= 1; /* reserve one row for the "more" hint */
     }
     for (int i = 0; i < rows; ++i) {
@@ -448,16 +455,16 @@ static void draw_event_list(inkpane_canvas_t *canvas, const inkpane_rect_t *rect
         inkpane_text_draw(canvas, title_font, rect->x + PAD + time_w + 4, row_y, events[i].title,
                           rect->w - (PAD * 2 + time_w + 4), INKPANE_ALIGN_LEFT, true);
     }
-    if (rows < count) {
+    if (rows < total) {
         char more[32];
-        snprintf(more, sizeof(more), "还有 %d 项", count - rows);
+        snprintf(more, sizeof(more), "还有 %d 项", total - rows);
         inkpane_text_draw(canvas, small, rect->x + PAD + 54, start_y + rows * row_h, more,
                           rect->w - 2 * PAD - 54, INKPANE_ALIGN_LEFT, true);
     }
 }
 
 static void draw_event_list_any(inkpane_canvas_t *canvas, const inkpane_rect_t *rect,
-                                const inkpane_event_t *events, int count, bool courses);
+                                const inkpane_event_t *events, int count, int total, bool courses);
 
 static void draw_todos(inkpane_canvas_t *canvas, const inkpane_rect_t *rect,
                        const inkpane_screen_t *screen)
@@ -467,11 +474,20 @@ static void draw_todos(inkpane_canvas_t *canvas, const inkpane_rect_t *rect,
     if (small == NULL) {
         return;
     }
+    int total = screen->todo_total;
+    if (total < screen->todo_count) {
+        total = screen->todo_count;
+    }
+
     inkpane_text_draw(canvas, small, rect->x + PAD, rect->y + 2, "待办", rect->w - 2 * PAD,
                       INKPANE_ALIGN_LEFT, true);
+    char counter[16];
+    snprintf(counter, sizeof(counter), "%d 项", total);
+    inkpane_text_draw(canvas, small, rect->x + PAD, rect->y + 2, counter, rect->w - 2 * PAD,
+                      INKPANE_ALIGN_RIGHT, true);
     inkpane_canvas_hline(canvas, rect->x + PAD, rect->y + 22, rect->w - 2 * PAD, true);
 
-    if (screen->todo_count == 0) {
+    if (total == 0) {
         inkpane_text_draw(canvas, small, rect->x, rect->y + rect->h / 2 - 10, "没有待办", rect->w,
                           INKPANE_ALIGN_CENTER, true);
         return;
@@ -481,6 +497,12 @@ static void draw_todos(inkpane_canvas_t *canvas, const inkpane_rect_t *rect,
     int row_h = 26;
     int max_rows = (rect->y + rect->h - start_y) / row_h;
     int rows = screen->todo_count < max_rows ? screen->todo_count : max_rows;
+    if (rows < 0) {
+        rows = 0;
+    }
+    if (rows > 0 && rows < total) {
+        rows -= 1; /* reserve one row for the "more" hint */
+    }
     for (int i = 0; i < rows; ++i) {
         const inkpane_todo_t *todo = &screen->todos[i];
         int row_y = start_y + i * row_h;
@@ -498,6 +520,12 @@ static void draw_todos(inkpane_canvas_t *canvas, const inkpane_rect_t *rect,
             inkpane_text_draw(canvas, small, rect->x + rect->w - PAD - due_w, row_y, due, due_w,
                               INKPANE_ALIGN_RIGHT, true);
         }
+    }
+    if (rows < total) {
+        char more[32];
+        snprintf(more, sizeof(more), "还有 %d 项", total - rows);
+        inkpane_text_draw(canvas, small, rect->x + PAD, start_y + rows * row_h, more,
+                          rect->w - 2 * PAD, INKPANE_ALIGN_LEFT, true);
     }
 }
 
@@ -574,14 +602,14 @@ void inkpane_ui_render_full(uint8_t *framebuffer, const inkpane_screen_t *screen
                                 rects[INKPANE_MODULE_SCHEDULE].y, rects[INKPANE_MODULE_SCHEDULE].w,
                                 rects[INKPANE_MODULE_SCHEDULE].h);
         draw_event_list_any(&canvas, &rects[INKPANE_MODULE_SCHEDULE], screen->events,
-                            screen->event_count, false);
+                            screen->event_count, screen->event_total, false);
     }
     if (rects[INKPANE_MODULE_COURSES].enabled) {
         inkpane_canvas_set_clip(&canvas, rects[INKPANE_MODULE_COURSES].x,
                                 rects[INKPANE_MODULE_COURSES].y, rects[INKPANE_MODULE_COURSES].w,
                                 rects[INKPANE_MODULE_COURSES].h);
         draw_event_list_any(&canvas, &rects[INKPANE_MODULE_COURSES], screen->courses,
-                            screen->course_count, true);
+                            screen->course_count, screen->course_total, true);
     }
     if (rects[INKPANE_MODULE_TODOS].enabled) {
         inkpane_canvas_set_clip(&canvas, rects[INKPANE_MODULE_TODOS].x, rects[INKPANE_MODULE_TODOS].y,
@@ -592,9 +620,9 @@ void inkpane_ui_render_full(uint8_t *framebuffer, const inkpane_screen_t *screen
 }
 
 static void draw_event_list_any(inkpane_canvas_t *canvas, const inkpane_rect_t *rect,
-                                const inkpane_event_t *events, int count, bool courses)
+                                const inkpane_event_t *events, int count, int total, bool courses)
 {
-    draw_event_list(canvas, rect, events, count, courses);
+    draw_event_list(canvas, rect, events, count, total, courses);
 }
 
 void inkpane_ui_render_clock(uint8_t *framebuffer, const inkpane_rect_t *rect,

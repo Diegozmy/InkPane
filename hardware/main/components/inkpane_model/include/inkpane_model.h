@@ -116,11 +116,16 @@ typedef struct {
     inkpane_month_t month;
     inkpane_weather_t weather;
 
+    /* `*_count` is what fits in the arrays below (and on screen); `*_total` is
+     * the server-reported total, which can be larger when items were truncated. */
     int event_count;
+    int event_total;
     inkpane_event_t events[INKPANE_MAX_EVENTS];
     int course_count;
+    int course_total;
     inkpane_event_t courses[INKPANE_MAX_COURSES];
     int todo_count;
+    int todo_total;
     inkpane_todo_t todos[INKPANE_MAX_TODOS];
 } inkpane_screen_t;
 

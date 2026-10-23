@@ -43,6 +43,9 @@ typedef struct {
     int clock_h;
     bool clock_enabled;
     bool auth_error;
+    /* ALDO3 stayed powered across the last deep sleep, so the panel controller
+     * was never reset and can partial-refresh on the next wake. */
+    bool panel_warm;
 } persist_t;
 
 static RTC_DATA_ATTR persist_t s_persist;
@@ -122,6 +125,32 @@ static unsigned status_flags(void)
     return status;
 }
 
+/** Drop the cached ETag so the next request always gets a full 200 payload. */
+static void clear_saved_etag(inkpane_config_t *config)
+{
+    config->etag[0] = '\0';
+    inkpane_config_save_etag("");
+}
+
+/**
+ * Below 20% extend the network interval to at least 2 hours. Applied to both
+ * 200 and 304 responses: a 304 still has to move next_net_epoch forward.
+ */
+static void apply_battery_stretch(int64_t now_epoch)
+{
+    if (now_epoch <= 0) {
+        return;
+    }
+    int battery = inkpane_board_battery_percent();
+    if (battery < 0 || battery >= 20) {
+        return;
+    }
+    int64_t stretched = now_epoch + 120 * 60;
+    if (s_persist.next_net_epoch < stretched) {
+        s_persist.next_net_epoch = stretched;
+    }
+}
+
 static void refresh_clock_partial(const inkpane_config_t *config)
 {
     inkpane_datetime_t dt;
@@ -141,6 +170,9 @@ static void refresh_clock_partial(const inkpane_config_t *config)
     esp_err_t err = inkpane_epd_show_region(s_framebuffer, rect->x, rect->y, rect->w, rect->h);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "clock partial refresh failed: %s", esp_err_to_name(err));
+        /* The warm-panel assumption may be wrong (rail glitch, controller
+         * reset): force a cold panel init + full refresh on the next wake. */
+        s_persist.panel_warm = false;
     }
 }
 
@@ -231,13 +263,24 @@ static void fetch_and_render(inkpane_config_t *config, bool force_full, int64_t 
         if (!inkpane_screen_parse(s_http_body, body_length, s_screen, s_json_arena, JSON_ARENA_SIZE)) {
             ESP_LOGE(TAG, "payload parse failed (%u bytes)", (unsigned)body_length);
             s_persist.fail_count++;
+            clear_saved_etag(config);
             return;
         }
         inkpane_ui_render_full(s_framebuffer, s_screen);
         esp_err_t err = inkpane_epd_show_full(s_framebuffer);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "display refresh failed: %s", esp_err_to_name(err));
+            s_persist.fail_count++;
+            /* Drop the warm-panel assumption too: a failed full refresh usually
+             * means the controller lost its state, so the next boot re-inits it. */
+            s_persist.panel_warm = false;
+            clear_saved_etag(config);
+            return;
         }
+
+        /* Persist the new state only after the frame actually reached the
+         * panel; otherwise keep the old ETag/match state so the next wake
+         * re-fetches and repaints instead of trusting a 304. */
         if (etag[0] != '\0') {
             snprintf(config->etag, sizeof(config->etag), "%s", etag);
             inkpane_config_save_etag(etag);
@@ -254,15 +297,11 @@ static void fetch_and_render(inkpane_config_t *config, bool force_full, int64_t 
             synced_epoch = inkpane_local_epoch(&s_screen->now_local);
         }
         update_state_after_fetch(s_screen, config, synced_epoch);
-        int battery = inkpane_board_battery_percent();
-        if (battery >= 0 && battery < 20) {
-            int64_t stretched = synced_epoch + 120 * 60;
-            if (s_persist.next_net_epoch < stretched) {
-                s_persist.next_net_epoch = stretched;
-            }
-        }
-        ESP_LOGI(TAG, "screen updated: %d events, %d todos, refresh %d min", s_screen->event_count,
-                 s_screen->todo_count, s_screen->refresh_minutes);
+        apply_battery_stretch(synced_epoch);
+        ESP_LOGI(TAG, "screen updated: %d/%d events, %d/%d courses, %d/%d todos, refresh %d min",
+                 s_screen->event_count, s_screen->event_total, s_screen->course_count,
+                 s_screen->course_total, s_screen->todo_count, s_screen->todo_total,
+                 s_screen->refresh_minutes);
         return;
     }
 
@@ -275,6 +314,7 @@ static void fetch_and_render(inkpane_config_t *config, bool force_full, int64_t 
             base = inkpane_local_epoch(dt);
         }
         s_persist.next_net_epoch = base + (int64_t)config->refresh_minutes * 60;
+        apply_battery_stretch(base);
         refresh_clock_partial(config);
         ESP_LOGI(TAG, "304 not modified");
         return;
@@ -320,7 +360,10 @@ static void wait_for_buttons_released(void)
 
 static void go_to_sleep(const inkpane_config_t *config, bool rtc_ok, const inkpane_datetime_t *dt)
 {
-    inkpane_epd_sleep();
+    /* ALDO3 (panel power) intentionally stays on: the controller keeps its RAM
+     * and register state while the MCU is in deep sleep, so the next wake can
+     * partial-refresh the clock without a hardware reset and without the
+     * ~2 s black flash of a cold panel init. */
     inkpane_wifi_disconnect();
     /* Avoid an immediate EXT1 wake loop when a button is still held. */
     wait_for_buttons_released();
@@ -393,6 +436,9 @@ void app_main(void)
         s_persist.magic = PERSIST_MAGIC;
         s_persist.tz_offset_minutes = 480;
     }
+    /* A warm panel means ALDO3 stayed powered through deep sleep and the
+     * controller was never reset, so no panel init / full repaint is needed. */
+    bool warm_boot = keep_state && s_persist.panel_warm;
 
     ESP_LOGI(TAG, "boot: causes=0x%08x cold=%d button=%d reason=%d", causes, cold_boot, button_wake,
              (int)esp_reset_reason());
@@ -419,9 +465,12 @@ void app_main(void)
     inkpane_config_t config;
     inkpane_config_load(&config);
 
-    esp_err_t epd = inkpane_epd_init();
+    esp_err_t epd = inkpane_epd_init(warm_boot);
     if (epd != ESP_OK) {
         ESP_LOGE(TAG, "epd init failed: %s", esp_err_to_name(epd));
+        s_persist.panel_warm = false;
+    } else {
+        s_persist.panel_warm = true;
     }
 
     if (provisioning_requested(cold_boot, &config)) {
@@ -442,7 +491,7 @@ void app_main(void)
 
     const int full_interval = CONFIG_INKPANE_FULL_REFRESH_INTERVAL;
     bool network_due = !rtc_ok || s_persist.next_net_epoch == 0 || now_epoch >= s_persist.next_net_epoch;
-    bool force_full = cold_boot || date_changed ||
+    bool force_full = cold_boot || !warm_boot || epd != ESP_OK || date_changed ||
                       (network_due && s_persist.partial_count >= full_interval);
     bool need_network = cold_boot || button_wake || network_due || date_changed || force_full;
 

@@ -272,24 +272,42 @@ static void parse_event(const json_value_t *item, inkpane_event_t *event, int ut
     }
 }
 
+/**
+ * Read `key` as the true item total. Servers that predate the totals fields (or
+ * omit them) fall back to the number of parsed array items, and a total smaller
+ * than that array is ignored as inconsistent so "还有 N 项" can never go negative.
+ */
+static int parse_total(const json_value_t *data, const char *key, int array_length)
+{
+    int total = (int)json_number(json_object_get(data, key), array_length);
+    if (total < array_length) {
+        total = array_length;
+    }
+    return total;
+}
+
 static void parse_events(const json_value_t *data, inkpane_screen_t *screen)
 {
     const json_value_t *events = json_object_get(data, "events");
-    int count = json_array_size(events);
+    int available = json_array_size(events);
+    int count = available;
     if (count > INKPANE_MAX_EVENTS) {
         count = INKPANE_MAX_EVENTS;
     }
     screen->event_count = count;
+    screen->event_total = parse_total(data, "eventTotal", available);
     for (int i = 0; i < count; ++i) {
         parse_event(json_array_at(events, i), &screen->events[i], screen->utc_offset_minutes);
     }
 
     const json_value_t *courses = json_object_get(data, "courses");
-    count = json_array_size(courses);
+    available = json_array_size(courses);
+    count = available;
     if (count > INKPANE_MAX_COURSES) {
         count = INKPANE_MAX_COURSES;
     }
     screen->course_count = count;
+    screen->course_total = parse_total(data, "courseTotal", available);
     for (int i = 0; i < count; ++i) {
         parse_event(json_array_at(courses, i), &screen->courses[i], screen->utc_offset_minutes);
         screen->courses[i].is_course = true;
@@ -299,11 +317,13 @@ static void parse_events(const json_value_t *data, inkpane_screen_t *screen)
 static void parse_todos(const json_value_t *data, inkpane_screen_t *screen)
 {
     const json_value_t *todos = json_object_get(data, "todos");
-    int count = json_array_size(todos);
+    int available = json_array_size(todos);
+    int count = available;
     if (count > INKPANE_MAX_TODOS) {
         count = INKPANE_MAX_TODOS;
     }
     screen->todo_count = count;
+    screen->todo_total = parse_total(data, "todoTotal", available);
     for (int i = 0; i < count; ++i) {
         const json_value_t *item = json_array_at(todos, i);
         inkpane_todo_t *todo = &screen->todos[i];

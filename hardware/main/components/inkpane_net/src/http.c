@@ -173,7 +173,6 @@ inkpane_http_result_t inkpane_http_post_telemetry(const char *api_url, const cha
     size_t used = 0;
     used += (size_t)snprintf(payload + used, sizeof(payload) - used, "{");
     bool first = true;
-    char value[40];
 
     if (temperature > -100.0f) {
         used += (size_t)snprintf(payload + used, sizeof(payload) - used, "\"temperature\":");

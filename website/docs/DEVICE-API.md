@@ -1,6 +1,6 @@
 # 设备端 API 与硬件对接指南
 
-本文档面向 **InkPane 墨窗设备端固件**（ESP32-S3-ePaper-3.97，ESP-IDF v5.x），
+本文档面向 **InkPane 墨窗设备端固件**（ESP32-S3-ePaper-3.97，ESP-IDF v6.0.2），
 描述设备与本地 InkPane 服务之间的全部契约：鉴权方式、接口语义、屏幕数据格式、
 800 × 480 单色渲染约定、低功耗刷新策略、错误处理与一种可用的 ESP-IDF 接法。
 
@@ -11,9 +11,9 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 文档版本 | v2（多用户/多设备） |
+| 文档版本 | v3（多用户/多设备 + 事件总数与渲染上限） |
 | 生效时间 | 2026-10 起 |
-| 适用固件 | ESP-IDF v6.1（参考实现位于 `hardware/main`；v5.2+ 理论兼容，未验证） |
+| 适用固件 | ESP-IDF **v6.0.2**（参考实现位于 `hardware/main`，已用 `C:\esp\v6.0.2\esp-idf` 验证构建） |
 | 适用服务端 | `website/server`（Express + `node:sqlite`） |
 | 契约范围 | `/api/device/*`、`/api/health` |
 
@@ -63,7 +63,7 @@
   │
   └─ 200 OK ──► 解析 JSON ──► 按 layout 排版 ──► 差分/全屏刷新
                         │
-                        └─ 记录新的 ETag 与 screenVersion
+                        └─ **只有刷屏成功后**才记录新的 ETag
 
 上报遥测（可选，建议每 N 次唤醒上报一次以省电）
   │
@@ -71,14 +71,22 @@
 
 深度休眠
   └─ esp_deep_sleep_start()，由 RTC 定时器在 refreshMinutes 后唤醒
+     （面板 ALDO3 可保持供电，控制器不复位，下一次唤醒可局刷时钟）
 ```
 
 要点：
 
 - **ETag 是省电的关键。** 数据没变时服务端返回 `304` 且没有响应体，设备不必渲染、
-  不必刷屏，只花一次 HTTP 往返的电量。
+  不必刷屏，只花一次 HTTP 往返的电量。**ETag 必须只在整屏刷新成功后落盘**：刷屏失败
+  却保存了 ETag，下一次会拿 304 而永远画不出新内容。
 - **时钟不走网络。** 分钟级走时由板载 PCF85063 RTC 与局部刷新完成，不需要为每分钟
   刷新整屏，也不需要每分钟联网。
+- **面板供电与局刷。** 设备可让 AXP2101 ALDO3（屏幕电源）在深睡期间保持供电，面板
+  控制器 RAM/寄存器不复位；下一次性唤醒可直接局刷时钟，无黑闪。冷启动时必须重新
+  `panel_init` 并做一次全刷。
+- **RTC OS 位。** PCF85063 掉电/换电池后秒寄存器 bit7（OS）置位；设备应保留该位并
+  让 `time_valid()` 返回 false，直到 200 的 `localIso` 或 304 的 `Date` 头完成校准，
+  校准后再清 OS。
 - **离线可用。** 网络失败时保留上一屏内容（墨水屏断电不丢画面），下次唤醒再试。
 
 ## 3. 快速开始
@@ -229,9 +237,15 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
 
 ## 6. 接口详情
 
-> **v2 变更：** 旧版 `/api/device/token`、`/api/device/status`、`/api/device/settings`
-> 已移除。设备只使用 6.2 / 6.3；令牌与状态由控制台的 `/api/devices` 管理。
-> 下文 6.4–6.7 仅作为旧版迁移参考保留，设备端不应再调用。
+> **v3 变更：** 旧版 `/api/device/token`、`/api/device/status`、`/api/device/settings`
+> 章节已删除。迁移方式：
+>
+> - 令牌创建 / 轮换 / 吊销：控制台 `POST /api/devices`、`POST /api/devices/:id/rotate`、
+>   `DELETE /api/devices/:id`（完整令牌只在创建/轮换响应里返回一次）；
+> - 设备名、刷新间隔与最后状态：控制台 `GET /api/devices`；
+> - 布局与刷新间隔的读写：仍使用 6.4 / 6.5 的 `/api/display`。
+>
+> 设备端只需要 6.2（拉屏）与 6.3（遥测）两个接口。
 
 ### 6.1 `GET /api/health`
 
@@ -245,7 +259,6 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
     "status": "ok",
     "env": "development",
     "schemaVersion": 3,
-    "eventCount": 10,
     "uptimeSeconds": 8642,
     "serverTime": "2026-10-18T03:40:00.000Z"
   }
@@ -257,9 +270,12 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
 | `status` | string | 固定 `ok` |
 | `env` | string | `development` / `production` / `test` |
 | `schemaVersion` | integer | 数据库结构版本，便于诊断升级问题 |
-| `eventCount` | integer | 库内事件主记录数 |
 | `uptimeSeconds` | integer | 服务进程已运行秒数 |
 | `serverTime` | string | 服务端当前时间（ISO-8601 UTC） |
+
+> v3 起 `/api/health` **不再返回 `eventCount`**：设备端不需要用库内事件数做健康判断，
+> 屏幕数据的总数以 `eventTotal` / `courseTotal` / `todoTotal` 为准。旧固件若读取
+> `eventCount`，应改为读取后述 totals 字段或直接忽略。
 
 状态码：`200`。错误：无（数据库不可用时各字段降级为 `0`，不会 500）。
 
@@ -338,105 +354,7 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
 状态码：`200`、`401 UNAUTHORIZED`、`422 VALIDATION_FAILED`（字段超范围或类型不符）、
 `413 PAYLOAD_TOO_LARGE`、`500 INTERNAL_ERROR`。
 
-### 6.4 `GET /api/device/token`
-
-用途：读取当前设备令牌；从未生成时生成一个并持久化。用于首次配对与人工核对。
-
-请求：无鉴权、无参数。
-
-```json
-{ "data": { "token": "7f3a9c2e5b8d4a61c0f9e2d7b4a8c153" } }
-```
-
-状态码：`200`、`500 INTERNAL_ERROR`。
-
-### 6.5 `POST /api/device/token`
-
-用途：**轮换**令牌。生成新令牌并立即生效，旧令牌在同一瞬间失效。
-
-请求：无鉴权、无请求体。
-
-```json
-{ "data": { "token": "2b6d0f9a4c7e1358d2a0b9c6e4f71a38" } }
-```
-
-状态码：`200`、`500 INTERNAL_ERROR`。
-
-轮换后的操作顺序（顺序反了设备会短暂失联，属预期）：
-
-1. 调用本接口拿到新令牌；
-2. 把新令牌写入设备 NVS（可通过控制台重新配网，或临时用串口命令）；
-3. 设备下一次唤醒即用新令牌；
-4. 旧令牌的请求全部返回 `401`，可在控制台日志中确认设备已切换。
-
-### 6.6 `GET /api/device/status`
-
-用途：设备与控制台共享的状态汇总。设备可用它确认服务端认定的刷新间隔、
-屏幕版本与自己的最后上报时间。
-
-请求头：无鉴权要求（控制台直接读取；设备读取时同样无需令牌）。
-
-```json
-{
-  "data": {
-    "paired": true,
-    "name": "书桌墨窗",
-    "tokenPreview": "7f3a...c153",
-    "lastSeenAt": "2026-10-18T03:40:12.480Z",
-    "firmware": "0.1.0",
-    "batteryPercent": 87,
-    "batteryVoltage": 4.06,
-    "rssi": -56,
-    "indoorTemperature": 24.3,
-    "indoorHumidity": 46.8,
-    "screenVersion": "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2",
-    "refreshMinutes": 30,
-    "layoutUpdatedAt": "2026-10-15T09:12:44.000Z",
-    "serverTime": "2026-10-18T03:40:15.002Z"
-  }
-}
-```
-
-| 字段 | 类型 | 可空 | 说明 |
-| --- | --- | --- | --- |
-| `paired` | boolean | 否 | 是否收到过设备遥测（`lastSeenAt` 非空即为 `true`） |
-| `name` | string | 否 | 设备名，默认「InkPane 墨窗」 |
-| `tokenPreview` | string | 否 | 令牌脱敏预览：前 4 位 + `...` + 后 4 位，如 `7f3a...c153` |
-| `lastSeenAt` | string | 是 | 最后一次遥测时间；从未上报为 `null` |
-| `firmware` | string | 是 | 最后一次上报的固件版本 |
-| `batteryPercent` | integer | 是 | 最后一次上报的电量百分比 |
-| `batteryVoltage` | number | 是 | 最后一次上报的电池电压（V） |
-| `rssi` | integer | 是 | 最后一次上报的信号强度（dBm） |
-| `indoorTemperature` | number | 是 | 最后一次上报的室内温度（°C） |
-| `indoorHumidity` | number | 是 | 最后一次上报的室内湿度（%） |
-| `screenVersion` | string | 否 | 当前屏幕数据的 ETag 哈希（不含双引号） |
-| `refreshMinutes` | integer | 否 | 当前刷新间隔（分钟） |
-| `layoutUpdatedAt` | string | 否 | 布局最后修改时间 |
-| `serverTime` | string | 否 | 服务端当前时间 |
-
-状态码：`200`、`500 INTERNAL_ERROR`。
-
-### 6.7 `PUT /api/device/settings`
-
-用途：修改设备名与刷新间隔。控制台使用；设备一般不需要调用，但可用它把自己算出的
-推荐间隔写回服务端。
-
-请求头：`Content-Type: application/json`（无鉴权要求，控制台使用）。
-
-| 字段 | 类型 | 必填 | 校验 |
-| --- | --- | --- | --- |
-| `name` | string | 否 | 1–40 字符 |
-| `refreshMinutes` | integer | 否 | 5–720 |
-
-```json
-{ "name": "书桌墨窗", "refreshMinutes": 15 }
-```
-
-响应体与 `GET /api/device/status` 的 `data` 完全一致（返回更新后的状态）。
-
-状态码：`200`、`422 VALIDATION_FAILED`、`500 INTERNAL_ERROR`。
-
-### 6.8 `GET /api/display`（布局元数据）
+### 6.4 `GET /api/display`（布局元数据）
 
 用途：读取当前布局、刷新间隔，以及六个模块的可选值与默认矩形。控制台布局编辑器使用；
 设备端可选读一次以校验自己的渲染实现。
@@ -479,7 +397,7 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
 
 状态码：`200`、`500 INTERNAL_ERROR`。
 
-### 6.9 `PUT /api/display`
+### 6.5 `PUT /api/display`
 
 用途：保存布局与刷新间隔。两个字段均可选，只传其一即可。
 
@@ -516,7 +434,7 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
 
 状态码：`200`、`400 VALIDATION_FAILED`、`500 INTERNAL_ERROR`。
 
-### 6.10 `GET /api/display/screen`（控制台预览）
+### 6.6 `GET /api/display/screen`（控制台预览）
 
 用途：控制台预览当前用户设备将看到的画面。**需要控制台会话、忽略 `If-None-Match`、总是返回 `200`。**
 
@@ -545,9 +463,16 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
 | `now` | object | 否 | 当前时间信息，见 7.3 |
 | `month` | object | 否 | 当月日历信息，见 7.4 |
 | `weather` | object \| null | 是 | 天气快照，见 7.7；关闭天气或从未成功取数时为 `null` |
-| `events` | `DeviceEvent[]` | 否 | 当日日程（含全天事件，不含课程；课程在 `courses` 中），见 7.5 |
-| `courses` | `DeviceEvent[]` | 否 | 当日课程，元素结构与 `events` 相同、`isCourse` 为 `true` |
-| `todos` | `DeviceTodo[]` | 否 | 未完成待办，最多 8 条（按 `sortOrder` 升序），见 7.6 |
+| `events` | `DeviceEvent[]` | 否 | 当日日程（含全天事件，不含课程；课程在 `courses` 中），**最多 32 条**，见 7.5 |
+| `courses` | `DeviceEvent[]` | 否 | 当日课程，元素结构与 `events` 相同、`isCourse` 为 `true`，**最多 16 条** |
+| `todos` | `DeviceTodo[]` | 否 | 未完成待办，**最多 8 条**（按 `sortOrder` 升序），见 7.6 |
+| `eventTotal` | integer | 否 | 当日非课程日程的**真实总数**；`events` 被截断时大于数组长度 |
+| `courseTotal` | integer | 否 | 当日课程的**真实总数**；`courses` 被截断时大于数组长度 |
+| `todoTotal` | integer | 否 | 未完成待办的**真实总数**；`todos` 被截断时大于数组长度 |
+
+**渲染上限与总数**：设备一屏最多显示 32 条日程、16 条课程、8 条待办；`*Total` 是服务端
+统计的真实总数，可能大于对应数组。设备端应使用 `*Total` 显示「N 项」与「还有 N 项」，
+而不是数组长度。若响应里缺少 totals 字段（旧服务端），回落为数组长度即可。
 
 ### 7.2 `screen` / `DisplayLayout` / `DisplayModule`
 
@@ -841,7 +766,10 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
       { "id": 31, "title": "订正物理周测卷", "priority": "high", "dueDate": "2026-10-18" },
       { "id": 32, "title": "准备英语演讲提纲", "priority": "normal", "dueDate": "2026-10-20" },
       { "id": 33, "title": "归还图书馆借书", "priority": "low", "dueDate": null }
-    ]
+    ],
+    "eventTotal": 3,
+    "courseTotal": 0,
+    "todoTotal": 3
   }
 }
 ```
@@ -880,6 +808,8 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
 | 分辨率 | 800 × 480 |
 | 颜色 | 单色 1-bit（黑 / 白） |
 | 单帧缓冲 | `800 × 480 / 8 = 48000` 字节 |
+| 面板供电 | AXP2101 **ALDO3**（3.3 V，地址 0x34）；冷启动初始化时开启，深睡期间可保持供电 |
+| 刷新模式 | 全刷（`0x22 = 0xF7`，约 2 s 黑闪）与局刷（设置窗口后 `0x22 = 0xFF`，无黑闪、**不需要硬件复位**） |
 | 建议驱动 | 微雪官方 e-paper 驱动（SPI），详见硬件文档 |
 | 坐标系 | 原点在左上角，x 向右、y 向下，单位为像素 |
 
@@ -955,8 +885,13 @@ esp_sleep_enable_timer_wakeup((uint64_t)refresh_minutes * 60ULL * 1000000ULL);
 esp_deep_sleep_start();
 ```
 
-- 深度休眠期间屏幕**保持显示**（墨水屏断电不丢画面），这是墨水屏相对 LCD 的核心优势：
-  待机电流取决于板卡（TG28 + 外设断电），以实测为准，通常在几十 µA 量级。
+- 深度休眠期间屏幕**保持显示**（墨水屏断电不丢画面），这是墨水屏相对 LCD 的核心优势。
+  待机电流取决于板卡供电策略：AXP2101 可以继续给 ALDO3（面板）供电以保留控制器状态，
+  此时待机电流略高于彻底断电面板，以实测为准。
+- **面板供电与局刷（warm panel）**：若深睡期间保持 ALDO3 供电，面板控制器 RAM 与寄存器
+  不复位，下一次性唤醒可直接对 `clock` 矩形做局刷，不需要 `panel_init`，也没有黑闪。
+  冷启动（上电/软件重启/看门狗）必须重新初始化面板并做一次全刷，用全刷把控制器 RAM
+  与设备 framebuffer 对齐。
 - 唤醒源可以叠加：RTC 定时器 + 拨轮按键（RTC GPIO）+ PCF85063 的闹钟中断。
   按键唤醒时立即刷新一次，能让「按下即更新」的交互成立。
 - 分钟级局部刷新会累积残影并消耗面板刷新寿命：每天首次唤醒做一次全刷，
@@ -968,14 +903,21 @@ esp_deep_sleep_start();
   设备端只在分钟边界做一次**局部刷新**，只重画 `clock` 模块的矩形。
 - PCF85063 通过 I²C 读取，掉电由纽扣电池维持；联网后可用 `now.epochSeconds` +
   `now.utcOffsetMinutes` 校准，或直接把 `now.localIso` 写入 RTC（均为本地墙上时间）。
-- 304 响应没有 body，但 HTTP `Date` 头仍在；可用它加已保存的时区偏移做低成本校准。
+- **OS 位**：RTC 掉电/换电池后秒寄存器 bit7（OS）置位，此时时间不可信。设备应保留该位，
+  让 `time_valid()` 返回 false（界面显示「等待校时」），直到校准成功后再清 OS；
+  不要在上电初始化时直接清 OS，否则会显示 2000-01-01 之类的错误时间。
+- 304 响应没有 body，但 HTTP `Date` 头仍在；可用它加已保存的时区偏移做低成本校准，
+  校准成功后同样应清除 OS 位。
 - 时区：`screen` 数据中的 `now` 已按 `timezone` 换算好，设备端不需要自己做时区换算。
 
 ### 9.3 ETag 命中 304 时不重绘
 
-- 每次成功拉取后，把响应头 `ETag`（含双引号，原样）写入 NVS。
+- 每次成功拉取并**完成整屏刷新后**，把响应头 `ETag`（含双引号，原样）写入 NVS。
+  刷屏或解析失败时不要保存新 ETag，并清空已存的 ETag：否则下一次会命中 304，
+  永远画不出新内容。
 - 下次请求带上 `If-None-Match: <ETag>`；返回 `304` 时**跳过解析与渲染**，
   直接进入遥测/休眠流程。
+- 304 同样应更新「下一次联网时间」，并按电量做低电间隔拉伸。
 - 这样一天 48 次唤醒（30 分钟间隔）里，真正刷屏的通常只有几次：
   跨天、日程变动、天气更新、布局调整。
 
@@ -983,8 +925,8 @@ esp_deep_sleep_start();
 
 | 模式 | 适用 | 代价 |
 | --- | --- | --- |
-| 全屏刷新（full） | 首次上电、跨天、布局变化、大面积内容变化 | 约 2 s 级黑闪，观感明显 |
-| 局部刷新（partial） | 时钟分钟、单项待办勾选、温度变化 | 快、无黑闪，但会累积残影 |
+| 全屏刷新（full） | 首次上电/冷启动、非 warm 唤醒、跨天、布局变化、大面积内容变化 | 约 2 s 级黑闪，观感明显 |
+| 局部刷新（partial） | warm 唤醒后的时钟分钟、单项待办勾选、温度变化 | 快、无黑闪，但会累积残影；不发送硬件复位 |
 
 建议策略：
 
@@ -995,12 +937,13 @@ esp_deep_sleep_start();
 
 ### 9.5 电池与充电
 
-- 电池为 **3.7 V 锂电**，接口 **MX1.25**（2 pin），板载 **TG28** 电源管理负责充放电与
-  电压监测；USB Type-C 插入时自动充电。
-- 通过 TG28 读取电池电压后上报 `batteryVoltage`；`batteryPercent` 为按电压估算的
+- 电池为 **3.7 V 锂电**，接口 **MX1.25**（2 pin），板载 **AXP2101** 电源管理负责充放电与
+  电压监测；USB Type-C 插入时自动充电。屏幕由 AXP2101 的 **ALDO3** 供电。
+- 通过 AXP2101 读取电池电压后上报 `batteryVoltage`；`batteryPercent` 为按电压估算的
   近似值，仅供控制台概览，不宜用于精确电量计。
-- 建议策略：电量低于 20% 时把 `refreshMinutes` 调大（减少唤醒），并在 `clock` 或
-  `weather` 模块一角显示低电量标记。
+- 建议策略：电量低于 20% 时把联网间隔拉长到至少 120 分钟（减少唤醒），并在 `clock`
+  或 `weather` 模块一角显示低电量标记；该拉伸应对 200 与 304 两条路径都生效，
+  因为 304 也会推进下一次联网时间。
 - 长期插电使用时，锂电池应避免长期满电高温存放；这是电池化学特性，不是固件问题。
 
 ## 10. 错误处理与重试
@@ -1065,8 +1008,8 @@ esp_deep_sleep_start();
 
 ## 11. ESP-IDF 对接示例
 
-以下为伪代码，但调用的 API 均为 ESP-IDF v5.x / v6.x 真实存在的接口，可直接照着落地。
-完整固件工程位于仓库 [`hardware/main`](../../hardware/main)（ESP-IDF v6.1，已实现本文全部
+以下为伪代码，但调用的 API 均为 ESP-IDF v6.0.x 真实存在的接口，可直接照着落地。
+完整固件工程位于仓库 [`hardware/main`](../../hardware/main)（ESP-IDF v6.0.2，已实现本文全部
 设备端契约；构建、配网与验收步骤见 [hardware/README.md](../../hardware/README.md)）。
 
 示例中出现的 `board_init()`、`inkpane_draw_module()`、`inkpane_refresh_minutes()`、
@@ -1271,6 +1214,9 @@ int inkpane_fetch_screen(char **out_body)
 `HTTP_EVENT_ON_HEADER` 里取，不依赖中间状态；`304` 时服务端不返回响应体，
 `ctx.body` 为 `NULL`，直接释放即可。
 
+> 上面为简化示例：实际固件应在**渲染并刷屏成功之后**才写入 `s_etag` 并调用
+> `save_str("etag", ...)`；刷屏或解析失败时不要保存，并清空已存 ETag。
+
 ### 11.5 cJSON 解析关键字段
 
 ```c
@@ -1335,8 +1281,8 @@ void inkpane_render_from_json(const char *body)
 #include "driver/i2c_master.h"
 
 /* dev 为在 i2c_master_bus 上通过 i2c_master_bus_add_device() 创建好的设备句柄。
- * 下列接口来自 ESP-IDF v5.2 起的新版 I2C 主设备驱动（driver/i2c_master.h）；
- * 若使用 v5.0 / v5.1，请换成 driver/i2c.h 的 i2c_master_cmd_begin() 写法。 */
+ * ESP-IDF v6.0.2 使用新版 I2C 主设备驱动（driver/i2c_master.h）；
+ * 若移植到 v5.0 / v5.1，请换成 driver/i2c.h 的 i2c_master_cmd_begin() 写法。 */
 
 #define SHTC3_ADDR 0x70
 #define SHTC3_WAKE 0x3517
@@ -1456,6 +1402,10 @@ void inkpane_sleep(uint32_t minutes)
 }
 ```
 
+> 上面示例未展示 warm 面板优化：若深睡期间保持 AXP2101 ALDO3 供电、且不发送面板
+> deep-sleep 命令，下一次唤醒可跳过 `panel_init` 直接局刷时钟（`inkpane_epd_init(true)`）；
+> 只有冷启动才需要 `inkpane_epd_init(false)` 并做全刷。参考实现见 `hardware/main`。
+
 ## 12. curl 调试示例
 
 以下命令在服务所在机器上执行；`jq` 仅用于取字段，没有也可以直接看输出。
@@ -1522,7 +1472,8 @@ Windows PowerShell 下把 `curl` 换成 `curl.exe`，`grep`/`sed` 用 PowerShell
 `304` 表示服务端数据与上次一致，这是正常且省电的路径。若怀疑漏更新，先确认设备保存的
 `ETag` 是**上次 200 响应头里的原值（含双引号）**；若把引号丢了，服务端会比较失败并
 每次返回 `200`（表现为频繁刷新）。反过来，如果设备把 ETag 存成了 `now.time` 相关的值，
-就会出现「该刷新时不刷新」。
+就会出现「该刷新时不刷新」。另外，固件应只在**刷屏成功后**保存 ETag；刷屏失败却保存了
+新 ETag，会让设备卡在 304、画面永远停在旧内容。
 
 **Q3：`weather` 是 `null`，或者 `stale: true`。**
 

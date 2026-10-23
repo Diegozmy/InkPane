@@ -3,7 +3,7 @@
 InkPane 墨窗的设备端固件与硬件资料。
 
 当前状态：**固件 MVP 已实现，等待真机验收**。`hardware/main` 是一个完整的
-ESP-IDF v6.1 工程，包含屏幕驱动、板级驱动、六模块渲染、Wi-Fi/HTTP、AP 配网与
+ESP-IDF v6.0.2 工程，包含屏幕驱动、板级驱动、六模块渲染、Wi-Fi/HTTP、AP 配网与
 双周期深睡。真机上的刷新时序、残影与功耗仍需按验收清单逐项确认。
 
 ## 硬件平台
@@ -21,8 +21,12 @@ ESP-IDF v6.1 工程，包含屏幕驱动、板级驱动、六模块渲染、Wi-F
 | 能力 | 说明 |
 | --- | --- |
 | 六模块渲染 | 时钟 / 月历 / 天气 / 日程 / 课程 / 待办，按服务端 `layout` 排版，1-bit 中文点阵 |
-| ETag / 304 | 内容没变时不重绘；跨天、改布局、改数据自动 200 |
+| 事件总数 | 服务端 `eventTotal/courseTotal/todoTotal` 可大于数组上限（32/16/8）；标题计数与「还有 N 项」用真实总数 |
+| ETag / 304 | 内容没变时不重绘；**只有全刷成功后才保存 ETag / 刷新间隔 / 时区**，刷屏失败会清空 ETag 并重试 |
 | 双周期休眠 | 每分钟唤醒只局刷时钟；按 `refreshMinutes` 联网拉屏；按键唤醒立即刷新 |
+| 深睡局刷 | 深睡时保留 ALDO3 面板供电、控制器不复位；分钟级局刷无黑闪，冷启动/跨天/满 60 次局刷后全刷 |
+| RTC | 保留 PCF85063 OS 位；未校时前显示「等待校时」，200 的 `localIso` 或 304 的 `Date` 头校准后清 OS |
+| 低电 | 低于 20% 时 200 与 304 都把联网间隔拉长到至少 120 分钟，并显示「低电」 |
 | 遥测 | SHTC3 温湿度、AXP2101 电量、RSSI、固件版本、运行时长 |
 | AP 配网 | 首次上电或按住 GPIO5 两秒进入；网页填写 Wi-Fi / 服务地址 / 设备令牌 |
 | 离线与异常 | 保留上一屏；连续失败显示「离线」，令牌失效显示「令牌无效」，低电显示「低电」 |
@@ -35,13 +39,21 @@ ESP-IDF v6.1 工程，包含屏幕驱动、板级驱动、六模块渲染、Wi-F
 
 ## 构建与烧录
 
-前置：ESP-IDF **v6.1**（本机路径 `C:\esp\v6.1\esp-idf`，通过
-`C:\Espressif\tools\Microsoft.v6.1.PowerShell_profile.ps1` 激活）、Python 3.13+、
-Visual Studio 2022（仅 host 测试需要）。
+前置：ESP-IDF **v6.0.2**（本机路径 `C:\esp\v6.0.2\esp-idf`，通过
+`C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1` 激活）、Python 3.13+、
+Ninja + GCC（MSYS2，仅 host 测试需要）。
+
+`build.ps1` 在 `IDF_PATH` / `IDF_TOOLS_PATH` / `ESP_IDF_VERSION` 未配齐时会依次尝试
+`INKPANE_IDF_PROFILE`、`-IdfProfile`、`C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1`
+和最新的 `Microsoft.v6.*` profile，并在构建前校验 `idf.py --version`。
 
 ```powershell
 # 构建（默认输出到 %TEMP%\inkpane-build，避免 Windows 260 字符路径限制）
 powershell -ExecutionPolicy Bypass -File hardware/tools/build.ps1
+
+# 指定 ESP-IDF 环境 profile（自动探测失败时）
+powershell -ExecutionPolicy Bypass -File hardware/tools/build.ps1 `
+  -IdfProfile C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1
 
 # 烧录 / 监视
 powershell -ExecutionPolicy Bypass -File hardware/tools/build.ps1 -Flash -Port COM5
@@ -57,18 +69,19 @@ powershell -ExecutionPolicy Bypass -File hardware/tools/build.ps1 -Size
 ### Host 测试与渲染预览
 
 ```powershell
-cmake -S hardware/test/host -B %TEMP%\inkpane-host -G "Visual Studio 17 2022" -A x64
-cmake --build %TEMP%\inkpane-host --config Release
-%TEMP%\inkpane-host\Release\inkpane_tests.exe `
+cmake -S hardware/test/host -B "$env:TEMP\inkpane-host" -G Ninja -DCMAKE_C_COMPILER=gcc
+cmake --build "$env:TEMP\inkpane-host"
+& "$env:TEMP\inkpane-host\inkpane_tests.exe" `
   hardware/main/components/inkpane_ui/fonts/inkpane_fonts.bin hardware/test/fixtures
 
-%TEMP%\inkpane-host\Release\inkpane_preview.exe `
+& "$env:TEMP\inkpane-host\inkpane_preview.exe" `
   hardware/main/components/inkpane_ui/fonts/inkpane_fonts.bin `
   hardware/test/fixtures/screen_200.json screen.bmp
 ```
 
 `inkpane_preview.exe` 生成的 800 × 480 BMP 就是设备将看到的 1-bit 画面，适合在没有板子时
-检查排版、截断与对齐。
+检查排版、截断与对齐。`hardware/test/fixtures/screen_overflow.json` 用于验证事件/课程/待办
+超过渲染上限（32/16/8）时仍按服务端总数显示「还有 N 项」。
 
 ## 首次配网
 
@@ -100,14 +113,14 @@ hardware/
 │   ├── build.ps1             # 构建/烧录/监视
 │   └── genfont.py            # 从 Noto Sans SC 生成点阵字库
 ├── test/
-│   ├── host/                 # MSVC 单测 + BMP 预览
+│   ├── host/                 # host 单测（Ninja + GCC）+ BMP 预览
 │   └── fixtures/             # 屏幕数据样例
 └── docs/FIRMWARE.md          # 架构、状态机、排障
 ```
 
 ## 开发环境
 
-- ESP-IDF v6.1，target `esp32s3`（v5.2+ 理论上兼容，未验证）
+- ESP-IDF **v6.0.2**，target `esp32s3`（本仓库已用 `C:\esp\v6.0.2\esp-idf` 验证构建）
 - 上手参考：[ESP-IDF 开发教程](https://docs.waveshare.net/ESP32-S3-ePaper-3.97/ESP-IDF) ·
   [Arduino 开发教程](https://docs.waveshare.net/ESP32-S3-ePaper-3.97/Arduino) ·
   [Flash 固件烧录](https://docs.waveshare.net/ESP32-S3-ePaper-3.97/Firmware-Flashing)

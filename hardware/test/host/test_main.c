@@ -149,6 +149,10 @@ static void test_model(void)
     CHECK(screen->event_count == 3);
     CHECK(screen->course_count == 0);
     CHECK(screen->todo_count == 3);
+    /* screen_200.json predates the totals fields: fall back to the array sizes. */
+    CHECK(screen->event_total == 3);
+    CHECK(screen->course_total == 0);
+    CHECK(screen->todo_total == 3);
     CHECK(screen->modules[INKPANE_MODULE_CLOCK].x == 16);
     CHECK(screen->modules[INKPANE_MODULE_SCHEDULE].w == 284);
     CHECK(screen->month.present);
@@ -175,8 +179,38 @@ static void test_model(void)
         CHECK(screen->todo_count == 0);
         CHECK(screen->month.mark_count == 0);
         CHECK(screen->refresh_minutes == 15);
+        CHECK(screen->event_total == 0);
+        CHECK(screen->course_total == 0);
+        CHECK(screen->todo_total == 0);
         free(text);
     }
+
+    /* Full arrays + totals larger than the arrays: counts clamp to the on-screen
+     * capacity, totals keep the server-reported values for the "还有 N 项" hint. */
+    text = read_file(fixture_path("screen_overflow.json"), &length);
+    CHECK(text != NULL);
+    if (text != NULL) {
+        CHECK(inkpane_screen_parse(text, length, screen, arena, 256 * 1024));
+        CHECK(screen->event_count == INKPANE_MAX_EVENTS);
+        CHECK(screen->event_total == 41);
+        CHECK(screen->course_count == INKPANE_MAX_COURSES);
+        CHECK(screen->course_total == 19);
+        CHECK(screen->todo_count == INKPANE_MAX_TODOS);
+        CHECK(screen->todo_total == 12);
+        CHECK_STR(screen->events[0].title, "日程 01");
+        CHECK(screen->events[INKPANE_MAX_EVENTS - 1].start_minute == 8 * 60 + 31 * 15);
+        free(text);
+    }
+
+    /* A total smaller than the array is inconsistent; clamp up to the array. */
+    const char *clamped =
+        "{\"data\":{\"events\":["
+        "{\"title\":\"A\",\"startAt\":\"2026-10-18T03:00:00.000Z\"},"
+        "{\"title\":\"B\",\"startAt\":\"2026-10-18T04:00:00.000Z\"}"
+        "],\"eventTotal\":1}}";
+    CHECK(inkpane_screen_parse(clamped, strlen(clamped), screen, arena, 256 * 1024));
+    CHECK(screen->event_count == 2);
+    CHECK(screen->event_total == 2);
 
     CHECK(!inkpane_screen_parse("{\"data\":", 8, screen, arena, 256 * 1024));
 
@@ -255,30 +289,38 @@ static void test_font_and_text(void)
 
 static void test_render(void)
 {
-    size_t length = 0;
-    char *text = read_file(fixture_path("screen_200.json"), &length);
-    CHECK(text != NULL);
-    if (text == NULL) {
-        return;
-    }
+    static uint8_t framebuffer[FB_SIZE];
     char *arena = malloc(256 * 1024);
     inkpane_screen_t *screen = malloc(sizeof(inkpane_screen_t));
     CHECK(arena != NULL && screen != NULL);
-    if (arena != NULL && screen != NULL) {
+    if (arena == NULL || screen == NULL) {
+        free(arena);
+        free(screen);
+        return;
+    }
+
+    const char *names[] = {"screen_200.json", "screen_overflow.json"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        size_t length = 0;
+        char *text = read_file(fixture_path(names[i]), &length);
+        CHECK(text != NULL);
+        if (text == NULL) {
+            continue;
+        }
         CHECK(inkpane_screen_parse(text, length, screen, arena, 256 * 1024));
-        static uint8_t framebuffer[FB_SIZE];
         inkpane_ui_render_full(framebuffer, screen);
         int ink = 0;
-        for (size_t i = 0; i < sizeof(framebuffer); ++i) {
-            if (framebuffer[i] != 0xFF) {
+        for (size_t p = 0; p < sizeof(framebuffer); ++p) {
+            if (framebuffer[p] != 0xFF) {
                 ink++;
             }
         }
         CHECK(ink > 500);
+        free(text);
     }
+
     free(arena);
     free(screen);
-    free(text);
 }
 
 int main(int argc, char **argv)

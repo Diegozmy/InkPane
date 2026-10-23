@@ -14,6 +14,11 @@
 #define REG_MONTHS 0x09
 #define REG_YEARS 0x0A
 
+static const char *TAG = "pcf85063";
+
+/* True until the clock has been calibrated once after an oscillator stop. */
+static bool s_time_lost;
+
 static uint8_t bcd_to_dec(uint8_t value)
 {
     return (uint8_t)(((value >> 4) * 10) + (value & 0x0F));
@@ -37,22 +42,32 @@ esp_err_t pcf85063_init(void)
         return err;
     }
 
-    /* If the oscillator stopped, clear OS (bit 7 of seconds) so time is usable. */
+    /* Keep the OS flag (seconds bit 7) as-is: valid() must stay false until the
+     * time is calibrated from the server, otherwise we would display a bogus
+     * 2000-01-01 clock after a battery swap. */
     uint8_t seconds = 0;
-    if (i2c_read_u8(g_i2c_rtc, REG_SECONDS, &seconds) == ESP_OK && (seconds & 0x80) != 0) {
-        i2c_write_u8(g_i2c_rtc, REG_SECONDS, seconds & 0x7F);
-        ESP_LOGW("pcf85063", "oscillator was stopped; time must be re-synced");
+    if (i2c_read_u8(g_i2c_rtc, REG_SECONDS, &seconds) != ESP_OK) {
+        s_time_lost = true;
+        return ESP_OK;
+    }
+    s_time_lost = (seconds & 0x80) != 0;
+    if (s_time_lost) {
+        ESP_LOGW(TAG, "oscillator stopped (OS set); waiting for time calibration");
     }
     return ESP_OK;
 }
 
 bool pcf85063_valid(void)
 {
+    if (s_time_lost) {
+        return false;
+    }
     uint8_t raw[7] = {0};
     if (i2c_read_reg(g_i2c_rtc, REG_SECONDS, raw, sizeof(raw)) != ESP_OK) {
         return false;
     }
     if ((raw[0] & 0x80) != 0) {
+        s_time_lost = true;
         return false;
     }
     int second = bcd_to_dec(raw[0] & 0x7F);
@@ -115,5 +130,20 @@ esp_err_t pcf85063_set(const inkpane_datetime_t *dt)
         dec_to_bcd((uint8_t)dt->month),
         dec_to_bcd((uint8_t)(dt->year - 2000)),
     };
-    return i2c_write_reg(g_i2c_rtc, REG_SECONDS, raw, sizeof(raw));
+    esp_err_t err = i2c_write_reg(g_i2c_rtc, REG_SECONDS, raw, sizeof(raw));
+    if (err != ESP_OK) {
+        return err;
+    }
+    /* The seconds byte above was written with bit 7 (OS) clear, which releases
+     * the clock; read it back and clear OS again defensively. Only then is the
+     * time considered calibrated. */
+    uint8_t seconds = 0;
+    if (i2c_read_u8(g_i2c_rtc, REG_SECONDS, &seconds) == ESP_OK && (seconds & 0x80) != 0) {
+        err = i2c_write_u8(g_i2c_rtc, REG_SECONDS, seconds & 0x7F);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+    s_time_lost = false;
+    return ESP_OK;
 }
