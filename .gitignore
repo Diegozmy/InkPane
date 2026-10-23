@@ -33,14 +33,25 @@ npm-debug.log*
 .idea/
 .DS_Store
 Thumbs.db
+# 固件目录里的编辑器配置含本机绝对路径，不入库
+hardware/.vscode/
+hardware/main/.vscode/
 
 # ESP-IDF / 固件构建产物
 hardware/build/
+hardware/main/build/
 hardware/sdkconfig
+hardware/main/sdkconfig
 hardware/sdkconfig.old
-hardware/dependencies.lock
+hardware/main/sdkconfig.old
 managed_components/
+**/build_compat/
 *.bin.tmp
+# 注意：组件锁文件在 hardware/main/dependencies.lock，应随固件提交以保证可复现构建，
+# 因此不再忽略 dependencies.lock。
+
+# 微雪官方示例整包：仅作本地只读参考，不入库（见 hardware/THIRD_PARTY.md）
+hardware/ESP32-S3_ePaper-3.97-demo/
 
 # 临时文件
 tmp/
