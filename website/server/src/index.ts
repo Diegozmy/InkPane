@@ -1,7 +1,9 @@
 /** 服务入口：初始化数据库、启动 HTTP 服务、注册优雅退出。 */
 
 import type { Server } from 'node:http';
+import { networkInterfaces } from 'node:os';
 import { config } from './config.js';
+import { collectLanAddresses, listenNotice } from './lib/listen.js';
 import { logger } from './lib/logger.js';
 import { closeDatabase, getDatabase } from './db/client.js';
 import { runMigrations, schemaVersion } from './db/migrations.js';
@@ -64,13 +66,22 @@ async function main(): Promise<void> {
 
     const app = createApp();
     const server = app.listen(config.port, config.host, () => {
+      const lan = collectLanAddresses(networkInterfaces(), config.host, config.port);
+      const notice = listenNotice(config.host, lan);
       logger.info('InkPane 日程服务已启动', {
         url: `http://${config.host}:${config.port}`,
         env: config.nodeEnv,
         schemaVersion: schemaVersion(db),
         database: config.databaseFile,
         corsOrigins: config.corsOrigins,
+        deviceUrls: notice.deviceUrls,
       });
+      // 设备接入的核心提示：回环监听时局域网设备一定连不上，必须显式告警。
+      if (notice.level === 'warn') {
+        logger.warn(notice.message);
+      } else {
+        logger.info(notice.message);
+      }
     });
 
     stopHandlers.push(startCourseSyncScheduler());

@@ -24,7 +24,8 @@ website/
 ```bash
 cd website
 npm install          # 安装前后端全部依赖（npm workspaces）
-npm run dev          # 同时启动 API（:4000）与前端（:5173）
+npm run dev          # 仅本机：API（127.0.0.1:4000）与前端（5173）
+npm run dev:lan      # 接设备/手机时用：API 监听 0.0.0.0:4000，前端也监听局域网
 ```
 
 打开 <http://localhost:5173> 即可。首次启动会自动建库并执行迁移，然后进入 **`/setup`**
@@ -46,9 +47,11 @@ npm run dev          # 同时启动 API（:4000）与前端（:5173）
 
 | 命令 | 作用 |
 | --- | --- |
-| `npm run dev` | 并行启动前后端（开发模式，前端热更新） |
+| `npm run dev` | 并行启动前后端（开发模式，前端热更新，仅本机可访问） |
+| `npm run dev:lan` | 局域网模式：`HOST=0.0.0.0` 且前端也监听局域网（接设备时用） |
 | `npm run dev:api` | 只启动后端 |
 | `npm run dev:web` | 只启动前端 |
+| `npm start:lan` | 生产模式的局域网版本（先 `npm run build`） |
 | `npm run lint` | ESLint（含 react-hooks 规则，可拦住 Hook 顺序类崩溃） |
 | `npm run typecheck` | 前后端 TypeScript 全量类型检查 |
 | `npm test` | 前后端单元测试与接口集成测试 |
@@ -186,8 +189,16 @@ npm start            # 后端同时托管 web/dist，访问 http://127.0.0.1:400
 | `GET /api/display` / `PUT /api/display` | 控制台会话 | 窗格布局、刷新间隔与时区 |
 | `GET/POST /api/devices`、`POST /api/devices/:id/rotate` | 控制台会话 | 管理当前账号的设备与令牌 |
 
-设备令牌在控制台「屏幕与设备」页创建设备时获取一次；默认服务只监听 `127.0.0.1`，设备接入时把
-`server/.env` 里的 `HOST` 改为 `0.0.0.0` 再重启。管理接口已要求登录，仍建议只在可信局域网使用。
+设备令牌在控制台「屏幕与设备」页创建设备时获取一次。默认服务只监听 `127.0.0.1`，设备接入时：
+
+1. 用 `npm run dev:lan` 启动（等价于 `HOST=0.0.0.0`），或在 `server/.env` 里改 `HOST=0.0.0.0` 后重启；
+2. 看启动日志里「设备端可填写：`http://<本机局域网 IP>:4000`」这一行，把该地址填进设备配网页；
+3. 用手机浏览器打开 `http://<本机局域网 IP>:4000/api/health` 验证：能返回
+   `{"data":{"status":"ok",...}}` 说明防火墙与网络都通。
+
+管理接口已要求登录；服务暴露到局域网时 `/setup` 会强制要求一次性初始化码，仍建议只在可信局域网使用。
+若设备日志出现 `ESP_ERR_HTTP_CONNECT` / `select() timeout`，几乎都是服务没监听局域网或被 Windows
+防火墙拦下，排查表见根目录 README 的「设备连不上控制台」。
 
 ---
 

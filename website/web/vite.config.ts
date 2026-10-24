@@ -16,7 +16,8 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: false,
-    host: '127.0.0.1',
+    // 默认只监听本机；npm run dev:lan 会设置 VITE_LAN=1，让手机/平板也能打开控制台。
+    host: process.env.VITE_LAN === '1' ? true : '127.0.0.1',
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:4000',
