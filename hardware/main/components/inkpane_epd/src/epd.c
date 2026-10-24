@@ -284,21 +284,27 @@ esp_err_t inkpane_epd_show_region(const uint8_t *framebuffer, int x, int y, int 
     if (err == ESP_OK) {
         err = send_data(0x80);
     }
-    /* Window in byte units: 0x44 takes pixel x, 0x45 takes y end/start. */
+    /* SSD1683 window registers: 0x44 takes pixel X start/end (byte aligned by
+     * the caller), 0x45 takes Y **start then end**. The order matters for
+     * partial refresh: with the two Y values swapped the controller decodes an
+     * inverted window and paints the strip at the mirrored scan position, which
+     * is why the clock used to reappear inside the todos module near the bottom
+     * of the panel instead of redrawing the clock in place. */
     const int pixel_x0 = x0;
-    const int pixel_x1 = x1 - 1;
+    const int pixel_x1 = x1 - 8;
     const int pixel_y0 = y;
     const int pixel_y1 = y + height - 1;
+    ESP_LOGD(TAG, "partial %dx%d at (%d,%d), bytes=%d", width, height, pixel_x0, pixel_y0, stride);
     if (err == ESP_OK) err = send_command(0x44);
     if (err == ESP_OK) err = send_data(pixel_x0 & 0xFF);
     if (err == ESP_OK) err = send_data((pixel_x0 >> 8) & 0xFF);
     if (err == ESP_OK) err = send_data(pixel_x1 & 0xFF);
     if (err == ESP_OK) err = send_data((pixel_x1 >> 8) & 0xFF);
     if (err == ESP_OK) err = send_command(0x45);
-    if (err == ESP_OK) err = send_data(pixel_y1 & 0xFF);
-    if (err == ESP_OK) err = send_data((pixel_y1 >> 8) & 0xFF);
     if (err == ESP_OK) err = send_data(pixel_y0 & 0xFF);
     if (err == ESP_OK) err = send_data((pixel_y0 >> 8) & 0xFF);
+    if (err == ESP_OK) err = send_data(pixel_y1 & 0xFF);
+    if (err == ESP_OK) err = send_data((pixel_y1 >> 8) & 0xFF);
     if (err == ESP_OK) err = send_command(0x4E);
     if (err == ESP_OK) err = send_data(pixel_x0 & 0xFF);
     if (err == ESP_OK) err = send_data((pixel_x0 >> 8) & 0xFF);
