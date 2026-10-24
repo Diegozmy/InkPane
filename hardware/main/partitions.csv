@@ -1,6 +1,8 @@
 # InkPane 16 MB flash layout.
+# factory 8.75 MB: 字库 5.35 MB 嵌入应用，二进制 ~6.2 MB，留 2.5 MB 余量。
+# storage 0.5 MB 暂未被代码使用（保留预留）。
 # Name,   Type, SubType, Offset,   Size,     Flags
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xf000,   0x1000,
-factory,  app,  factory, 0x10000,  0x600000,
-storage,  data, spiffs,  0x610000, 0x100000,
+factory,  app,  factory, 0x10000,  0x8C0000,
+storage,  data, spiffs,  0x8D0000, 0x80000,
