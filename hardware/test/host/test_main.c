@@ -319,6 +319,28 @@ static void test_render(void)
         free(text);
     }
 
+    /* 失败提示页：整屏文字必须真的画出来（空行跳过、NULL 不崩）。 */
+    inkpane_ui_render_notice(framebuffer, "无法连接日程服务", "本机 192.168.71.53",
+                             "服务 http://192.168.71.99:4000", "确认服务已启动且监听 0.0.0.0",
+                             "按任意键立即重试");
+    int notice_ink = 0;
+    for (size_t p = 0; p < sizeof(framebuffer); ++p) {
+        if (framebuffer[p] != 0xFF) {
+            notice_ink++;
+        }
+    }
+    CHECK(notice_ink > 200);
+
+    inkpane_ui_render_notice(framebuffer, "设备令牌无效", NULL, NULL, NULL, NULL);
+    int title_only_ink = 0;
+    for (size_t p = 0; p < sizeof(framebuffer); ++p) {
+        if (framebuffer[p] != 0xFF) {
+            title_only_ink++;
+        }
+    }
+    CHECK(title_only_ink > 0);
+    CHECK(title_only_ink < notice_ink);
+
     free(arena);
     free(screen);
 }

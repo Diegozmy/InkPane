@@ -35,6 +35,9 @@ typedef struct {
     int64_t last_net_epoch;
     int partial_count;
     int fail_count;
+    /* Seconds until the next network attempt after a failure. Persisted in RTC
+     * RAM because it also drives the sleep length when the RTC is not set. */
+    int retry_seconds;
     int last_date_key;
     int tz_offset_minutes;
     int clock_x;
@@ -46,6 +49,10 @@ typedef struct {
     /* ALDO3 stayed powered across the last deep sleep, so the panel controller
      * was never reset and can partial-refresh on the next wake. */
     bool panel_warm;
+    /* Signature of the failure page currently on screen, so repeated failures
+     * do not trigger a full-screen flash every retry. */
+    uint32_t notice_signature;
+    bool notice_shown;
 } persist_t;
 
 static RTC_DATA_ATTR persist_t s_persist;
@@ -151,6 +158,84 @@ static void apply_battery_stretch(int64_t now_epoch)
     }
 }
 
+/**
+ * Retry delay after a failed attempt: 60 s, 120 s, 180 s ... capped at ten
+ * minutes or the configured refresh interval. Keeping this short matters when
+ * the RTC is unset, because then the sleep length is retry_seconds (a full
+ * 30-minute sleep would leave the panel on the error page far too long).
+ */
+static int retry_delay_seconds(const inkpane_config_t *config)
+{
+    int attempt = s_persist.fail_count > 0 ? s_persist.fail_count : 1;
+    int delay = 60 * attempt;
+    int cap = config->refresh_minutes * 60;
+    if (cap > 600) {
+        cap = 600;
+    }
+    if (delay > cap) {
+        delay = cap;
+    }
+    return delay;
+}
+
+/**
+ * The panel has no trustworthy content yet (cold boot or RTC still unset), so
+ * paint an actionable full-screen page instead of leaving only a "waiting for
+ * time sync" clock module. Repeated identical failures skip the repaint: a
+ * full refresh every retry would flash the panel and waste power.
+ */
+static void show_failure_notice(const inkpane_config_t *config)
+{
+    const char *title;
+    const char *line1;
+    const char *line2;
+    const char *line3;
+    const char *line4;
+    char service[160];
+    char local[48];
+
+    snprintf(service, sizeof(service), "服务 %s", config->api_url);
+    if (s_persist.auth_error) {
+        title = "设备令牌无效";
+        line1 = service;
+        line2 = "到控制台“屏幕与设备”重新获取令牌";
+        line3 = "长按中键开机可重新配网";
+        line4 = "按任意键立即重试";
+    } else {
+        title = "无法连接日程服务";
+        char ip[24] = {0};
+        if (inkpane_wifi_ip(ip, sizeof(ip)) == ESP_OK) {
+            snprintf(local, sizeof(local), "本机 %s", ip);
+        } else {
+            snprintf(local, sizeof(local), "本机 Wi-Fi 未连接");
+        }
+        line1 = local;
+        line2 = service;
+        line3 = "确认服务已启动且监听 0.0.0.0";
+        line4 = "按任意键立即重试";
+    }
+
+    uint32_t signature = 2166136261u;
+    const char *parts[] = {title, line1, line2, line3, line4};
+    for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]); ++i) {
+        for (const char *cursor = parts[i]; cursor != NULL && *cursor != '\0'; ++cursor) {
+            signature ^= (uint32_t)(unsigned char)*cursor;
+            signature *= 16777619u;
+        }
+    }
+    if (s_persist.notice_shown && s_persist.notice_signature == signature) {
+        return;
+    }
+
+    inkpane_ui_render_notice(s_framebuffer, title, line1, line2, line3, line4);
+    if (inkpane_epd_show_full(s_framebuffer) == ESP_OK) {
+        s_persist.notice_shown = true;
+        s_persist.notice_signature = signature;
+    } else {
+        s_persist.panel_warm = false;
+    }
+}
+
 static void refresh_clock_partial(const inkpane_config_t *config)
 {
     inkpane_datetime_t dt;
@@ -182,6 +267,8 @@ static void update_state_after_fetch(const inkpane_screen_t *screen, const inkpa
     s_persist.partial_count = 0;
     s_persist.fail_count = 0;
     s_persist.auth_error = false;
+    s_persist.retry_seconds = 0;
+    s_persist.notice_shown = false;
     s_persist.tz_offset_minutes = screen->utc_offset_minutes;
     s_persist.last_date_key = 0;
     if (screen->now_valid) {
@@ -241,7 +328,7 @@ static bool connect_wifi(const inkpane_config_t *config)
 }
 
 static void fetch_and_render(inkpane_config_t *config, bool force_full, int64_t now_epoch,
-                             bool rtc_ok, const inkpane_datetime_t *dt)
+                             bool rtc_ok, const inkpane_datetime_t *dt, bool paint_notice)
 {
     char etag[INKPANE_ETAG_LEN] = {0};
     char date[40] = {0};
@@ -263,6 +350,7 @@ static void fetch_and_render(inkpane_config_t *config, bool force_full, int64_t 
         if (!inkpane_screen_parse(s_http_body, body_length, s_screen, s_json_arena, JSON_ARENA_SIZE)) {
             ESP_LOGE(TAG, "payload parse failed (%u bytes)", (unsigned)body_length);
             s_persist.fail_count++;
+            s_persist.retry_seconds = retry_delay_seconds(config);
             clear_saved_etag(config);
             return;
         }
@@ -271,6 +359,7 @@ static void fetch_and_render(inkpane_config_t *config, bool force_full, int64_t 
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "display refresh failed: %s", esp_err_to_name(err));
             s_persist.fail_count++;
+            s_persist.retry_seconds = retry_delay_seconds(config);
             /* Drop the warm-panel assumption too: a failed full refresh usually
              * means the controller lost its state, so the next boot re-inits it. */
             s_persist.panel_warm = false;
@@ -307,6 +396,8 @@ static void fetch_and_render(inkpane_config_t *config, bool force_full, int64_t 
 
     if (result == INKPANE_HTTP_NOT_MODIFIED) {
         s_persist.fail_count = 0;
+        s_persist.retry_seconds = 0;
+        s_persist.notice_shown = false;
         int tz = s_persist.tz_offset_minutes;
         calibrate_from_date_header(date, tz);
         int64_t base = now_epoch;
@@ -323,21 +414,28 @@ static void fetch_and_render(inkpane_config_t *config, bool force_full, int64_t 
     if (result == INKPANE_HTTP_UNAUTHORIZED) {
         s_persist.auth_error = true;
         s_persist.fail_count++;
-        s_persist.next_net_epoch = now_epoch + 6 * 3600;
+        s_persist.retry_seconds = 6 * 3600;
+        s_persist.next_net_epoch = now_epoch + s_persist.retry_seconds;
         ESP_LOGW(TAG, "device token rejected; re-provision to recover");
-        refresh_clock_partial(config);
+        if (paint_notice) {
+            show_failure_notice(config);
+        } else {
+            refresh_clock_partial(config);
+        }
         return;
     }
 
     s_persist.fail_count++;
-    int backoff = 300 * s_persist.fail_count;
-    int maximum = config->refresh_minutes * 60;
-    if (backoff > maximum) {
-        backoff = maximum;
-    }
+    int backoff = retry_delay_seconds(config);
+    s_persist.retry_seconds = backoff;
     s_persist.next_net_epoch = now_epoch + backoff;
-    ESP_LOGW(TAG, "network fetch failed (attempt %d)", s_persist.fail_count);
-    refresh_clock_partial(config);
+    ESP_LOGW(TAG, "network fetch failed (attempt %d), retry in %d s", s_persist.fail_count,
+             backoff);
+    if (paint_notice) {
+        show_failure_notice(config);
+    } else {
+        refresh_clock_partial(config);
+    }
 }
 
 static void wait_for_buttons_released(void)
@@ -370,7 +468,10 @@ static void go_to_sleep(const inkpane_config_t *config, bool rtc_ok, const inkpa
 
     uint64_t sleep_seconds;
     if (!rtc_ok || dt == NULL) {
-        sleep_seconds = (uint64_t)config->refresh_minutes * 60;
+        /* No RTC to compute an absolute deadline: retry after the failure
+         * backoff instead of always sleeping a full refresh interval. */
+        sleep_seconds = s_persist.retry_seconds > 0 ? (uint64_t)s_persist.retry_seconds
+                                                    : (uint64_t)config->refresh_minutes * 60;
     } else {
         int seconds = 60 - dt->second + 1;
         int64_t now_epoch = inkpane_local_epoch(dt);
@@ -506,8 +607,13 @@ void app_main(void)
     }
 
     if (need_network) {
+        bool paint_notice = cold_boot || !rtc_ok;
         if (connect_wifi(&config)) {
-            fetch_and_render(&config, force_full, now_epoch, rtc_ok, &dt);
+            char ip[24] = {0};
+            if (inkpane_wifi_ip(ip, sizeof(ip)) == ESP_OK) {
+                ESP_LOGI(TAG, "wifi ip %s -> api %s", ip, config.api_url);
+            }
+            fetch_and_render(&config, force_full, now_epoch, rtc_ok, &dt, paint_notice);
 #if CONFIG_INKPANE_TELEMETRY
             if (!s_persist.auth_error) {
                 post_telemetry(&config);
@@ -515,13 +621,16 @@ void app_main(void)
 #endif
         } else {
             s_persist.fail_count++;
-            int backoff = 300 * s_persist.fail_count;
-            if (backoff > config.refresh_minutes * 60) {
-                backoff = config.refresh_minutes * 60;
-            }
+            int backoff = retry_delay_seconds(&config);
+            s_persist.retry_seconds = backoff;
             s_persist.next_net_epoch = now_epoch + backoff;
-            ESP_LOGW(TAG, "wifi unavailable (attempt %d)", s_persist.fail_count);
-            refresh_clock_partial(&config);
+            ESP_LOGW(TAG, "wifi unavailable (attempt %d), retry in %d s", s_persist.fail_count,
+                     backoff);
+            if (paint_notice) {
+                show_failure_notice(&config);
+            } else {
+                refresh_clock_partial(&config);
+            }
         }
         inkpane_wifi_disconnect();
     } else {

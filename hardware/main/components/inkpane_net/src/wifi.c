@@ -1,5 +1,6 @@
 #include "inkpane_net.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_check.h"
@@ -132,4 +133,27 @@ int inkpane_wifi_rssi(void)
         return 0;
     }
     return record.rssi;
+}
+
+esp_err_t inkpane_wifi_ip(char *out, size_t size)
+{
+    if (out == NULL || size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    out[0] = '\0';
+    if (!s_connected) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (netif == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    esp_netif_ip_info_t info = {0};
+    if (esp_netif_get_ip_info(netif, &info) != ESP_OK || info.ip.addr == 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    uint32_t ip = info.ip.addr;
+    snprintf(out, size, "%u.%u.%u.%u", (unsigned)(ip & 0xFFu), (unsigned)((ip >> 8) & 0xFFu),
+             (unsigned)((ip >> 16) & 0xFFu), (unsigned)((ip >> 24) & 0xFFu));
+    return ESP_OK;
 }

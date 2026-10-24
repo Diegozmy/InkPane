@@ -44,6 +44,14 @@ void inkpane_ui_render_clock(uint8_t *framebuffer, const inkpane_rect_t *rect,
 /** Full-screen provisioning instructions. */
 void inkpane_ui_render_setup(uint8_t *framebuffer, const char *ap_ssid, const char *url);
 
+/**
+ * Full-screen status notice (network / token failures). All lines are centred;
+ * NULL or empty lines are skipped. Used instead of a bare clock when the panel
+ * has no trustworthy content yet.
+ */
+void inkpane_ui_render_notice(uint8_t *framebuffer, const char *title, const char *line1,
+                              const char *line2, const char *line3, const char *line4);
+
 /* Text helpers (exposed for host tests). */
 int inkpane_text_width(const inkpane_font_t *font, const char *text);
 int inkpane_text_draw(inkpane_canvas_t *canvas, const inkpane_font_t *font, int x, int y,

@@ -35,6 +35,9 @@ void inkpane_wifi_disconnect(void);
 bool inkpane_wifi_connected(void);
 int inkpane_wifi_rssi(void);
 
+/** Copy the STA IPv4 address as dotted text ("192.168.71.53"). */
+esp_err_t inkpane_wifi_ip(char *out, size_t size);
+
 typedef enum {
     INKPANE_HTTP_OK = 0,
     INKPANE_HTTP_NOT_MODIFIED,

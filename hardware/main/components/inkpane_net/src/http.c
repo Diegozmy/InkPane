@@ -110,6 +110,10 @@ inkpane_http_result_t inkpane_http_fetch_screen(const char *api_url, const char 
 
     char url[192];
     build_url(url, sizeof(url), api_url, "/api/device/screen");
+    if (strncasecmp(url, "https://", 8) == 0) {
+        ESP_LOGE(TAG, "https is not supported (HTTPS disabled in this firmware); use http:// on the LAN");
+        return INKPANE_HTTP_FAILED;
+    }
 
     esp_http_client_config_t config = {
         .url = url,
@@ -157,7 +161,7 @@ inkpane_http_result_t inkpane_http_fetch_screen(const char *api_url, const char 
         ESP_LOGW(TAG, "device token rejected");
         return INKPANE_HTTP_UNAUTHORIZED;
     }
-    ESP_LOGW(TAG, "screen request failed: %s status=%d", esp_err_to_name(err), status);
+    ESP_LOGW(TAG, "screen request failed: %s status=%d url=%s", esp_err_to_name(err), status, url);
     return INKPANE_HTTP_FAILED;
 }
 
@@ -230,6 +234,6 @@ inkpane_http_result_t inkpane_http_post_telemetry(const char *api_url, const cha
     if (status == 200) {
         return INKPANE_HTTP_OK;
     }
-    ESP_LOGW(TAG, "telemetry failed: %s status=%d", esp_err_to_name(err), status);
+    ESP_LOGW(TAG, "telemetry failed: %s status=%d url=%s", esp_err_to_name(err), status, url);
     return INKPANE_HTTP_FAILED;
 }

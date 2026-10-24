@@ -672,3 +672,39 @@ void inkpane_ui_render_setup(uint8_t *framebuffer, const char *ap_ssid, const ch
     inkpane_text_draw(&canvas, small, 40, 400, "配网 10 分钟无操作将自动重启", INKPANE_SCREEN_WIDTH - 80,
                       INKPANE_ALIGN_LEFT, true);
 }
+
+void inkpane_ui_render_notice(uint8_t *framebuffer, const char *title, const char *line1,
+                              const char *line2, const char *line3, const char *line4)
+{
+    if (framebuffer == NULL) {
+        return;
+    }
+    inkpane_canvas_t canvas;
+    inkpane_canvas_init(&canvas, framebuffer, INKPANE_SCREEN_WIDTH, INKPANE_SCREEN_HEIGHT, 0, 0);
+    inkpane_canvas_clear(&canvas, true);
+
+    const inkpane_font_t *large = inkpane_font_large();
+    const inkpane_font_t *medium = inkpane_font_medium();
+    const inkpane_font_t *small = inkpane_font_small();
+    if (large == NULL || medium == NULL || small == NULL) {
+        return;
+    }
+
+    inkpane_text_draw(&canvas, large, 40, 64, title != NULL ? title : "InkPane",
+                      INKPANE_SCREEN_WIDTH - 80, INKPANE_ALIGN_CENTER, true);
+    inkpane_canvas_hline(&canvas, 40, 128, INKPANE_SCREEN_WIDTH - 80, true);
+
+    const char *lines[] = {line1, line2, line3, line4};
+    int y = 168;
+    for (size_t i = 0; i < sizeof(lines) / sizeof(lines[0]); ++i) {
+        if (lines[i] == NULL || lines[i][0] == '\0') {
+            continue;
+        }
+        inkpane_text_draw(&canvas, medium, 40, y, lines[i], INKPANE_SCREEN_WIDTH - 80,
+                          INKPANE_ALIGN_CENTER, true);
+        y += medium->line_height + 8;
+    }
+
+    inkpane_text_draw(&canvas, small, 40, INKPANE_SCREEN_HEIGHT - small->line_height - 16,
+                      "InkPane 墨窗 · 设备端", INKPANE_SCREEN_WIDTH - 80, INKPANE_ALIGN_CENTER, true);
+}
