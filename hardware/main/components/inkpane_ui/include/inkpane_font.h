@@ -6,7 +6,7 @@
 
 #include "esp_err.h"
 
-#define INKPANE_FONT_SIZES 3
+#define INKPANE_FONT_SIZES 4
 
 typedef struct {
     uint16_t px;
@@ -19,11 +19,13 @@ typedef struct {
     uint16_t digit_advance;
 } inkpane_font_t;
 
-/** Look up one of the three loaded sizes; returns NULL for unknown sizes. */
+/** Look up one of the loaded sizes; returns NULL for unknown sizes. */
 const inkpane_font_t *inkpane_font(int px);
 const inkpane_font_t *inkpane_font_small(void);
 const inkpane_font_t *inkpane_font_medium(void);
 const inkpane_font_t *inkpane_font_large(void);
+/** 64 px display size, used by the full-screen zoomed views. */
+const inkpane_font_t *inkpane_font_huge(void);
 
 /** Load a blob produced by hardware/tools/genfont.py. */
 esp_err_t inkpane_font_load(const uint8_t *data, size_t size);

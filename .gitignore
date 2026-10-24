@@ -57,3 +57,10 @@ hardware/ESP32-S3_ePaper-3.97-demo/
 tmp/
 temp/
 *.bak
+
+# Python 字节码（hardware/tools 下的脚本会产生 __pycache__；hardware/main/.gitignore 只覆盖 main/）
+__pycache__/
+*.pyc
+
+# 固件调试 / 字体生成脚本的测试产物
+*.utf8test

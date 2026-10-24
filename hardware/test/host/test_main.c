@@ -345,6 +345,77 @@ static void test_render(void)
     free(screen);
 }
 
+/* Full-screen zoomed renderings must each lay out content that actually fits
+ * on the panel: a quick ink-density check catches a missing font / empty
+ * frame without asserting on exact pixel positions. */
+static int framebuffer_ink(const uint8_t *framebuffer)
+{
+    int ink = 0;
+    for (size_t p = 0; p < FB_SIZE; ++p) {
+        if (framebuffer[p] != 0xFF) {
+            ink++;
+        }
+    }
+    return ink;
+}
+
+static void test_render_zoomed(void)
+{
+    static uint8_t framebuffer[FB_SIZE];
+    char *arena = malloc(256 * 1024);
+    inkpane_screen_t *screen = malloc(sizeof(inkpane_screen_t));
+    CHECK(arena != NULL && screen != NULL);
+    if (arena == NULL || screen == NULL) {
+        free(arena);
+        free(screen);
+        return;
+    }
+
+    size_t length = 0;
+    char *text = read_file(fixture_path("screen_200.json"), &length);
+    CHECK(text != NULL);
+    if (text == NULL) {
+        free(arena);
+        free(screen);
+        return;
+    }
+    CHECK(inkpane_screen_parse(text, length, screen, arena, 256 * 1024));
+    free(text);
+
+    inkpane_clock_t clock = {0};
+    clock.valid = screen->now_valid;
+    clock.hour = screen->now_hour;
+    clock.minute = screen->now_minute;
+    snprintf(clock.weekday_label, sizeof(clock.weekday_label), "%s", screen->now_weekday);
+    snprintf(clock.date_label, sizeof(clock.date_label), "%s", screen->now_date_label);
+
+    memset(framebuffer, 0xFF, FB_SIZE);
+    inkpane_ui_render_clock_full(framebuffer, &clock, 0);
+    CHECK(framebuffer_ink(framebuffer) > 300);
+
+    inkpane_ui_render_calendar_full(framebuffer, &screen->month);
+    CHECK(framebuffer_ink(framebuffer) > 800);
+
+    inkpane_ui_render_weather_full(framebuffer, &screen->weather);
+    CHECK(framebuffer_ink(framebuffer) > 300);
+
+    inkpane_ui_render_events_full(framebuffer, screen->events, screen->event_count,
+                                  screen->event_total, false);
+    CHECK(framebuffer_ink(framebuffer) > 300);
+
+    inkpane_ui_render_events_full(framebuffer, screen->courses, screen->course_count,
+                                  screen->course_total, true);
+    /* The fixture has no courses, so the empty-state line still must show. */
+    CHECK(framebuffer_ink(framebuffer) > 100);
+
+    inkpane_ui_render_todos_full(framebuffer, screen->todos, screen->todo_count,
+                                 screen->todo_total);
+    CHECK(framebuffer_ink(framebuffer) > 300);
+
+    free(arena);
+    free(screen);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -363,6 +434,8 @@ int main(int argc, char **argv)
     test_font_and_text();
     printf("== render ==\n");
     test_render();
+    printf("== render zoomed ==\n");
+    test_render_zoomed();
 
     if (g_failures == 0) {
         printf("all host tests passed\n");

@@ -41,6 +41,21 @@ void inkpane_ui_render_full(uint8_t *framebuffer, const inkpane_screen_t *screen
 void inkpane_ui_render_clock(uint8_t *framebuffer, const inkpane_rect_t *rect,
                              const inkpane_clock_t *clock, unsigned status);
 
+/*
+ * Full-screen zoomed renderings of single modules. Each one clears the whole
+ * panel and lays its content out with the large/medium font sizes instead of
+ * the compact mini-module rectangles. Driven by the button-activated zoom
+ * view; data comes from the cached screen payload.
+ */
+void inkpane_ui_render_clock_full(uint8_t *framebuffer, const inkpane_clock_t *clock,
+                                  unsigned status);
+void inkpane_ui_render_calendar_full(uint8_t *framebuffer, const inkpane_month_t *month);
+void inkpane_ui_render_weather_full(uint8_t *framebuffer, const inkpane_weather_t *weather);
+void inkpane_ui_render_events_full(uint8_t *framebuffer, const inkpane_event_t *events,
+                                   int count, int total, bool courses);
+void inkpane_ui_render_todos_full(uint8_t *framebuffer, const inkpane_todo_t *todos,
+                                  int count, int total);
+
 /** Full-screen provisioning instructions. */
 void inkpane_ui_render_setup(uint8_t *framebuffer, const char *ap_ssid, const char *url);
 

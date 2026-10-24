@@ -101,6 +101,11 @@ const inkpane_font_t *inkpane_font_large(void)
     return inkpane_font(32);
 }
 
+const inkpane_font_t *inkpane_font_huge(void)
+{
+    return inkpane_font(64);
+}
+
 const uint8_t *inkpane_font_glyph(const inkpane_font_t *font, uint32_t codepoint, int *dx, int *dy,
                                   int *width, int *height, int *advance)
 {

@@ -126,6 +126,69 @@ int main(int argc, char **argv)
     if (result == 0) {
         printf("wrote %s\n", argv[3]);
     }
+
+    /* If a fourth argument is given, also render each full-screen zoomed view
+     * to its own BMP so the new zoom layouts can be inspected on the host. */
+    if (argc > 4) {
+        inkpane_clock_t clock = {0};
+        clock.valid = screen->now_valid;
+        clock.hour = screen->now_hour;
+        clock.minute = screen->now_minute;
+        snprintf(clock.weekday_label, sizeof(clock.weekday_label), "%s", screen->now_weekday);
+        snprintf(clock.date_label, sizeof(clock.date_label), "%s", screen->now_date_label);
+        clock.weekday = screen->now_local.month > 0
+                            ? inkpane_weekday_of_date(screen->now_local.year, screen->now_local.month,
+                                                      screen->now_local.day)
+                            : 0;
+
+        char base[512];
+        snprintf(base, sizeof(base), "%s", argv[4]);
+        char *dot = strrchr(base, '.');
+        if (dot != NULL) {
+            *dot = '\0';
+        }
+        char out_path[560];
+
+        inkpane_ui_render_clock_full(framebuffer, &clock, 0);
+        snprintf(out_path, sizeof(out_path), "%s_clock.bmp", base);
+        if (write_bmp(out_path, framebuffer) == 0) {
+            printf("wrote %s\n", out_path);
+        }
+
+        inkpane_ui_render_calendar_full(framebuffer, &screen->month);
+        snprintf(out_path, sizeof(out_path), "%s_calendar.bmp", base);
+        if (write_bmp(out_path, framebuffer) == 0) {
+            printf("wrote %s\n", out_path);
+        }
+
+        inkpane_ui_render_weather_full(framebuffer, &screen->weather);
+        snprintf(out_path, sizeof(out_path), "%s_weather.bmp", base);
+        if (write_bmp(out_path, framebuffer) == 0) {
+            printf("wrote %s\n", out_path);
+        }
+
+        inkpane_ui_render_events_full(framebuffer, screen->events, screen->event_count,
+                                      screen->event_total, false);
+        snprintf(out_path, sizeof(out_path), "%s_schedule.bmp", base);
+        if (write_bmp(out_path, framebuffer) == 0) {
+            printf("wrote %s\n", out_path);
+        }
+
+        inkpane_ui_render_events_full(framebuffer, screen->courses, screen->course_count,
+                                      screen->course_total, true);
+        snprintf(out_path, sizeof(out_path), "%s_courses.bmp", base);
+        if (write_bmp(out_path, framebuffer) == 0) {
+            printf("wrote %s\n", out_path);
+        }
+
+        inkpane_ui_render_todos_full(framebuffer, screen->todos, screen->todo_count,
+                                     screen->todo_total);
+        snprintf(out_path, sizeof(out_path), "%s_todos.bmp", base);
+        if (write_bmp(out_path, framebuffer) == 0) {
+            printf("wrote %s\n", out_path);
+        }
+    }
+
     free(font);
     free(json);
     free(arena);

@@ -53,6 +53,10 @@ typedef struct {
      * do not trigger a full-screen flash every retry. */
     uint32_t notice_signature;
     bool notice_shown;
+    /* Zoom view: -1 = full overview, 0..5 = full-screen zoomed module id.
+     * Persisted so button wakes resume from the same view instead of
+     * snapping back to the overview every time. */
+    int zoomed_module;
 } persist_t;
 
 static RTC_DATA_ATTR persist_t s_persist;
@@ -238,6 +242,12 @@ static void show_failure_notice(const inkpane_config_t *config)
 
 static void refresh_clock_partial(const inkpane_config_t *config)
 {
+    /* The mini-module clock rectangle only exists on the overview view. While
+     * the panel is zoomed into a single module there is no partial rectangle
+     * to refresh, so skip to avoid touching a region that is no longer drawn. */
+    if (s_persist.zoomed_module >= 0) {
+        return;
+    }
     inkpane_datetime_t dt;
     bool valid = read_clock(&dt);
     inkpane_clock_t clock;
@@ -438,6 +448,175 @@ static void fetch_and_render(inkpane_config_t *config, bool force_full, int64_t 
     }
 }
 
+/**
+ * Read which of the four user buttons is still held at wake time. Only the
+ * most recently pressed button may still be low when the EXT1 wake fires, so
+ * a short settle delay lets the others (if any) release first. Returns the
+ * GPIO number (0/4/5/6) of the first still-held button, or -1 when none is
+ * held any more (e.g. a very short tap that already de-bounced away).
+ */
+static int detect_pressed_button(void)
+{
+    const int pins[] = {0, 4, 5, 6};
+    /* Let any bouncing settle so multi-key holds read stable values. */
+    vTaskDelay(pdMS_TO_TICKS(80));
+    for (int i = 0; i < (int)(sizeof(pins) / sizeof(pins[0])); ++i) {
+        if (inkpane_board_button_held(pins[i])) {
+            return pins[i];
+        }
+    }
+    return -1;
+}
+
+/**
+ * Render the full-screen zoomed view for `zoomed_module` into the framebuffer.
+ * Data is the cached s_screen payload; a NULL s_screen (fetch has never
+ * succeeded) falls back to the RTC clock for the clock page and empty-state
+ * text for the others. `zoomed_module` must be 0..INKPANE_MODULE_COUNT-1.
+ */
+static void render_zoomed_module(int zoomed_module)
+{
+    if (s_framebuffer == NULL || s_screen == NULL) {
+        return;
+    }
+    inkpane_screen_t *screen = s_screen;
+    switch (zoomed_module) {
+    case INKPANE_MODULE_CLOCK: {
+        inkpane_clock_t clock;
+        inkpane_datetime_t dt;
+        if (read_clock(&dt)) {
+            clock_from_datetime(&dt, &clock);
+        } else if (screen->now_valid) {
+            clock_from_datetime(&screen->now_local, &clock);
+        } else {
+            memset(&clock, 0, sizeof(clock));
+        }
+        inkpane_ui_render_clock_full(s_framebuffer, &clock, status_flags());
+        break;
+    }
+    case INKPANE_MODULE_CALENDAR:
+        inkpane_ui_render_calendar_full(s_framebuffer, &screen->month);
+        break;
+    case INKPANE_MODULE_WEATHER:
+        inkpane_ui_render_weather_full(s_framebuffer, &screen->weather);
+        break;
+    case INKPANE_MODULE_SCHEDULE:
+        inkpane_ui_render_events_full(s_framebuffer, screen->events, screen->event_count,
+                                      screen->event_total, false);
+        break;
+    case INKPANE_MODULE_COURSES:
+        inkpane_ui_render_events_full(s_framebuffer, screen->courses, screen->course_count,
+                                      screen->course_total, true);
+        break;
+    case INKPANE_MODULE_TODOS:
+        inkpane_ui_render_todos_full(s_framebuffer, screen->todos, screen->todo_count,
+                                     screen->todo_total);
+        break;
+    default:
+        return;
+    }
+    if (inkpane_epd_show_full(s_framebuffer) != ESP_OK) {
+        /* A failed full refresh usually means the controller lost state; the
+         * next boot re-inits it (same reasoning as fetch_and_render). */
+        s_persist.panel_warm = false;
+    }
+}
+
+/**
+ * Render the full overview (all enabled mini modules) from the cached s_screen
+ * payload. Used when zooming back out of a full-screen module view.
+ */
+static void render_overview(void)
+{
+    if (s_framebuffer == NULL || s_screen == NULL) {
+        return;
+    }
+    inkpane_ui_render_full(s_framebuffer, s_screen);
+    if (inkpane_epd_show_full(s_framebuffer) != ESP_OK) {
+        s_persist.panel_warm = false;
+    }
+}
+
+/**
+ * Handle a button-wake zoom request. Returns true when the view has already
+ * been refreshed locally and the normal network path can be skipped; false
+ * when the caller should fall through to the regular fetch / refresh logic.
+ *
+ * Button mapping (active low):
+ *   GPIO 4 = previous zoomed module (cycle backwards through the enabled
+ *             modules, wrapping around the ring).
+ *   GPIO 6 = next zoomed module (cycle forwards through the enabled modules,
+ *             wrapping around the ring).
+ *   GPIO 5 = toggle between the overview and the first enabled module's zoom
+ *             view.
+ */
+static bool handle_zoom_button(int pressed_gpio)
+{
+    if (pressed_gpio < 0 || s_screen == NULL) {
+        return false; /* No cached payload yet; let the normal path run. */
+    }
+
+    /* Build the list of enabled module ids in canvas order so "next/prev"
+     * cycles through only the modules the server actually enabled. */
+    int enabled[INKPANE_MAX_MODULES];
+    int enabled_count = 0;
+    for (int i = 0; i < INKPANE_MAX_MODULES; ++i) {
+        if (s_screen->modules[i].enabled && s_screen->modules[i].present) {
+            enabled[enabled_count++] = i;
+        }
+    }
+    if (enabled_count == 0) {
+        return false; /* Nothing to zoom into; fall back to the normal view. */
+    }
+
+    int current = s_persist.zoomed_module; /* -1 = overview */
+    int next_view = current;
+
+    switch (pressed_gpio) {
+    case 4: /* previous module, wrap around the ring */
+        if (current < 0) {
+            next_view = enabled[enabled_count - 1];
+        } else {
+            int index = 0;
+            while (index < enabled_count - 1 && enabled[index] != current) {
+                ++index;
+            }
+            /* Move to the previous entry in the ring; wrap to the tail. */
+            next_view = enabled[(index + enabled_count - 1) % enabled_count];
+        }
+        break;
+    case 6: /* next module, wrap around the ring */
+        if (current < 0) {
+            next_view = enabled[0];
+        } else {
+            int index = 0;
+            while (index < enabled_count - 1 && enabled[index] != current) {
+                ++index;
+            }
+            /* Move to the next entry in the ring; wrap to the head. */
+            next_view = enabled[(index + 1) % enabled_count];
+        }
+        break;
+    case 5: /* toggle: overview <-> first enabled module */
+        if (current < 0) {
+            next_view = enabled[0];
+        } else {
+            next_view = -1;
+        }
+        break;
+    default: /* GPIO 0 or anything unexpected: no zoom action */
+        return false;
+    }
+
+    s_persist.zoomed_module = next_view;
+    if (next_view < 0) {
+        render_overview();
+    } else {
+        render_zoomed_module(next_view);
+    }
+    return true;
+}
+
 static void wait_for_buttons_released(void)
 {
     const int pins[] = {0, 4, 5, 6};
@@ -536,6 +715,7 @@ void app_main(void)
         memset(&s_persist, 0, sizeof(s_persist));
         s_persist.magic = PERSIST_MAGIC;
         s_persist.tz_offset_minutes = 480;
+        s_persist.zoomed_module = -1;
     }
     /* A warm panel means ALDO3 stayed powered through deep sleep and the
      * controller was never reset, so no panel init / full repaint is needed. */
@@ -594,7 +774,6 @@ void app_main(void)
     bool network_due = !rtc_ok || s_persist.next_net_epoch == 0 || now_epoch >= s_persist.next_net_epoch;
     bool force_full = cold_boot || !warm_boot || epd != ESP_OK || date_changed ||
                       (network_due && s_persist.partial_count >= full_interval);
-    bool need_network = cold_boot || button_wake || network_due || date_changed || force_full;
 
     /* After a cold boot the clock rectangle is unknown until the first 200. */
     if (s_persist.clock_enabled == false && s_persist.clock_w == 0) {
@@ -605,6 +784,23 @@ void app_main(void)
         s_persist.clock_w = fallback->w;
         s_persist.clock_h = fallback->h;
     }
+
+    /* Button wake: check whether a zoom-control button is still held. If so,
+     * refresh the view locally from the cached payload and only touch the
+     * network when it was already due — a plain view switch should not cost
+     * a Wi-Fi handshake every time. */
+    bool zoom_handled = false;
+    if (button_wake) {
+        int pressed_gpio = detect_pressed_button();
+        zoom_handled = handle_zoom_button(pressed_gpio);
+        if (zoom_handled) {
+            ESP_LOGI(TAG, "zoom view %d via gpio %d", s_persist.zoomed_module, pressed_gpio);
+        }
+    }
+    /* A pure zoom view switch (button 4/5/6) does not force the network. The
+     * regular fetch still happens whenever it was already due, cold-booted,
+     * or the panel needs a forced full repaint. */
+    bool need_network = !zoom_handled || cold_boot || network_due || date_changed || force_full;
 
     if (need_network) {
         bool paint_notice = cold_boot || !rtc_ok;
@@ -628,12 +824,14 @@ void app_main(void)
                      backoff);
             if (paint_notice) {
                 show_failure_notice(&config);
-            } else {
+            } else if (s_persist.zoomed_module < 0) {
                 refresh_clock_partial(&config);
             }
         }
         inkpane_wifi_disconnect();
-    } else {
+    } else if (s_persist.zoomed_module < 0) {
+        /* Timer-driven overview tick: keep the mini clock rectangle fresh.
+         * While zoomed the panel already shows the full-screen module view. */
         refresh_clock_partial(&config);
     }
 
