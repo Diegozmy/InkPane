@@ -92,6 +92,44 @@ static void hardware_reset(void)
     vTaskDelay(pdMS_TO_TICKS(50));
 }
 
+/**
+ * Program the full-panel RAM window and cursor.
+ *
+ * A partial refresh (`inkpane_epd_show_region`) leaves 0x44/0x45/0x4E/0x4F set
+ * to the clock rectangle. A following full refresh that writes the whole
+ * framebuffer without restoring them wraps the 48 KB of data inside that small
+ * window, so the panel keeps showing a mix of old frames (the "stuck, ghosted
+ * screen" after zooming out of a module). Every full refresh therefore sets
+ * the window explicitly.
+ *
+ * Byte order follows the vendor demo (epaper_port.c EPD_Init) and the original
+ * panel_init: 0x44 takes X start then X end, 0x45 takes **Y end then Y start**.
+ * Sending the Y pair the other way round flips the RAM scan and the panel shows
+ * static noise, so do not "fix" the order based on comments elsewhere.
+ */
+static esp_err_t set_full_window(void)
+{
+    ESP_RETURN_ON_ERROR(send_command(0x44), TAG, "x window");
+    ESP_RETURN_ON_ERROR(send_data(0x00), TAG, "x start lo");
+    ESP_RETURN_ON_ERROR(send_data(0x00), TAG, "x start hi");
+    ESP_RETURN_ON_ERROR(send_data((INKPANE_EPD_WIDTH - 1) & 0xFF), TAG, "x end lo");
+    ESP_RETURN_ON_ERROR(send_data((INKPANE_EPD_WIDTH - 1) >> 8), TAG, "x end hi");
+
+    ESP_RETURN_ON_ERROR(send_command(0x45), TAG, "y window");
+    ESP_RETURN_ON_ERROR(send_data((INKPANE_EPD_HEIGHT - 1) & 0xFF), TAG, "y end lo");
+    ESP_RETURN_ON_ERROR(send_data((INKPANE_EPD_HEIGHT - 1) >> 8), TAG, "y end hi");
+    ESP_RETURN_ON_ERROR(send_data(0x00), TAG, "y start lo");
+    ESP_RETURN_ON_ERROR(send_data(0x00), TAG, "y start hi");
+
+    ESP_RETURN_ON_ERROR(send_command(0x4E), TAG, "x counter");
+    ESP_RETURN_ON_ERROR(send_data(0x00), TAG, "x counter lo");
+    ESP_RETURN_ON_ERROR(send_data(0x00), TAG, "x counter hi");
+    ESP_RETURN_ON_ERROR(send_command(0x4F), TAG, "y counter");
+    ESP_RETURN_ON_ERROR(send_data(0x00), TAG, "y counter lo");
+    ESP_RETURN_ON_ERROR(send_data(0x00), TAG, "y counter hi");
+    return ESP_OK;
+}
+
 static esp_err_t panel_init(void)
 {
     ESP_RETURN_ON_ERROR(send_command(0x12), TAG, "swreset");
@@ -118,25 +156,7 @@ static esp_err_t panel_init(void)
     ESP_RETURN_ON_ERROR(send_command(0x11), TAG, "entry mode");
     ESP_RETURN_ON_ERROR(send_data(0x01), TAG, "entry mode value");
 
-    ESP_RETURN_ON_ERROR(send_command(0x44), TAG, "x window");
-    ESP_RETURN_ON_ERROR(send_data(0x00), TAG, "x start lo");
-    ESP_RETURN_ON_ERROR(send_data(0x00), TAG, "x start hi");
-    ESP_RETURN_ON_ERROR(send_data((INKPANE_EPD_WIDTH - 1) & 0xFF), TAG, "x end lo");
-    ESP_RETURN_ON_ERROR(send_data((INKPANE_EPD_WIDTH - 1) >> 8), TAG, "x end hi");
-
-    ESP_RETURN_ON_ERROR(send_command(0x45), TAG, "y window");
-    ESP_RETURN_ON_ERROR(send_data((INKPANE_EPD_HEIGHT - 1) & 0xFF), TAG, "y end lo");
-    ESP_RETURN_ON_ERROR(send_data((INKPANE_EPD_HEIGHT - 1) >> 8), TAG, "y end hi");
-    ESP_RETURN_ON_ERROR(send_data(0x00), TAG, "y start lo");
-    ESP_RETURN_ON_ERROR(send_data(0x00), TAG, "y start hi");
-
-    ESP_RETURN_ON_ERROR(send_command(0x4E), TAG, "x counter");
-    ESP_RETURN_ON_ERROR(send_data(0x00), TAG, "x counter lo");
-    ESP_RETURN_ON_ERROR(send_data(0x00), TAG, "x counter hi");
-
-    ESP_RETURN_ON_ERROR(send_command(0x4F), TAG, "y counter");
-    ESP_RETURN_ON_ERROR(send_data(0x00), TAG, "y counter lo");
-    ESP_RETURN_ON_ERROR(send_data(0x00), TAG, "y counter hi");
+    ESP_RETURN_ON_ERROR(set_full_window(), TAG, "full window");
 
     return wait_busy();
 }
@@ -220,6 +240,9 @@ esp_err_t inkpane_epd_show_full(const uint8_t *framebuffer)
     if (!s_ready || framebuffer == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
+    /* A previous partial refresh left the RAM window on the clock rectangle;
+     * writing the whole framebuffer into it would wrap the data. */
+    ESP_RETURN_ON_ERROR(set_full_window(), TAG, "full window");
     ESP_RETURN_ON_ERROR(send_command(0x24), TAG, "write new ram");
     ESP_RETURN_ON_ERROR(send_buffer(framebuffer, INKPANE_EPD_FB_SIZE), TAG, "new ram data");
     ESP_RETURN_ON_ERROR(send_command(0x26), TAG, "write old ram");
@@ -284,12 +307,12 @@ esp_err_t inkpane_epd_show_region(const uint8_t *framebuffer, int x, int y, int 
     if (err == ESP_OK) {
         err = send_data(0x80);
     }
-    /* SSD1683 window registers: 0x44 takes pixel X start/end (byte aligned by
-     * the caller), 0x45 takes Y **start then end**. The order matters for
-     * partial refresh: with the two Y values swapped the controller decodes an
-     * inverted window and paints the strip at the mirrored scan position, which
-     * is why the clock used to reappear inside the todos module near the bottom
-     * of the panel instead of redrawing the clock in place. */
+    /* SSD1683 window registers: 0x44 takes pixel X start/end, 0x45 takes the Y
+     * pair. This partial path sends Y start then Y end (empirically tuned here;
+     * the vendor demo sends Y end then Y start, and that is the order the full
+     * window in set_full_window() must use — swapping the full window's Y pair
+     * turned the panel into static noise). Keep the two paths as they are
+     * unless you can test on hardware. */
     const int pixel_x0 = x0;
     const int pixel_x1 = x1 - 8;
     const int pixel_y0 = y;

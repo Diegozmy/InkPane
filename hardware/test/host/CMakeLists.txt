@@ -19,6 +19,7 @@ add_library(inkpane_host_core STATIC
     "${MODEL_DIR}/src/time.c"
     "${MODEL_DIR}/src/model.c"
     "${MODEL_DIR}/src/schedule.c"
+    "${MODEL_DIR}/src/snapshot.c"
     "${UI_DIR}/src/canvas.c"
     "${UI_DIR}/src/font.c"
     "${UI_DIR}/src/ui.c"

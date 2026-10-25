@@ -285,7 +285,14 @@ static void draw_calendar(inkpane_canvas_t *canvas, const inkpane_rect_t *rect,
 {
     inkpane_canvas_fill(canvas, rect->x, rect->y, rect->w, rect->h, false);
     const inkpane_font_t *small = inkpane_font_small();
+    const inkpane_font_t *medium = inkpane_font_medium();
     if (small == NULL) {
+        return;
+    }
+    if (!month->present) {
+        inkpane_text_draw(canvas, medium != NULL ? medium : small, rect->x,
+                          rect->y + rect->h / 2, "日历暂无数据", rect->w, INKPANE_ALIGN_CENTER,
+                          true);
         return;
     }
     char title[32];
@@ -304,6 +311,13 @@ static void draw_calendar(inkpane_canvas_t *canvas, const inkpane_rect_t *rect,
 
     const int grid_y = rect->y + 44;
     const int row_h = 22;
+    int mark_count = month->mark_count;
+    if (mark_count < 0) {
+        mark_count = 0;
+    }
+    if (mark_count > INKPANE_MAX_MARKS) {
+        mark_count = INKPANE_MAX_MARKS;
+    }
     int day = 1;
     int first = month->first_weekday;
     for (int row = 0; row < 6 && day <= month->days_in_month; ++row) {
@@ -330,7 +344,7 @@ static void draw_calendar(inkpane_canvas_t *canvas, const inkpane_rect_t *rect,
                 inkpane_text_draw(canvas, small, cx, cy + 1, number, cell_w, INKPANE_ALIGN_CENTER,
                                   true);
             }
-            for (int i = 0; i < month->mark_count; ++i) {
+            for (int i = 0; i < mark_count; ++i) {
                 if (month->marks[i] == day) {
                     bool white = day == month->today;
                     inkpane_canvas_fill(canvas, cx + cell_w / 2 - 1, cy + row_h - 3, 2, 2, !white);
@@ -382,7 +396,14 @@ static void draw_weather(inkpane_canvas_t *canvas, const inkpane_rect_t *rect,
     inkpane_text_draw(canvas, small, rect->x + PAD, line_y + 4, "未来三天", rect->w - 2 * PAD,
                       INKPANE_ALIGN_LEFT, true);
 
-    for (int i = 0; i < weather->forecast_count; ++i) {
+    int forecast_count = weather->forecast_count;
+    if (forecast_count < 0) {
+        forecast_count = 0;
+    }
+    if (forecast_count > INKPANE_MAX_FORECAST) {
+        forecast_count = INKPANE_MAX_FORECAST;
+    }
+    for (int i = 0; i < forecast_count; ++i) {
         int row_y = line_y + 26 + i * 34;
         if (row_y + 24 > rect->y + rect->h) {
             break;
@@ -606,6 +627,11 @@ void inkpane_ui_render_calendar_full(uint8_t *framebuffer, const inkpane_month_t
     if (small == NULL || medium == NULL) {
         return;
     }
+    if (!month->present) {
+        inkpane_text_draw(&canvas, medium, 0, INKPANE_SCREEN_HEIGHT / 2, "日历暂无数据",
+                          INKPANE_SCREEN_WIDTH, INKPANE_ALIGN_CENTER, true);
+        return;
+    }
 
     char title[32];
     snprintf(title, sizeof(title), "%d年%d月", month->year, month->month);
@@ -625,6 +651,13 @@ void inkpane_ui_render_calendar_full(uint8_t *framebuffer, const inkpane_month_t
     int row_h = (INKPANE_SCREEN_HEIGHT - grid_y - 24) / 6;
     if (row_h > 56) {
         row_h = 56;
+    }
+    int mark_count = month->mark_count;
+    if (mark_count < 0) {
+        mark_count = 0;
+    }
+    if (mark_count > INKPANE_MAX_MARKS) {
+        mark_count = INKPANE_MAX_MARKS;
     }
     int day = 1;
     int first = month->first_weekday;
@@ -658,7 +691,7 @@ void inkpane_ui_render_calendar_full(uint8_t *framebuffer, const inkpane_month_t
                 inkpane_text_draw(&canvas, medium, cx, text_y, number, cell_w,
                                   INKPANE_ALIGN_CENTER, true);
             }
-            for (int i = 0; i < month->mark_count; ++i) {
+            for (int i = 0; i < mark_count; ++i) {
                 if (month->marks[i] == day) {
                     bool white = is_today;
                     int dot_y = cy + row_h - 8;
@@ -722,12 +755,19 @@ void inkpane_ui_render_weather_full(uint8_t *framebuffer, const inkpane_weather_
                       INKPANE_ALIGN_LEFT, true);
 
     int forecast_top = header_y2 + small->line_height + 24;
+    int forecast_count = weather->forecast_count;
+    if (forecast_count < 0) {
+        forecast_count = 0;
+    }
+    if (forecast_count > INKPANE_MAX_FORECAST) {
+        forecast_count = INKPANE_MAX_FORECAST;
+    }
     int forecast_row = (INKPANE_SCREEN_HEIGHT - forecast_top - 24) /
-                       (weather->forecast_count > 0 ? weather->forecast_count : 3);
+                       (forecast_count > 0 ? forecast_count : 3);
     if (forecast_row > 100) {
         forecast_row = 100;
     }
-    for (int i = 0; i < weather->forecast_count; ++i) {
+    for (int i = 0; i < forecast_count; ++i) {
         int row_y = forecast_top + i * forecast_row;
         if (row_y > INKPANE_SCREEN_HEIGHT - 30) {
             break;

@@ -18,6 +18,7 @@
 #include "inkpane_model.h"
 #include "inkpane_net.h"
 #include "inkpane_prov.h"
+#include "inkpane_snapshot.h"
 #include "inkpane_ui.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
@@ -28,6 +29,8 @@ static const char *TAG = "inkpane";
 #define JSON_ARENA_SIZE (1024 * 1024)
 #define HTTP_BODY_SIZE (512 * 1024)
 #define PERSIST_MAGIC 0x494E4B50u
+/* Serial debug session: how long the device idles before sleeping again. */
+#define DEBUG_IDLE_SECONDS 300
 
 typedef struct {
     uint32_t magic;
@@ -60,6 +63,9 @@ typedef struct {
 } persist_t;
 
 static RTC_DATA_ATTR persist_t s_persist;
+/* Condensed copy of the last rendered screen, kept in RTC slow memory so a
+ * deep-sleep button wake can re-render zoomed views offline. */
+static RTC_DATA_ATTR inkpane_snapshot_t s_snapshot;
 
 static uint8_t *s_framebuffer;
 static char *s_json_arena;
@@ -102,6 +108,26 @@ static void clock_from_datetime(const inkpane_datetime_t *dt, inkpane_clock_t *c
              inkpane_weekday_label(clock->weekday));
     inkpane_date_label(dt->year, dt->month, dt->day, clock->date_label,
                        sizeof(clock->date_label));
+}
+
+/** Fill the cached-screen clock fields straight from the RTC (offline render). */
+static void fill_screen_now_from_rtc(inkpane_screen_t *screen)
+{
+    inkpane_datetime_t dt;
+    if (!read_clock(&dt)) {
+        return;
+    }
+    screen->now_valid = true;
+    screen->now_local = dt;
+    screen->now_hour = dt.hour;
+    screen->now_minute = dt.minute;
+    snprintf(screen->now_time, sizeof(screen->now_time), "%02d:%02d", dt.hour, dt.minute);
+    snprintf(screen->now_date, sizeof(screen->now_date), "%04d-%02d-%02d", dt.year, dt.month,
+             dt.day);
+    snprintf(screen->now_weekday, sizeof(screen->now_weekday), "%s",
+             inkpane_weekday_label(inkpane_weekday_of_date(dt.year, dt.month, dt.day)));
+    inkpane_date_label(dt.year, dt.month, dt.day, screen->now_date_label,
+                       sizeof(screen->now_date_label));
 }
 
 static const inkpane_rect_t *clock_rect(const inkpane_config_t *config)
@@ -337,6 +363,10 @@ static bool connect_wifi(const inkpane_config_t *config)
     return false;
 }
 
+/* Rendering entry points, defined after the fetch path that uses them. */
+static esp_err_t render_zoomed_module(int zoomed_module);
+static esp_err_t render_overview(void);
+
 static void fetch_and_render(inkpane_config_t *config, bool force_full, int64_t now_epoch,
                              bool rtc_ok, const inkpane_datetime_t *dt, bool paint_notice)
 {
@@ -364,8 +394,22 @@ static void fetch_and_render(inkpane_config_t *config, bool force_full, int64_t 
             clear_saved_etag(config);
             return;
         }
-        inkpane_ui_render_full(s_framebuffer, s_screen);
-        esp_err_t err = inkpane_epd_show_full(s_framebuffer);
+        /* Keep a zoomed view across scheduled refreshes: while the panel is
+         * zoomed into a module, repaint that module instead of the overview.
+         * If the module vanished from the new layout, fall back to overview. */
+        int zoom_view = s_persist.zoomed_module;
+        if (zoom_view < 0 || zoom_view >= INKPANE_MODULE_COUNT ||
+            !s_screen->modules[zoom_view].enabled || !s_screen->modules[zoom_view].present) {
+            zoom_view = -1;
+            s_persist.zoomed_module = -1;
+        }
+        esp_err_t err;
+        if (zoom_view >= 0) {
+            err = render_zoomed_module(zoom_view);
+        } else {
+            inkpane_ui_render_full(s_framebuffer, s_screen);
+            err = inkpane_epd_show_full(s_framebuffer);
+        }
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "display refresh failed: %s", esp_err_to_name(err));
             s_persist.fail_count++;
@@ -376,6 +420,10 @@ static void fetch_and_render(inkpane_config_t *config, bool force_full, int64_t 
             clear_saved_etag(config);
             return;
         }
+
+        /* The frame reached the panel; cache the payload for offline button
+         * zooms. Snapshot and ETag both commit only after a successful refresh. */
+        inkpane_snapshot_capture(&s_snapshot, s_screen);
 
         /* Persist the new state only after the frame actually reached the
          * panel; otherwise keep the old ETag/match state so the next wake
@@ -417,6 +465,12 @@ static void fetch_and_render(inkpane_config_t *config, bool force_full, int64_t 
         s_persist.next_net_epoch = base + (int64_t)config->refresh_minutes * 60;
         apply_battery_stretch(base);
         refresh_clock_partial(config);
+        if (!inkpane_snapshot_valid(&s_snapshot)) {
+            /* The ETag survived (e.g. firmware update) but the RTC snapshot
+             * did not: drop it so the next cycle gets a full 200 payload and
+             * rebuilds the snapshot. */
+            clear_saved_etag(config);
+        }
         ESP_LOGI(TAG, "304 not modified");
         return;
     }
@@ -470,14 +524,16 @@ static int detect_pressed_button(void)
 
 /**
  * Render the full-screen zoomed view for `zoomed_module` into the framebuffer.
- * Data is the cached s_screen payload; a NULL s_screen (fetch has never
- * succeeded) falls back to the RTC clock for the clock page and empty-state
- * text for the others. `zoomed_module` must be 0..INKPANE_MODULE_COUNT-1.
+ * Data comes from s_screen, which is rebuilt from the RTC zoom snapshot
+ * captured after the last successful full refresh; with no snapshot the screen
+ * is zeroed and the renderers show their empty states. Clock data is read
+ * fresh from the RTC. `zoomed_module` must be 0..INKPANE_MODULE_COUNT-1.
+ * Returns the panel refresh result so callers can react to a failure.
  */
-static void render_zoomed_module(int zoomed_module)
+static esp_err_t render_zoomed_module(int zoomed_module)
 {
     if (s_framebuffer == NULL || s_screen == NULL) {
-        return;
+        return ESP_ERR_INVALID_STATE;
     }
     inkpane_screen_t *screen = s_screen;
     switch (zoomed_module) {
@@ -513,34 +569,49 @@ static void render_zoomed_module(int zoomed_module)
                                      screen->todo_total);
         break;
     default:
-        return;
+        return ESP_ERR_INVALID_ARG;
     }
-    if (inkpane_epd_show_full(s_framebuffer) != ESP_OK) {
-        /* A failed full refresh usually means the controller lost state; the
-         * next boot re-inits it (same reasoning as fetch_and_render). */
-        s_persist.panel_warm = false;
-    }
+    return inkpane_epd_show_full(s_framebuffer);
 }
 
 /**
  * Render the full overview (all enabled mini modules) from the cached s_screen
- * payload. Used when zooming back out of a full-screen module view.
+ * payload rebuilt from the RTC snapshot. Used when zooming back out of a
+ * full-screen module view. Returns the panel refresh result.
  */
-static void render_overview(void)
+static esp_err_t render_overview(void)
 {
     if (s_framebuffer == NULL || s_screen == NULL) {
-        return;
+        return ESP_ERR_INVALID_STATE;
     }
     inkpane_ui_render_full(s_framebuffer, s_screen);
-    if (inkpane_epd_show_full(s_framebuffer) != ESP_OK) {
-        s_persist.panel_warm = false;
+    return inkpane_epd_show_full(s_framebuffer);
+}
+
+/** Bitmask of enabled+present modules, for logs and diagnostics. */
+static int zoom_enabled_mask(void)
+{
+    if (s_screen == NULL) {
+        return 0;
     }
+    int mask = 0;
+    for (int i = 0; i < INKPANE_MAX_MODULES; ++i) {
+        if (s_screen->modules[i].enabled && s_screen->modules[i].present) {
+            mask |= 1 << i;
+        }
+    }
+    return mask;
 }
 
 /**
  * Handle a button-wake zoom request. Returns true when the view has already
  * been refreshed locally and the normal network path can be skipped; false
  * when the caller should fall through to the regular fetch / refresh logic.
+ *
+ * Data comes from s_screen, rebuilt from the RTC zoom snapshot captured after
+ * the last successful full refresh — so switching views costs no network and
+ * no Wi-Fi handshake. Without a snapshot (first run, re-provision) the screen
+ * is zeroed, nothing is enabled, and the request falls back to the network.
  *
  * Button mapping (active low):
  *   GPIO 4 = previous zoomed module (cycle backwards through the enabled
@@ -566,6 +637,7 @@ static bool handle_zoom_button(int pressed_gpio)
         }
     }
     if (enabled_count == 0) {
+        ESP_LOGW(TAG, "zoom: gpio %d but no enabled module (snapshot empty?)", pressed_gpio);
         return false; /* Nothing to zoom into; fall back to the normal view. */
     }
 
@@ -608,11 +680,23 @@ static bool handle_zoom_button(int pressed_gpio)
         return false;
     }
 
+    ESP_LOGI(TAG, "zoom: gpio=%d %d -> %d (enabled=0x%02x, snapshot=%d)", pressed_gpio, current,
+             next_view, zoom_enabled_mask(), (int)inkpane_snapshot_valid(&s_snapshot));
+    if (next_view == current) {
+        /* Only one module is enabled: prev/next would repaint the very same
+         * page. Skip the full refresh instead of flashing for nothing. */
+        ESP_LOGI(TAG, "zoom: nothing to switch to (%d enabled module(s))", enabled_count);
+        return true;
+    }
+
     s_persist.zoomed_module = next_view;
-    if (next_view < 0) {
-        render_overview();
-    } else {
-        render_zoomed_module(next_view);
+    esp_err_t rendered =
+        next_view < 0 ? render_overview() : render_zoomed_module(next_view);
+    if (rendered != ESP_OK) {
+        /* A failed full refresh usually means the controller lost state; force
+         * the regular network path so the next attempt repaints the panel. */
+        s_persist.panel_warm = false;
+        return false;
     }
     return true;
 }
@@ -633,6 +717,80 @@ static void wait_for_buttons_released(void)
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
+}
+
+/**
+ * Hold the roller "down" key (GPIO 6) for two seconds while powering on to
+ * request the serial debug session. Cold boot only: while deep sleeping the
+ * device has no serial link, so this is the way to get a monitor that survives
+ * several button presses.
+ */
+static bool debug_power_hold_requested(void)
+{
+    if (!inkpane_board_button_held(6)) {
+        return false;
+    }
+    for (int i = 0; i < 20; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        if (!inkpane_board_button_held(6)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * Serial debug session: instead of deep sleeping, stay awake and poll the
+ * roller keys so a serial monitor can follow every zoom decision:
+ *   GPIO 4 / 6 = previous / next module, GPIO 5 = overview <-> first module,
+ *   BOOT (GPIO 0) held 3 s = back to deep sleep, 5 min idle = deep sleep.
+ * Enter it by holding roller "down" while powering on, or by waking the device
+ * with BOOT held (see app_main). The regular refresh cycle already ran, so the
+ * RTC snapshot is populated and zoom behaves exactly like a normal wake.
+ */
+static void debug_session_loop(void)
+{
+    ESP_LOGI(TAG, "DEBUG session: awake; snapshot=%d zoomed=%d enabled=0x%02x",
+             (int)inkpane_snapshot_valid(&s_snapshot), s_persist.zoomed_module,
+             zoom_enabled_mask());
+    ESP_LOGI(TAG, "DEBUG session: roller keys polled, hold BOOT 3 s to sleep, %d s idle timeout",
+             DEBUG_IDLE_SECONDS);
+    int idle = 0;
+    while (idle < DEBUG_IDLE_SECONDS) {
+        int pressed = -1;
+        const int pins[] = {0, 4, 5, 6};
+        for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); ++i) {
+            if (inkpane_board_button_held(pins[i])) {
+                pressed = pins[i];
+                break;
+            }
+        }
+        if (pressed == 0) {
+            int held_ms = 0;
+            while (inkpane_board_button_held(0) && held_ms < 3000) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+                held_ms += 100;
+            }
+            if (held_ms >= 3000) {
+                ESP_LOGI(TAG, "DEBUG session: BOOT held -> next wake deep sleeps");
+                return;
+            }
+            wait_for_buttons_released();
+            idle = 0;
+            continue;
+        }
+        if (pressed > 0) {
+            bool handled = handle_zoom_button(pressed);
+            ESP_LOGI(TAG, "DEBUG gpio=%d handled=%d zoomed=%d enabled=0x%02x", pressed,
+                     (int)handled, s_persist.zoomed_module, zoom_enabled_mask());
+            wait_for_buttons_released();
+            idle = 0;
+            continue;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+        ++idle;
+    }
+    ESP_LOGI(TAG, "DEBUG session: idle timeout, deep sleeping");
 }
 
 static void go_to_sleep(const inkpane_config_t *config, bool rtc_ok, const inkpane_datetime_t *dt)
@@ -716,6 +874,7 @@ void app_main(void)
         s_persist.magic = PERSIST_MAGIC;
         s_persist.tz_offset_minutes = 480;
         s_persist.zoomed_module = -1;
+        inkpane_snapshot_invalidate(&s_snapshot);
     }
     /* A warm panel means ALDO3 stayed powered through deep sleep and the
      * controller was never reset, so no panel init / full repaint is needed. */
@@ -728,6 +887,14 @@ void app_main(void)
         ESP_LOGE(TAG, "board init failed");
     }
 
+    /* Serial debug session: holding the roller "down" key while powering on
+     * keeps the device awake after this cycle (see debug_session_loop). */
+    bool debug_session = false;
+    if (cold_boot && debug_power_hold_requested()) {
+        debug_session = true;
+        ESP_LOGI(TAG, "DEBUG session requested (roller down held at power-on)");
+    }
+
     s_framebuffer = heap_caps_malloc(INKPANE_EPD_FB_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_json_arena = heap_caps_malloc(JSON_ARENA_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_http_body = heap_caps_malloc(HTTP_BODY_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -738,6 +905,15 @@ void app_main(void)
         esp_restart();
     }
     memset(s_framebuffer, 0xFF, INKPANE_EPD_FB_SIZE);
+
+    /* s_screen lives in PSRAM and holds garbage after deep sleep; rebuild it
+     * from the RTC zoom snapshot. Without a valid snapshot the screen is left
+     * zeroed (nothing enabled) and button zooms fall back to the network. */
+    bool snapshot_ok = inkpane_snapshot_restore(&s_snapshot, s_screen);
+    if (snapshot_ok) {
+        fill_screen_now_from_rtc(s_screen);
+    }
+    ESP_LOGI(TAG, "zoom snapshot %s", snapshot_ok ? "restored" : "empty");
 
     if (inkpane_ui_init(NULL, 0) != ESP_OK) {
         ESP_LOGE(TAG, "font init failed");
@@ -792,6 +968,11 @@ void app_main(void)
     bool zoom_handled = false;
     if (button_wake) {
         int pressed_gpio = detect_pressed_button();
+        if (pressed_gpio == 0) {
+            /* BOOT held at wake: stay awake for the serial debug session. */
+            debug_session = true;
+            ESP_LOGI(TAG, "DEBUG session requested (BOOT held at wake)");
+        }
         zoom_handled = handle_zoom_button(pressed_gpio);
         if (zoom_handled) {
             ESP_LOGI(TAG, "zoom view %d via gpio %d", s_persist.zoomed_module, pressed_gpio);
@@ -833,6 +1014,10 @@ void app_main(void)
         /* Timer-driven overview tick: keep the mini clock rectangle fresh.
          * While zoomed the panel already shows the full-screen module view. */
         refresh_clock_partial(&config);
+    }
+
+    if (debug_session) {
+        debug_session_loop();
     }
 
     rtc_ok = read_clock(&dt);

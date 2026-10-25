@@ -6,6 +6,7 @@
 #include "inkpane_font.h"
 #include "inkpane_model.h"
 #include "inkpane_schedule.h"
+#include "inkpane_snapshot.h"
 #include "inkpane_time.h"
 #include "inkpane_ui.h"
 
@@ -416,6 +417,133 @@ static void test_render_zoomed(void)
     free(screen);
 }
 
+/* RTC zoom snapshot: capture -> restore must round-trip everything the
+ * renderers draw, counts must clamp defensively, and long titles must
+ * truncate on a UTF-8 character boundary. */
+static void test_snapshot(void)
+{
+    static inkpane_snapshot_t snapshot; /* ~4.9 KB: keep off the small host stack */
+    char *arena = malloc(256 * 1024);
+    inkpane_screen_t *screen = malloc(sizeof(inkpane_screen_t));
+    inkpane_screen_t *restored = malloc(sizeof(inkpane_screen_t));
+    CHECK(arena != NULL && screen != NULL && restored != NULL);
+    if (arena == NULL || screen == NULL || restored == NULL) {
+        free(arena);
+        free(screen);
+        free(restored);
+        return;
+    }
+
+    /* The snapshot is destined for ESP32-S3 RTC slow memory (~8 KB, shared
+     * with the persist block); keep a hard ceiling on its size. */
+    CHECK(sizeof(inkpane_snapshot_t) < 6 * 1024);
+
+    CHECK(!inkpane_snapshot_valid(&snapshot));
+    CHECK(!inkpane_snapshot_restore(&snapshot, restored));
+    CHECK(restored->modules[0].enabled == false); /* zeroed, never garbage */
+
+    size_t length = 0;
+    char *text = read_file(fixture_path("screen_200.json"), &length);
+    CHECK(text != NULL);
+    if (text == NULL) {
+        free(arena);
+        free(screen);
+        free(restored);
+        return;
+    }
+    CHECK(inkpane_screen_parse(text, length, screen, arena, 256 * 1024));
+    free(text);
+
+    inkpane_snapshot_capture(&snapshot, screen);
+    CHECK(inkpane_snapshot_valid(&snapshot));
+    CHECK(inkpane_snapshot_restore(&snapshot, restored));
+
+    CHECK(memcmp(restored->modules, screen->modules, sizeof(screen->modules)) == 0);
+    CHECK(restored->event_count == screen->event_count);
+    CHECK(restored->event_total == screen->event_total);
+    CHECK(restored->course_count == screen->course_count);
+    CHECK(restored->course_total == screen->course_total);
+    CHECK(restored->todo_count == screen->todo_count);
+    CHECK(restored->todo_total == screen->todo_total);
+    CHECK(restored->month.present == screen->month.present);
+    CHECK(restored->month.days_in_month == screen->month.days_in_month);
+    CHECK(restored->month.today == screen->month.today);
+    CHECK(restored->month.mark_count == screen->month.mark_count);
+    CHECK(memcmp(restored->month.marks, screen->month.marks,
+                 sizeof(screen->month.marks)) == 0);
+    CHECK(restored->weather.present == screen->weather.present);
+    CHECK(restored->weather.forecast_count == screen->weather.forecast_count);
+    for (int i = 0; i < restored->weather.forecast_count; ++i) {
+        CHECK_STR(restored->weather.forecast[i].weekday, screen->weather.forecast[i].weekday);
+        CHECK(restored->weather.forecast[i].min == screen->weather.forecast[i].min);
+        CHECK(restored->weather.forecast[i].max == screen->weather.forecast[i].max);
+    }
+    for (int i = 0; i < restored->event_count; ++i) {
+        CHECK_STR(restored->events[i].title, screen->events[i].title);
+        CHECK(restored->events[i].start_minute == screen->events[i].start_minute);
+        CHECK(restored->events[i].all_day == screen->events[i].all_day);
+    }
+    for (int i = 0; i < restored->todo_count; ++i) {
+        CHECK_STR(restored->todos[i].title, screen->todos[i].title);
+        CHECK_STR(restored->todos[i].due_date, screen->todos[i].due_date);
+        CHECK_STR(restored->todos[i].priority, screen->todos[i].priority);
+    }
+
+    /* Long CJK titles truncate on a character boundary, never mid-sequence. */
+    memset(screen, 0, sizeof(*screen));
+    screen->event_count = 1;
+    screen->event_total = 1;
+    char long_title[128];
+    for (int i = 0; i < 40; ++i) {
+        long_title[i * 3 + 0] = (char)0xE8;
+        long_title[i * 3 + 1] = (char)0xAF;
+        long_title[i * 3 + 2] = (char)0xBE;
+    }
+    long_title[120] = '\0';
+    /* Deliberately overflow the 64-byte snapshot title, ending mid-glyph. */
+    memcpy(screen->events[0].title, long_title, sizeof(screen->events[0].title) - 1);
+    screen->events[0].title[sizeof(screen->events[0].title) - 1] = '\0';
+    screen->events[0].start_minute = 480;
+    inkpane_snapshot_capture(&snapshot, screen);
+    CHECK(inkpane_snapshot_restore(&snapshot, restored));
+    size_t restored_len = strlen(restored->events[0].title);
+    CHECK(restored_len < INKPANE_SNAPSHOT_TITLE_LEN);
+    CHECK(restored_len % 3 == 0); /* whole 3-byte glyphs only */
+    CHECK(restored_len > 0 && strncmp(restored->events[0].title, long_title, restored_len) == 0);
+
+    /* A corrupted RTC payload must be rejected, never rendered. */
+    inkpane_snapshot_capture(&snapshot, screen);
+    CHECK(inkpane_snapshot_valid(&snapshot));
+    uint8_t *raw = (uint8_t *)&snapshot;
+    raw[sizeof(snapshot) / 2] ^= 0xFFu;
+    CHECK(!inkpane_snapshot_valid(&snapshot));
+    CHECK(!inkpane_snapshot_restore(&snapshot, restored));
+    CHECK(restored->modules[0].enabled == false); /* zeroed, not garbage */
+
+    /* Counts clamp defensively instead of trusting the payload. */
+    screen->event_count = 99;
+    screen->event_total = 99;
+    screen->month.mark_count = 99;
+    screen->month.days_in_month = 99;
+    screen->weather.forecast_count = 99;
+    inkpane_snapshot_capture(&snapshot, screen);
+    CHECK(snapshot.event_count == INKPANE_MAX_EVENTS);
+    CHECK(snapshot.month.mark_count == INKPANE_MAX_MARKS);
+    CHECK(snapshot.month.days_in_month == 31);
+    CHECK(snapshot.weather.forecast_count == INKPANE_MAX_FORECAST);
+    CHECK(inkpane_snapshot_restore(&snapshot, restored));
+    CHECK(restored->event_count == INKPANE_MAX_EVENTS);
+    CHECK(restored->month.mark_count == INKPANE_MAX_MARKS);
+    CHECK(restored->weather.forecast_count == INKPANE_MAX_FORECAST);
+
+    inkpane_snapshot_invalidate(&snapshot);
+    CHECK(!inkpane_snapshot_valid(&snapshot));
+
+    free(arena);
+    free(screen);
+    free(restored);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -436,6 +564,8 @@ int main(int argc, char **argv)
     test_render();
     printf("== render zoomed ==\n");
     test_render_zoomed();
+    printf("== snapshot ==\n");
+    test_snapshot();
 
     if (g_failures == 0) {
         printf("all host tests passed\n");

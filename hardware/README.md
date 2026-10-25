@@ -24,6 +24,7 @@ ESP-IDF v6.0.2 工程，包含屏幕驱动、板级驱动、六模块渲染、Wi
 | 事件总数 | 服务端 `eventTotal/courseTotal/todoTotal` 可大于数组上限（32/16/8）；标题计数与「还有 N 项」用真实总数 |
 | ETag / 304 | 内容没变时不重绘；**只有全刷成功后才保存 ETag / 刷新间隔 / 时区**，刷屏失败会清空 ETag 并重试 |
 | 双周期休眠 | 每分钟唤醒只局刷时钟；按 `refreshMinutes` 联网拉屏；按键唤醒立即刷新 |
+| 按键放大 | 滚轮 4/6 循环模块、5 在总览与首个模块间切换；视图数据来自 RTC 浓缩快照（约 4.9 KB），离线也能翻页 |
 | 深睡局刷 | 深睡时保留 ALDO3 面板供电、控制器不复位；分钟级局刷无黑闪，冷启动/跨天/满 60 次局刷后全刷 |
 | RTC | 保留 PCF85063 OS 位；未校时前显示「等待校时」，200 的 `localIso` 或 304 的 `Date` 头校准后清 OS |
 | 低电 | 低于 20% 时 200 与 304 都把联网间隔拉长到至少 120 分钟，并显示「低电」 |
@@ -65,6 +66,16 @@ powershell -ExecutionPolicy Bypass -File hardware/tools/build.ps1 -Size
 
 构建日志在 `%TEMP%\inkpane-build\build.log`。**不要把构建目录放在仓库内**：
 路径超过 260 字符时 gcc 写 `.obj.d` 会失败，这是 Windows 上的已知坑。
+
+> **烧录务必用 `build.ps1 -Flash`**（它烧 `%TEMP%\inkpane-build` 的最新产物）。
+> 仓库内的 `hardware/main/build/` 是历史遗留的本地构建目录（已 gitignore），里面的
+> 固件可能是旧的——用它烧录会出现「按键放大显示负数/方框」这类老问题。新固件的启动日志
+> 含 `zoom snapshot ...` 一行，可据此确认烧对了版本。
+
+> **按键问题怎么抓串口日志**：深睡会切断 USB CDC。上电时按住滚轮「下」键 2 秒（或深睡时
+> 按住 BOOT 唤醒）进入驻留调试会话：设备保持唤醒、轮询按键并打印每一步
+> `zoom: gpio=... enabled=0x..`，长按 BOOT 3 秒回到深睡。细节见
+> [docs/FIRMWARE.md](docs/FIRMWARE.md) 的「串口调试会话」。
 
 ### Host 测试与渲染预览
 
@@ -113,7 +124,7 @@ hardware/
 │   ├── components/
 │   │   ├── inkpane_board/    # I2C、AXP2101、PCF85063、SHTC3、按键
 │   │   ├── inkpane_epd/      # SSD1683 面板驱动（全刷/局刷/休眠）
-│   │   ├── inkpane_model/    # JSON/时间/调度（纯 C，host 可测）
+│   │   ├── inkpane_model/    # JSON/时间/调度/RTC 快照（纯 C，host 可测）
 │   │   ├── inkpane_ui/       # 1-bit 画布、字库、六模块
 │   │   ├── inkpane_net/      # Wi-Fi、HTTP、NVS 配置
 │   │   └── inkpane_prov/     # AP + DNS + 配网网页
