@@ -23,6 +23,7 @@ import { createCoursesRouter } from './modules/courses/routes.js';
 import { createTodosRouter } from './modules/todos/routes.js';
 import { createWeatherRouter } from './modules/weather/routes.js';
 import { createDisplayRouter } from './modules/display/routes.js';
+import { createVoiceRouter } from './modules/voice/routes.js';
 import { createDeviceRouter } from './modules/device/routes.js';
 import { createDevicesRouter } from './modules/devices/routes.js';
 import { getDatabase } from './db/client.js';
@@ -116,6 +117,7 @@ export function createApp(): Express {
   app.use('/api/todos', createTodosRouter());
   app.use('/api/weather', createWeatherRouter());
   app.use('/api/display', createDisplayRouter());
+  app.use('/api/voice', createVoiceRouter());
 
   mountStaticApp(app);
 

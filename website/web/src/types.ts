@@ -510,6 +510,26 @@ export interface DeviceScreenPayload {
   events: DeviceEvent[];
   courses: DeviceEvent[];
   todos: DeviceTodo[];
+  /** 语音助手配置（计入设备 ETag）；旧版服务端可能没有该字段 */
+  voice?: VoiceSettings | null;
+}
+
+/* ------------------------------------------------------------------ *
+ * 语音助手
+ * ------------------------------------------------------------------ */
+
+/** 用户级语音助手设置，按账号保存并随设备屏幕数据下发。 */
+export interface VoiceSettings {
+  enabled: boolean;
+  /** 允许语音助手修改日程与待办；写接口仍要求设备令牌 */
+  allowControl: boolean;
+  otaUrl: string;
+  /** 1–8 个唤醒词，每个 2–12 个汉字 */
+  wakeWords: string[];
+  /** 唤醒灵敏度 0–100 */
+  wakeThreshold: number;
+  /** 音量 0–100 */
+  volume: number;
 }
 
 export type UserRole = 'admin' | 'user';

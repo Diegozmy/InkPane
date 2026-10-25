@@ -31,6 +31,7 @@ import {
 import { listCategories } from '../categories.js';
 import { queryOccurrences } from '../events/service.js';
 import { readDisplayLayout, readDisplayTimezone, readRefreshMinutes } from '../display/settings.js';
+import { readVoiceSettings } from '../voice/settings.js';
 import { countOpenTodos, listOpenTodos } from '../todos/repository.js';
 import { getWeatherForScreen } from '../weather/service.js';
 import { listCourseEventIds } from '../device/repository.js';
@@ -116,6 +117,8 @@ function computeEtag(content: DeviceScreenContent): string {
     eventTotal: content.eventTotal,
     courseTotal: content.courseTotal,
     todoTotal: content.todoTotal,
+    // 语音配置变化（开关、唤醒词、音量…）同样需要让设备重新拉取
+    voice: content.voice ?? null,
   };
   return `"${createHash('sha1').update(JSON.stringify(source)).digest('hex')}"`;
 }
@@ -211,6 +214,7 @@ export function buildDeviceScreenPayload(
     eventTotal: allEvents.length,
     courseTotal: allCourses.length,
     todoTotal,
+    voice: readVoiceSettings(db, userId),
   };
 
   return { ...content, etag: computeEtag(content) };

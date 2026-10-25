@@ -416,3 +416,62 @@ export const deviceSettingsSchema = z
 
 export type DeviceTelemetryInput = z.infer<typeof deviceTelemetrySchema>;
 export type DeviceSettingsInput = z.infer<typeof deviceSettingsSchema>;
+
+/* ------------------------------------------------------------------ *
+ * 语音助手设置
+ * ------------------------------------------------------------------ */
+
+/** 唤醒词只支持中文：2–12 个汉字（模型词表限制，见 DEVICE-API.md）。 */
+export const VOICE_WAKE_WORD_PATTERN = /^[\u4e00-\u9fa5]{2,12}$/;
+
+export const voiceOtaUrlSchema = z
+  .string()
+  .trim()
+  .min(1, 'OTA 地址不能为空')
+  .max(200, 'OTA 地址不能超过 200 个字符')
+  .refine(
+    (value) => {
+      try {
+        const url = new URL(value);
+        return url.protocol === 'http:' || url.protocol === 'https:';
+      } catch {
+        return false;
+      }
+    },
+    { message: 'OTA 地址必须是 http:// 或 https:// 开头的合法 URL' },
+  );
+
+export const wakeWordSchema = z
+  .string()
+  .trim()
+  .regex(VOICE_WAKE_WORD_PATTERN, '唤醒词必须是 2–12 个汉字');
+
+/** 1–8 条，逐条 trim 后校验并去重；去重后仍保留原顺序。 */
+export const wakeWordsSchema = z
+  .array(wakeWordSchema)
+  .min(1, '至少需要填写 1 个唤醒词')
+  .max(8, '最多支持 8 个唤醒词')
+  .transform((words) => [...new Set(words)]);
+
+export const voiceUpdateSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    allowControl: z.boolean().optional(),
+    otaUrl: voiceOtaUrlSchema.optional(),
+    wakeWords: wakeWordsSchema.optional(),
+    wakeThreshold: z
+      .number()
+      .int('唤醒灵敏度必须是整数')
+      .min(0, '唤醒灵敏度必须在 0–100 之间')
+      .max(100, '唤醒灵敏度必须在 0–100 之间')
+      .optional(),
+    volume: z
+      .number()
+      .int('音量必须是整数')
+      .min(0, '音量必须在 0–100 之间')
+      .max(100, '音量必须在 0–100 之间')
+      .optional(),
+  })
+  .strict();
+
+export type VoiceUpdateInput = z.infer<typeof voiceUpdateSchema>;

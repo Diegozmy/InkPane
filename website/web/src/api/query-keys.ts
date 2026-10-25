@@ -16,6 +16,7 @@ export const queryKeys = {
   weatherSearch: (query: string) => ['weather', 'search', query] as const,
   display: ['display'] as const,
   screen: ['display', 'screen'] as const,
+  voice: ['voice'] as const,
   devices: ['devices'] as const,
 };
 

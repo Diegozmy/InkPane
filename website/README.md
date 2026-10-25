@@ -1,7 +1,7 @@
 # InkPane 墨窗 · 控制台
 
-InkPane 墨窗的桌面端管理后台。日程、课程、待办、天气与桌面墨水屏的窗格布局都在这里整理；
-设备端通过一套稳定的 HTTP 契约拉取屏幕数据，不依赖云服务。
+InkPane 墨窗的桌面端管理后台。日程、课程、待办、天气、桌面墨水屏的窗格布局与语音助手设置
+都在这里整理；设备端通过一套稳定的 HTTP 契约拉取屏幕数据，不依赖云服务。
 
 一个后端可以服务多个账号，每个账号的数据按 `user_id` 隔离，并可绑定多台硬件设备。
 前端 React 18 + TypeScript + Vite，后端 Express + `node:sqlite`，数据全部保存在本机。
@@ -126,6 +126,15 @@ npm start            # 后端同时托管 web/dist，访问 http://127.0.0.1:400
 - 遥测状态：最近上报、电量、信号、固件版本、室内温湿度
 - 接入步骤与「硬件对接文档」直达链接
 
+**语音助手**
+
+- 启用/停用常驻语音、是否允许语音修改日程与待办
+- 小智 OTA 地址（默认官方云，也可填自建 `xiaozhi-esp32-server`）
+- 自定义唤醒词 1–8 条（每条 2–12 个汉字）、唤醒灵敏度、音量
+- 设置按用户保存，随 `/api/device/screen` 的 `voice` 字段下发；改唤醒词/音量/权限即时生效，
+  改启用开关或 OTA 地址后设备自动重启一次
+- 首次激活：设备屏幕显示 6 位码，到 `xiaozhi.me` 输入绑定；设备令牌可写，泄露后请轮换
+
 **课程同步**
 
 - 从 `ws8.yucai.sh.cn` 读取课表并生成每周重复的日程
@@ -184,12 +193,17 @@ npm start            # 后端同时托管 web/dist，访问 http://127.0.0.1:400
 
 | 接口 | 鉴权 | 说明 |
 | --- | --- | --- |
-| `GET /api/device/screen` | `X-Device-Token` | 屏幕数据；支持 `If-None-Match`，未变化返回 304 |
+| `GET /api/device/screen` | `X-Device-Token` | 屏幕数据（含 `voice` 配置）；支持 `If-None-Match`，未变化返回 304 |
 | `POST /api/device/telemetry` | `X-Device-Token` | 上报温湿度、电量、信号与固件版本 |
+| `GET /api/device/context` | `X-Device-Token` | 语音读写前的今日上下文：时间、时区、今日日程/课程、未完成待办 |
+| `POST/PATCH/DELETE /api/device/events`、`/api/device/todos` | `X-Device-Token` | 语音 MCP 工具调用；按用户隔离、按设备限流 20 次/60 秒 |
 | `GET /api/display` / `PUT /api/display` | 控制台会话 | 窗格布局、刷新间隔与时区 |
+| `GET /api/voice` / `PUT /api/voice` | 控制台会话 | 语音开关、允许修改、OTA 地址、唤醒词、灵敏度与音量 |
 | `GET/POST /api/devices`、`POST /api/devices/:id/rotate` | 控制台会话 | 管理当前账号的设备与令牌 |
 
-设备令牌在控制台「屏幕与设备」页创建设备时获取一次。默认服务只监听 `127.0.0.1`，设备接入时：
+设备令牌在控制台「屏幕与设备」页创建设备时获取一次；语音控制会用到同一令牌调用
+`/api/device/context` 与写接口，令牌泄露后请在控制台轮换并重新配网。默认服务只监听
+`127.0.0.1`，设备接入时：
 
 1. 用 `npm run dev:lan` 启动（等价于 `HOST=0.0.0.0`），或在 `server/.env` 里改 `HOST=0.0.0.0` 后重启；
 2. 看启动日志里「设备端可填写：`http://<本机局域网 IP>:4000`」这一行，把该地址填进设备配网页；
@@ -256,5 +270,6 @@ RTC 走时，不会因为分钟数变化而触发整屏重绘。
 ## 文档
 
 - [架构说明](docs/ARCHITECTURE.md)：分层设计、数据流、重复日程引擎与关键取舍
-- [REST API](docs/API.md)：完整的接口说明、参数、示例与错误码
+- [REST API](docs/API.md)：完整的接口说明、参数、示例与错误码（含 `/api/voice` 与设备写接口）
 - [设备端 API 与硬件对接](docs/DEVICE-API.md)：鉴权、屏幕契约、渲染规范、低功耗、ESP-IDF 示例
+- [语音助手配置与验收](../hardware/docs/VOICE.md)：激活、自定义唤醒词、语音控制、隐私、功耗与排障

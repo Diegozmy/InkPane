@@ -20,7 +20,8 @@ Base URL：`http://127.0.0.1:4000/api`（开发期前端通过 Vite 代理访问
 | `/api/todos` | 待办清单 | 本文「待办」 |
 | `/api/weather` | 天气快照、设置与城市搜索 | 本文「天气」 |
 | `/api/display` | 墨水屏布局、刷新间隔与时区 | 本文「屏幕布局」 |
-| `/api/device` | 设备端拉屏与遥测（令牌鉴权） | 本文「设备」 |
+| `/api/voice` | 语音助手设置（启用、唤醒词、音量等） | 本文「语音助手」 |
+| `/api/device` | 设备端拉屏、上下文、遥测与写接口（令牌鉴权） | 本文「设备」 |
 
 除 `/api/health`、`/api/setup`、`/api/auth/login`、`/api/auth/logout` 与 `/api/device/*` 外，所有接口都要求
 控制台会话 Cookie；用户数据按会话中的 `user_id` 隔离。`/api/device/screen` 使用
@@ -1137,9 +1138,71 @@ SSRF 校验：只允许 `http` / `https`，禁止 URL 内嵌用户名密码，�
 
 ---
 
+## 语音助手
+
+语音助手设置按**用户**保存在 `app_settings`（键前缀 `voice.`），同一账号的所有设备共用。
+设置的完整副本随设备屏幕数据 `DeviceScreenPayload.voice` 下发，并**参与 ETag**，
+因此改任一字段都会让设备在下次拉取时重新渲染。
+
+控制台卡片：「屏幕与设备 → 语音助手」。语音助手修改日程与待办走设备写接口
+（`/api/device/events`、`/api/device/todos`），使用设备令牌鉴权，只能操作令牌所属用户的数据。
+
+### `GET /api/voice`
+
+需要控制台会话。未设置过的账号返回默认值：
+
+```json
+{
+  "data": {
+    "enabled": true,
+    "allowControl": true,
+    "otaUrl": "https://api.tenclass.net/xiaozhi/ota/",
+    "wakeWords": ["你好小智"],
+    "wakeThreshold": 65,
+    "volume": 60
+  }
+}
+```
+
+### `PUT /api/voice`
+
+局部更新：只传要改的字段，未传字段保持原值。响应体为更新后的完整设置。
+
+```json
+{
+  "enabled": true,
+  "allowControl": true,
+  "otaUrl": "https://api.tenclass.net/xiaozhi/ota/",
+  "wakeWords": ["你好小智", "小墨"],
+  "wakeThreshold": 65,
+  "volume": 60
+}
+```
+
+校验规则（`.strict()`：多余字段同样拒绝；不满足返回 `422 VALIDATION_FAILED`，
+错误消息为中文，`details[].path` 指向字段）：
+
+| 字段 | 类型 | 规则 |
+| --- | --- | --- |
+| `enabled` | boolean | 可选；是否启用语音助手 |
+| `allowControl` | boolean | 可选；是否允许语音修改日程与待办 |
+| `otaUrl` | string | 可选；`http://` 或 `https://` 开头的合法 URL，≤200 字符 |
+| `wakeWords` | string[] | 可选；1–8 条，每条 trim 后为 2–12 个汉字（`/^[\u4e00-\u9fa5]{2,12}$/`），自动去重 |
+| `wakeThreshold` | integer | 可选；0–100 |
+| `volume` | integer | 可选；0–100 |
+
+说明：
+
+- 唤醒词只支持中文，且受小智模型词表限制；不在词表里的词可能无法唤醒。
+- 设备屏幕首次激活会显示 6 位验证码，到 [xiaozhi.me](https://xiaozhi.me) 输入即可绑定。
+- 启用后麦克风常驻监听唤醒词；介意隐私时请关闭 `enabled`。
+- 设备令牌可写入日程与待办，泄露后请立刻在控制台轮换。
+
+---
+
 ## 设备
 
-设备拉屏与遥测使用**每设备令牌** `X-Device-Token` 鉴权；令牌在控制台
+设备拉屏、上下文、遥测与写接口使用**每设备令牌** `X-Device-Token` 鉴权；令牌在控制台
 `/api/devices` 创建/轮换。设备端的完整对接说明见 [DEVICE-API.md](DEVICE-API.md)。
 
 > **v4 变更：** `/api/device/status`、`/api/device/settings`、`/api/device/token`
@@ -1158,7 +1221,8 @@ SSRF 校验：只允许 `http` / `https`，禁止 URL 内嵌用户名密码，�
 `If-None-Match` 的值）、`screen`（宽高、`refreshMinutes`、`layout`）、`now`
 （`iso` / `time` / `weekday` / `date` / `dateLabel`）、`month`（`year` / `month` /
 `firstWeekday` / `daysInMonth` / `today` / `marks`）、`weather`（`WeatherSnapshot` 或
-`null`）、`events`、`courses`、`todos`，以及 `eventTotal` / `courseTotal` / `todoTotal`。
+`null`）、`events`、`courses`、`todos`、`voice`（`DeviceVoiceConfig`，见「语音助手」），
+以及 `eventTotal` / `courseTotal` / `todoTotal`。
 
 数组按屏幕容量截断，**totals 表示截断前的真实数量**：
 
@@ -1169,9 +1233,46 @@ SSRF 校验：只允许 `http` / `https`，禁止 URL 内嵌用户名密码，�
 | `todos`（未完成待办） | 8 | `todoTotal` |
 
 `eventTotal` / `courseTotal` 基于今日最多 500 条日程查询统计，`todoTotal` 为未完成待办全量计数。
-ETag 的哈希源包含这三个 totals：数组被截断时，新增条目或完成一条不在前 8 的待办
-仍会改变 ETag，保证设备不会漏掉“数量变化”。完整字段说明、ETag 计算范围与完整示例见
+ETag 的哈希源包含这三个 totals 与 `voice`：数组被截断时，新增条目或完成一条不在前 8 的待办、
+以及语音设置的任一变化，仍会改变 ETag。完整字段说明、ETag 计算范围与完整示例见
 [DEVICE-API.md](DEVICE-API.md) 第 6.2、7 节。
+
+### `GET /api/device/context`
+
+语音助手用的**今日上下文**，需要 `X-Device-Token`。返回 `now`（时间/时区）、`events`
+（最多 20 条）、`courses`（最多 20 条）与 `todos`（最多 10 条），字段与完整示例见
+[DEVICE-API.md](DEVICE-API.md) 第 6.7 节。数据与屏幕同源同时区，无 ETag、不缓存。
+
+```json
+{
+  "data": {
+    "now": { "iso": "2026-10-25T12:30:00.000Z", "date": "2026-10-25", "time": "20:30", "weekday": "周六", "utcOffsetMinutes": 480, "timezone": "Asia/Shanghai" },
+    "events": [],
+    "courses": [],
+    "todos": []
+  }
+}
+```
+
+### 设备写接口
+
+供语音助手修改日程与待办，全部需要 `X-Device-Token`：
+
+| 方法 | 路径 | 请求体 | 成功响应 |
+| --- | --- | --- | --- |
+| `POST` | `/api/device/events` | 与 `POST /api/events` 相同 | `201 { data: EventRecord }` |
+| `PATCH` | `/api/device/events/:id` | 与 `PATCH /api/events/:id` 相同 | `200 { data: EventRecord }` |
+| `DELETE` | `/api/device/events/:id` | 无 | `204` |
+| `POST` | `/api/device/todos` | 与 `POST /api/todos` 相同 | `201 { data: Todo }` |
+| `PATCH` | `/api/device/todos/:id` | 与 `PATCH /api/todos/:id` 相同 | `200 { data: Todo }` |
+| `DELETE` | `/api/device/todos/:id` | 无 | `204` |
+
+- 所有权：令牌解析出的 `userId` 决定读写范围，跨用户 `:id` 一律 `404`。
+- 校验：与对应控制台接口共用 Zod schema（`.strict()`），失败返回 `422 VALIDATION_FAILED`。
+- 限流：按设备 **20 次/60s**，超出返回 `429 RATE_LIMITED` 与 `Retry-After`；读接口不受影响。
+- 日志：每次写操作以 `logger.info` 记录 `deviceId`、`userId`、`action` 与资源 id。
+- `voice.allowControl` 为 `false` 时设备端应拒绝调用这些接口；服务端不额外拦截，
+  安全边界仍是设备令牌。
 
 ### `POST /api/device/telemetry`
 

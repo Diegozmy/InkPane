@@ -11,7 +11,7 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 文档版本 | v3（多用户/多设备 + 事件总数与渲染上限） |
+| 文档版本 | v4（多用户/多设备 + 语音助手上下文与设备写接口） |
 | 生效时间 | 2026-10 起 |
 | 适用固件 | ESP-IDF **v6.0.2**（参考实现位于 `hardware/main`，已用 `C:\esp\v6.0.2\esp-idf` 验证构建） |
 | 适用服务端 | `website/server`（Express + `node:sqlite`） |
@@ -23,7 +23,9 @@
   必须忽略不认识的字段，而不是解析失败。
 - **不要依赖响应中字段的排列顺序。** JSON 对象无序，示例中的顺序只为便于阅读。
 - **每台设备一个令牌。** 一个后端可以服务多个用户；设备令牌绑定到某台设备，再解析出
-  所属用户。设备端只读 `/api/device/screen`、只写 `/api/device/telemetry`。
+  所属用户。设备端读取 `/api/device/screen` 与 `/api/device/context`，写入
+  `/api/device/telemetry`（遥测）以及 `/api/device/events`、`/api/device/todos`
+  （语音助手修改日程与待办，可选实现）。
 
 下文所有时间均为 **ISO-8601**；日期为 `YYYY-MM-DD`；时区由用户在控制台配置，默认 `Asia/Shanghai`。
 
@@ -169,7 +171,7 @@ curl -s -X POST http://127.0.0.1:4000/api/device/telemetry \
 
 ## 4. 鉴权
 
-拉屏与遥测两个设备接口使用**每设备独立令牌**，令牌放在请求头 `X-Device-Token` 中：
+拉屏、上下文与遥测、写接口使用**每设备独立令牌**，令牌放在请求头 `X-Device-Token` 中：
 
 ```http
 GET /api/device/screen HTTP/1.1
@@ -182,8 +184,8 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
 | --- | --- |
 | 头名称 | `X-Device-Token` |
 | 令牌形态 | 32 位小写十六进制（16 字节随机数，服务端生成，长度固定） |
-| 生效范围 | `/api/device/screen`、`/api/device/telemetry` |
-| 绑定关系 | 每个令牌对应一台 `devices` 行，进而解析出所属用户；A 的令牌只能拉 A 的数据 |
+| 生效范围 | `/api/device/screen`、`/api/device/context`、`/api/device/telemetry`、`/api/device/events*`、`/api/device/todos*` |
+| 绑定关系 | 每个令牌对应一台 `devices` 行，进而解析出所属用户；A 的令牌只能读写 A 的数据 |
 | 不需要令牌 | `/api/health`、`/api/setup/*`、`/api/auth/*` |
 
 **生成与轮换**
@@ -212,7 +214,11 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
 **安全边界（请如实告知使用者）**
 
 - 本服务定位是**本地/可信局域网工具**；管理接口已要求登录，但服务本身不内置 TLS。
-- 令牌等同设备密码：拿到令牌即可读取该用户的屏幕数据、伪造该设备的遥测。
+- 令牌等同设备密码：拿到令牌即可读取该用户的屏幕数据、伪造该设备的遥测，
+  也可以通过 `/api/device/events`、`/api/device/todos` 修改该用户的日程与待办。
+  **一旦怀疑令牌泄露，请立刻在控制台「屏幕与设备 → 轮换令牌」**；旧令牌立即失效。
+- `voice.allowControl`（控制台「允许语音修改日程与待办」）是**设备侧策略开关**：
+  它随屏幕数据下发，固件在调用写接口前应检查它；真正的安全边界仍然是设备令牌。
 - 若需要跨网访问，请在前面放一层反向代理（Nginx / Caddy）并启用 HTTPS，
   只暴露 `/api/device/*`，控制台走独立入口。
 - 设备端固件不应在串口日志里打印完整令牌；打印 `tokenPrefix`（前 4 后 4 位）即可。
@@ -224,7 +230,14 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
 | --- | --- | --- | --- | --- |
 | `GET` | `/api/health` | 否 | 服务存活与结构版本 | 幂等 |
 | `GET` | `/api/device/screen` | 设备令牌 | 拉取屏幕数据，支持 `If-None-Match` / `304` | 幂等 |
+| `GET` | `/api/device/context` | 设备令牌 | 今日上下文（时间、日程、课程、待办），供语音助手读取 | 幂等 |
 | `POST` | `/api/device/telemetry` | 设备令牌 | 上报设备状态（温湿度、电量、RSSI 等） | 非幂等（每次上报产生新的 `receivedAt`） |
+| `POST` | `/api/device/events` | 设备令牌 | 创建日程（语音助手），限流 20 次/60s | 非幂等 |
+| `PATCH` | `/api/device/events/:id` | 设备令牌 | 修改日程，限流 20 次/60s | 幂等 |
+| `DELETE` | `/api/device/events/:id` | 设备令牌 | 删除日程，限流 20 次/60s | 幂等 |
+| `POST` | `/api/device/todos` | 设备令牌 | 创建待办（语音助手），限流 20 次/60s | 非幂等 |
+| `PATCH` | `/api/device/todos/:id` | 设备令牌 | 修改待办，限流 20 次/60s | 幂等 |
+| `DELETE` | `/api/device/todos/:id` | 设备令牌 | 删除待办，限流 20 次/60s | 幂等 |
 | `GET` | `/api/devices` | 控制台会话 | 当前账号的设备列表与遥测 | 幂等 |
 | `POST` | `/api/devices` | 控制台会话 | 创建设备，完整令牌只返回一次 | 非幂等 |
 | `POST` | `/api/devices/:id/rotate` | 控制台会话 | 轮换令牌，旧令牌立即失效 | 非幂等 |
@@ -232,8 +245,12 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
 | `GET` | `/api/display` | 控制台会话 | 读取布局、刷新间隔与时区 | 幂等 |
 | `PUT` | `/api/display` | 控制台会话 | 修改布局、刷新间隔与时区 | 幂等 |
 | `GET` | `/api/display/screen` | 控制台会话 | 控制台预览用屏幕数据（无 ETag） | 幂等 |
+| `GET` | `/api/voice` | 控制台会话 | 读取语音助手设置 | 幂等 |
+| `PUT` | `/api/voice` | 控制台会话 | 修改语音助手设置 | 幂等 |
 
 请求体上限默认 `256kb`（`BODY_LIMIT`），遥测与设置请求体远小于该值。
+设备写接口另有独立限流：**每台设备 60 秒内最多 20 次写操作**，超出返回
+`429 RATE_LIMITED` 并带 `Retry-After`；读接口不受该限流影响。
 
 ## 6. 接口详情
 
@@ -310,7 +327,7 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
 时间相关、但不会改变画面的字段。因此：
 
 - 只是分钟数变化 → ETag 不变 → `304`，设备不重绘（时钟由本地 RTC 走时）。
-- 日程、待办、天气、布局、`refreshMinutes` 任一变化 → ETag 变化 → `200`，设备重绘。
+- 日程、待办、天气、布局、`refreshMinutes`、语音设置（`voice`）任一变化 → ETag 变化 → `200`，设备重绘。
 - `now.date` / `now.weekday` / `now.dateLabel` / `month` 参与哈希，跨天时 ETag 必然变化。
 
 状态码：`200`、`304`、`401 UNAUTHORIZED`、`500 INTERNAL_ERROR`。
@@ -448,6 +465,152 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
 
 状态码：`200`、`500 INTERNAL_ERROR`。
 
+### 6.7 `GET /api/device/context`
+
+用途：给设备端语音助手（MCP 工具）读取**今天**的上下文。数据与屏幕数据同源、同用户时区：
+日程与课程按开始时间升序，全天的排在前；待办为未完成项。语音助手在回答
+「今天有什么安排」或修改数据前应先调用它，而不是凭记忆编造。
+
+请求：`X-Device-Token`（必填）。无 ETag，不缓存，每次返回实时数据。
+
+```json
+{
+  "data": {
+    "now": {
+      "iso": "2026-10-25T12:30:00.000Z",
+      "date": "2026-10-25",
+      "time": "20:30",
+      "weekday": "周六",
+      "utcOffsetMinutes": 480,
+      "timezone": "Asia/Shanghai"
+    },
+    "events": [
+      {
+        "id": "42:2026-10-25",
+        "eventId": 42,
+        "title": "晨会",
+        "startAt": "2026-10-25",
+        "endAt": "2026-10-25",
+        "allDay": true,
+        "location": "二楼会议室",
+        "isCourse": false
+      }
+    ],
+    "courses": [
+      {
+        "id": "1102:2026-10-25T00:00:00.000Z",
+        "eventId": 1102,
+        "title": "高三语文1-1",
+        "startAt": "2026-10-25T00:00:00.000Z",
+        "endAt": "2026-10-25T00:40:00.000Z",
+        "allDay": false,
+        "location": "301",
+        "isCourse": true
+      }
+    ],
+    "todos": [
+      { "id": 7, "title": "交作业", "dueDate": "2026-10-25", "priority": "urgent" }
+    ]
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `now.iso` | string | 服务端当前时刻（ISO-8601 UTC） |
+| `now.date` | string | 用户时区下的今天 `YYYY-MM-DD` |
+| `now.time` | string | 用户时区下的 `HH:MM` |
+| `now.weekday` | string | `周一` … `周日` |
+| `now.utcOffsetMinutes` | integer | 用户时区相对 UTC 的偏移分钟数（东八区 `480`） |
+| `now.timezone` | string | 用户显示时区 IANA 名称 |
+| `events` | array | 今日非课程日程，**最多 20 条**；字段同下方 `DeviceContextEvent` |
+| `courses` | array | 今日课程，**最多 20 条**；结构与 `events` 相同 |
+| `todos` | array | 未完成待办，**最多 10 条**，按 `sortOrder` 升序 |
+
+`DeviceContextEvent`：`id`（`${eventId}:${occurrenceKey}`）、`eventId`、`title`、
+`startAt`、`endAt`、`allDay`、`location`、`isCourse`。全天事件的 `startAt` / `endAt`
+为 `YYYY-MM-DD`，定时事件为 ISO-8601 UTC。
+
+`DeviceContextTodo`：`id`、`title`、`dueDate`（`YYYY-MM-DD` 或 `null`）、`priority`。
+
+状态码：`200`、`401 UNAUTHORIZED`、`500 INTERNAL_ERROR`。上下文**不参与**屏幕 ETag。
+
+### 6.8 设备写接口（日程与待办）
+
+用途：语音助手在用户确认后创建、修改、删除日程与待办。所有写接口：
+
+- 必须带 `X-Device-Token` 与 `Content-Type: application/json`；
+- 只能操作**令牌所属用户**的数据：跨用户的 `:id` 一律返回 `404 NOT_FOUND`；
+- 参数校验失败返回 `422 VALIDATION_FAILED`（`details[].path` 指出字段）；
+- 按设备限流 **20 次/60s**，超出返回 `429 RATE_LIMITED` 与 `Retry-After`；
+- 服务端以 `logger.info` 记录每次写操作（`deviceId`、`userId`、`action`、资源 id）。
+
+| 方法 | 路径 | 请求体 | 成功响应 |
+| --- | --- | --- | --- |
+| `POST` | `/api/device/events` | `EventCreate` | `201 { "data": EventRecord }` |
+| `PATCH` | `/api/device/events/:id` | `EventUpdate`（至少 1 个字段） | `200 { "data": EventRecord }` |
+| `DELETE` | `/api/device/events/:id` | 无 | `204`（无响应体） |
+| `POST` | `/api/device/todos` | `TodoCreate` | `201 { "data": Todo }` |
+| `PATCH` | `/api/device/todos/:id` | `TodoUpdate`（至少 1 个字段） | `200 { "data": Todo }` |
+| `DELETE` | `/api/device/todos/:id` | 无 | `204`（无响应体） |
+
+`EventCreate`（与 `POST /api/events` 同一套 Zod 校验，`.strict()`，多余字段返回 422）：
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `title` | 是 | 1–120 字符 |
+| `startAt` / `endAt` | 是 | `YYYY-MM-DD` 或可解析的时间串；全天事件用日期串 |
+| `allDay` | 否 | 默认 `false` |
+| `description` / `location` / `tags` / `color` / `priority` / `status` | 否 | 与 `POST /api/events` 相同 |
+| `timezone` | 否 | 默认取用户显示时区；重复规则展开按此时区 |
+| `rrule` / `remindMinutesBefore` | 否 | 重复规则与提醒 |
+| `categoryId` | 否 | 必须属于当前用户，否则 422 |
+
+`TodoCreate`：`title` 必填（1–200 字符），`notes` / `priority` / `dueDate` /
+`categoryId` / `sortOrder` 可选。`TodoUpdate` 额外支持 `done`。
+
+示例（创建一条今天全天的日程）：
+
+```http
+POST /api/device/events HTTP/1.1
+Host: 192.168.1.10:4000
+X-Device-Token: 7f3a9c2e5b8d4a61c0f9e2d7b4a8c153
+Content-Type: application/json
+
+{ "title": "取快递", "allDay": true, "startAt": "2026-10-25", "endAt": "2026-10-25" }
+```
+
+```json
+{
+  "data": {
+    "id": 73,
+    "title": "取快递",
+    "description": "",
+    "location": "",
+    "categoryId": null,
+    "priority": "normal",
+    "status": "confirmed",
+    "allDay": true,
+    "startAt": "2026-10-25",
+    "endAt": "2026-10-25",
+    "timezone": "Asia/Shanghai",
+    "tags": [],
+    "rrule": null,
+    "color": null,
+    "remindMinutesBefore": null,
+    "createdAt": "2026-10-25T12:31:02.114Z",
+    "updatedAt": "2026-10-25T12:31:02.114Z"
+  }
+}
+```
+
+写完再读 `GET /api/device/context` 或 `GET /api/device/screen` 即可看到变化（屏幕 ETag 会随之变化）。
+`voice.allowControl` 为 `false` 时，设备端应拒绝调用这些写接口；服务端不额外拦截
+（安全边界是设备令牌，见第 4 节）。
+
+状态码：`201` / `200` / `204`、`401 UNAUTHORIZED`、`404 NOT_FOUND`、`422 VALIDATION_FAILED`、
+`429 RATE_LIMITED`、`500 INTERNAL_ERROR`。
+
 ## 7. 数据契约
 
 ### 7.1 `DeviceScreenPayload`（顶层）
@@ -469,6 +632,7 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
 | `eventTotal` | integer | 否 | 当日非课程日程的**真实总数**；`events` 被截断时大于数组长度 |
 | `courseTotal` | integer | 否 | 当日课程的**真实总数**；`courses` 被截断时大于数组长度 |
 | `todoTotal` | integer | 否 | 未完成待办的**真实总数**；`todos` 被截断时大于数组长度 |
+| `voice` | object \| null | 是 | 语音助手配置，见 7.10。**参与 ETag**；旧版服务端可能没有该字段 |
 
 **渲染上限与总数**：设备一屏最多显示 32 条日程、16 条课程、8 条待办；`*Total` 是服务端
 统计的真实总数，可能大于对应数组。设备端应使用 `*Total` 显示「N 项」与「还有 N 项」，
@@ -799,6 +963,35 @@ If-None-Match: "9f2c1b7e4a6d0c3f8b5e2a91d47c6f03b8e5a1d2"
 `startAt` 为 `2026-10-19T00:00:00.000Z` 即北京时间当天 08:00，与课程同步中配置的
 「第一节 08:00–08:40」对应。
 
+### 7.10 `voice`（`DeviceVoiceConfig`）
+
+控制台「屏幕与设备 → 语音助手」配置，按用户保存，同一账号的所有设备共用。
+**参与 ETag**：任一字段变化都会让设备重新拉屏。
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `enabled` | boolean | `true` | 是否启用语音助手；`false` 时设备端不应启动语音模块 |
+| `allowControl` | boolean | `true` | 是否允许语音助手修改日程与待办；设备端在调用 6.8 写接口前检查 |
+| `otaUrl` | string | `https://api.tenclass.net/xiaozhi/ota/` | 小智 OTA / WebSocket 服务地址；控制台可改 |
+| `wakeWords` | string[] | `["你好小智"]` | 1–8 个唤醒词，每个 2–12 个汉字；服务端已 trim 并去重 |
+| `wakeThreshold` | integer | `65` | 唤醒灵敏度 0–100 |
+| `volume` | integer | `60` | 音量 0–100 |
+
+设备屏幕**首次激活**会显示 6 位验证码，到 [xiaozhi.me](https://xiaozhi.me) 输入即可
+绑定小智账号；自定义唤醒词仅支持中文，且受模型词表限制。启用后麦克风常驻监听唤醒词，
+这是隐私上的取舍，控制台已明确提示。
+
+```json
+{
+  "enabled": true,
+  "allowControl": true,
+  "otaUrl": "https://api.tenclass.net/xiaozhi/ota/",
+  "wakeWords": ["你好小智"],
+  "wakeThreshold": 65,
+  "volume": 60
+}
+```
+
 ## 8. 屏幕与渲染规范
 
 ### 8.1 面板参数
@@ -972,15 +1165,17 @@ esp_deep_sleep_start();
 | --- | --- | --- |
 | 400 | `BAD_REQUEST` | 请求体不是合法 JSON 或参数语义非法；修正固件，不重试 |
 | 401 | `UNAUTHORIZED` | 令牌缺失/失效；检查 NVS 中令牌，不要盲目重试 |
-| 404 | `NOT_FOUND` | 接口路径错误（多半是 `api_url` 少写或多写了路径）；修正配置 |
+| 404 | `NOT_FOUND` | 接口路径错误（多半是 `api_url` 少写或多写了路径），或要修改的资源不属于该令牌所属用户；修正配置，不重试 |
 | 413 | `PAYLOAD_TOO_LARGE` | 请求体超限；检查是否误传了大数组 |
 | 422 | `VALIDATION_FAILED` | 字段校验失败；按 `details[].path` 修正，不重试 |
-| 429 | `RATE_LIMITED` | 请求过于频繁；退避到 `refreshMinutes` 之后再试 |
+| 429 | `RATE_LIMITED` | 写接口超过 20 次/60s；按 `Retry-After` 退避，读接口不受影响 |
 | 500 | `INTERNAL_ERROR` | 服务端异常；按退避重试，保留上一屏 |
 | 503 | `SERVICE_UNAVAILABLE` | 服务未就绪（如迁移中）；按退避重试 |
 
-`429` 与 `503` 属于约定：当前实现不会主动限流，但设备端应把这两种状态按
-「需退避」处理，以便服务端将来加入限流时不改固件。
+设备写接口已启用限流（见 6.8）：同一台设备的第 21 次写操作（60 秒窗口内）返回
+`429 RATE_LIMITED`，响应头带 `Retry-After`（秒）。`GET /api/device/screen`、
+`GET /api/device/context`、`POST /api/device/telemetry` 不消耗写配额。
+`503` 当前实现不会主动返回，但设备端仍应按「需退避」处理，以便服务端将来加入。
 
 ### 10.3 超时与退避
 

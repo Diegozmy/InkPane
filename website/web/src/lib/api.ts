@@ -33,6 +33,7 @@ import type {
   TodoPayload,
   UserRole,
   UserSummary,
+  VoiceSettings,
   WeatherSearchResult,
   WeatherSettings,
   WeatherSnapshot,
@@ -336,6 +337,11 @@ export const api = {
   }) => request<DisplayConfig>('/display', { method: 'PUT', body: payload }),
   displayScreen: (signal?: AbortSignal) =>
     request<DeviceScreenPayload>('/display/screen', { signal }),
+
+  /* ---------------- 语音助手 ---------------- */
+  voiceSettings: (signal?: AbortSignal) => request<VoiceSettings>('/voice', { signal }),
+  updateVoice: (payload: Partial<VoiceSettings>) =>
+    request<VoiceSettings>('/voice', { method: 'PUT', body: payload }),
 
   listDevices: (signal?: AbortSignal) => request<DeviceSummary[]>('/devices', { signal }),
   createDevice: (payload: { name: string }) =>

@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactElement } from 'react';
 import { useDisplayConfig, useScreenPreview } from '@/api/use-workspace';
 import { copyText, useUpdateDisplay } from '@/api/use-workspace-mutations';
+import { useVoiceSettings } from '@/api/use-voice';
+import { useUpdateVoiceSettings } from '@/api/use-voice-mutations';
 import {
   useCreateDevice,
   useDeleteDevice,
@@ -25,6 +27,13 @@ import {
   type LayoutPreset,
 } from '@/lib/layout-presets';
 import {
+  formatWakeWords,
+  isValidOtaUrl,
+  parseIntInRange,
+  parseWakeWords,
+  validateWakeWords,
+} from '@/lib/voice';
+import {
   Badge,
   Button,
   ConfirmDialog,
@@ -34,9 +43,10 @@ import {
   Input,
   Select,
   Skeleton,
+  Switch,
 } from '@/components/ui';
 import { Icon } from '@/components/ui/icon';
-import type { CreatedDevice, DisplayLayout, DisplayModuleId } from '@/types';
+import type { CreatedDevice, DisplayLayout, DisplayModuleId, VoiceSettings } from '@/types';
 
 const REFRESH_OPTIONS = [5, 10, 15, 30, 60, 120, 240, 360, 720] as const;
 
@@ -58,6 +68,8 @@ export function DevicePage(): ReactElement {
   const rotateToken = useRotateDeviceToken();
   const deleteDevice = useDeleteDevice();
   const updateDisplay = useUpdateDisplay();
+  const voice = useVoiceSettings();
+  const updateVoice = useUpdateVoiceSettings();
 
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [draft, setDraft] = useState<DisplayLayout | null>(null);
@@ -69,6 +81,15 @@ export function DevicePage(): ReactElement {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<'rotate' | 'delete' | null>(null);
+
+  // 语音卡片使用独立草稿与提示，保存不会连带提交布局修改
+  const [voiceDraft, setVoiceDraft] = useState<VoiceSettings | null>(null);
+  const [wakeWordInput, setWakeWordInput] = useState('');
+  const [thresholdInput, setThresholdInput] = useState('65');
+  const [volumeInput, setVolumeInput] = useState('60');
+  const [wakeWordError, setWakeWordError] = useState<string | null>(null);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [voiceNotice, setVoiceNotice] = useState<string | null>(null);
 
   const endpoint = useMemo(() => deviceEndpoint(), []);
 
@@ -91,6 +112,15 @@ export function DevicePage(): ReactElement {
     setRefreshMinutes(display.data.refreshMinutes);
     setTimezone(display.data.timezone);
   }, [display.data]);
+
+  useEffect(() => {
+    if (!voice.data) return;
+    setVoiceDraft(voice.data);
+    setWakeWordInput(formatWakeWords(voice.data.wakeWords));
+    setThresholdInput(String(voice.data.wakeThreshold));
+    setVolumeInput(String(voice.data.volume));
+    setWakeWordError(null);
+  }, [voice.data]);
 
   useEffect(() => {
     if (selectedId === null && devices.data?.[0]) setSelectedId(devices.data[0].id);
@@ -117,6 +147,29 @@ export function DevicePage(): ReactElement {
       serialize(display.data.layout.modules, display.data.refreshMinutes, display.data.timezone)
     );
   }, [draft, display.data, refreshMinutes, timezone]);
+
+  const voiceDirty = useMemo(() => {
+    if (!voiceDraft || !voice.data) return false;
+    const threshold = parseIntInRange(thresholdInput, 0, 100);
+    const volume = parseIntInRange(volumeInput, 0, 100);
+    const draftKey = JSON.stringify({
+      enabled: voiceDraft.enabled,
+      allowControl: voiceDraft.allowControl,
+      otaUrl: voiceDraft.otaUrl.trim(),
+      wakeWords: parseWakeWords(wakeWordInput).words,
+      wakeThreshold: threshold,
+      volume,
+    });
+    const savedKey = JSON.stringify({
+      enabled: voice.data.enabled,
+      allowControl: voice.data.allowControl,
+      otaUrl: voice.data.otaUrl,
+      wakeWords: voice.data.wakeWords,
+      wakeThreshold: voice.data.wakeThreshold,
+      volume: voice.data.volume,
+    });
+    return draftKey !== savedKey;
+  }, [voice.data, voiceDraft, wakeWordInput, thresholdInput, volumeInput]);
 
   const moduleName = (id: DisplayModuleId): string => moduleNames[id] ?? MODULE_LABEL[id];
 
@@ -148,6 +201,64 @@ export function DevicePage(): ReactElement {
         onError: (cause) => setError(errorMessage(cause, '保存布局失败')),
       },
     );
+  };
+
+  /** 语音设置单独保存：先做与后端一致的前端校验，再提交。 */
+  const saveVoiceSettings = (): void => {
+    if (!voiceDraft) return;
+    setVoiceError(null);
+    setVoiceNotice(null);
+
+    const wordError = validateWakeWords(wakeWordInput);
+    if (wordError) {
+      setWakeWordError(wordError);
+      return;
+    }
+    setWakeWordError(null);
+
+    const otaUrl = voiceDraft.otaUrl.trim();
+    if (!isValidOtaUrl(otaUrl)) {
+      setVoiceError('OTA 地址必须是 http:// 或 https:// 开头的合法 URL（不超过 200 个字符）。');
+      return;
+    }
+
+    const wakeThreshold = parseIntInRange(thresholdInput, 0, 100);
+    if (wakeThreshold === null) {
+      setVoiceError('唤醒灵敏度需要是 0–100 的整数。');
+      return;
+    }
+
+    const volume = parseIntInRange(volumeInput, 0, 100);
+    if (volume === null) {
+      setVoiceError('音量需要是 0–100 的整数。');
+      return;
+    }
+
+    updateVoice.mutate(
+      {
+        enabled: voiceDraft.enabled,
+        allowControl: voiceDraft.allowControl,
+        otaUrl,
+        wakeWords: parseWakeWords(wakeWordInput).words,
+        wakeThreshold,
+        volume,
+      },
+      {
+        onSuccess: () => setVoiceNotice('语音设置已保存，设备下次拉取时生效。'),
+        onError: (cause) => setVoiceError(errorMessage(cause, '保存语音设置失败')),
+      },
+    );
+  };
+
+  const resetVoiceDraft = (): void => {
+    if (!voice.data) return;
+    setVoiceDraft(voice.data);
+    setWakeWordInput(formatWakeWords(voice.data.wakeWords));
+    setThresholdInput(String(voice.data.wakeThreshold));
+    setVolumeInput(String(voice.data.volume));
+    setWakeWordError(null);
+    setVoiceError(null);
+    setVoiceNotice(null);
   };
 
   const addDevice = (event: FormEvent): void => {
@@ -400,6 +511,165 @@ export function DevicePage(): ReactElement {
                   </Button>
                 </div>
               </div>
+            </section>
+
+            <section className="card" aria-label="语音助手">
+              <div className="card__header">
+                <div>
+                  <h2 className="card__title">语音助手</h2>
+                  <p className="card__description">
+                    配置按账号保存，随屏幕数据一起下发给设备。语音修改日程与待办时仍使用设备令牌，
+                    只会动你自己的数据。
+                  </p>
+                </div>
+                <Badge tone={voice.data?.enabled ? 'success' : 'neutral'}>
+                  {voice.data ? (voice.data.enabled ? '已启用' : '已停用') : '加载中'}
+                </Badge>
+              </div>
+
+              {voice.isLoading ? (
+                <Skeleton height={220} />
+              ) : voice.isError ? (
+                <InlineAlert
+                  tone="danger"
+                  title="语音设置加载失败"
+                  action={
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      leadingIcon="refresh"
+                      onClick={() => void voice.refetch()}
+                    >
+                      重试
+                    </Button>
+                  }
+                >
+                  {voice.error instanceof Error ? voice.error.message : '请确认后端服务已启动。'}
+                </InlineAlert>
+              ) : (
+                voiceDraft && (
+                  <div className="stack">
+                    <Switch
+                      checked={voiceDraft.enabled}
+                      onChange={(enabled) =>
+                        setVoiceDraft((current) => (current ? { ...current, enabled } : current))
+                      }
+                      label="启用语音助手"
+                      description="关闭后设备端不启动语音模块；下面的配置会保留，重新打开即恢复。"
+                    />
+                    <Switch
+                      checked={voiceDraft.allowControl}
+                      onChange={(allowControl) =>
+                        setVoiceDraft((current) =>
+                          current ? { ...current, allowControl } : current,
+                        )
+                      }
+                      label="允许语音修改日程与待办"
+                      description="关闭后语音助手只回答问题，不能创建、修改或删除日程与待办。"
+                    />
+
+                    <div className="form-row">
+                      <Field
+                        label="唤醒灵敏度"
+                        htmlFor="voice-wake-threshold"
+                        hint="0–100 的整数，数值越高越容易唤醒（默认 65）"
+                      >
+                        <Input
+                          id="voice-wake-threshold"
+                          value={thresholdInput}
+                          inputMode="numeric"
+                          onChange={(event) => setThresholdInput(event.target.value)}
+                        />
+                      </Field>
+                      <Field label="音量" htmlFor="voice-volume" hint="0–100 的整数（默认 60）">
+                        <Input
+                          id="voice-volume"
+                          value={volumeInput}
+                          inputMode="numeric"
+                          onChange={(event) => setVolumeInput(event.target.value)}
+                        />
+                      </Field>
+                    </div>
+
+                    <Field
+                      label="OTA 地址"
+                      htmlFor="voice-ota-url"
+                      hint="小智 OTA / WebSocket 服务地址，形如 https://api.tenclass.net/xiaozhi/ota/"
+                    >
+                      <Input
+                        id="voice-ota-url"
+                        value={voiceDraft.otaUrl}
+                        maxLength={200}
+                        onChange={(event) =>
+                          setVoiceDraft((current) =>
+                            current ? { ...current, otaUrl: event.target.value } : current,
+                          )
+                        }
+                      />
+                    </Field>
+
+                    <Field
+                      label="唤醒词"
+                      htmlFor="voice-wake-words"
+                      hint="用逗号分隔，最多 8 个；每个 2–12 个汉字，例如：你好小智，小墨"
+                      error={wakeWordError}
+                    >
+                      <Input
+                        id="voice-wake-words"
+                        value={wakeWordInput}
+                        placeholder="你好小智，小墨"
+                        onChange={(event) => {
+                          setWakeWordInput(event.target.value);
+                          setWakeWordError(null);
+                        }}
+                      />
+                    </Field>
+
+                    {voiceError && (
+                      <InlineAlert tone="danger" title="语音设置未保存">
+                        {voiceError}
+                      </InlineAlert>
+                    )}
+                    {voiceNotice && (
+                      <InlineAlert tone="success" title="完成">
+                        {voiceNotice}
+                      </InlineAlert>
+                    )}
+
+                    <div className="row row--wrap">
+                      <Button
+                        variant="primary"
+                        leadingIcon="check"
+                        disabled={!voiceDirty}
+                        loading={updateVoice.isPending}
+                        onClick={saveVoiceSettings}
+                      >
+                        {voiceDirty ? '保存语音设置' : '语音设置已保存'}
+                      </Button>
+                      {voiceDirty && (
+                        <Button variant="ghost" onClick={resetVoiceDraft}>
+                          撤销修改
+                        </Button>
+                      )}
+                    </div>
+
+                    <hr className="divider" />
+
+                    <p className="page-hint">
+                      设备屏幕首次激活会显示 6 位验证码，到{' '}
+                      <a href="https://xiaozhi.me" target="_blank" rel="noreferrer">
+                        xiaozhi.me
+                      </a>{' '}
+                      输入即可绑定小智账号。自定义唤醒词仅支持中文，且受模型词表限制，
+                      不在词表里的词可能无法唤醒。
+                    </p>
+                    <p className="page-hint">
+                      启用后麦克风会常驻监听唤醒词，介意隐私时请关闭「启用语音助手」。
+                      设备令牌可以写入日程与待办，一旦泄露请立刻到「我的设备」里轮换。
+                    </p>
+                  </div>
+                )
+              )}
             </section>
           </div>
 

@@ -386,6 +386,34 @@ export interface DeviceIdentity {
   name: string;
 }
 
+/* ------------------------------------------------------------------ *
+ * 语音助手（小智 / xiaozhi）配置
+ * ------------------------------------------------------------------ */
+
+/**
+ * 语音助手配置。
+ *
+ * 按用户保存在 app_settings 的 `voice.*` 键下，同一账号的所有设备共用；
+ * 设备拉屏时会随 `DeviceScreenPayload.voice` 下发（计入 ETag）。
+ */
+export interface DeviceVoiceConfig {
+  /** 是否启用语音助手功能 */
+  enabled: boolean;
+  /** 是否允许语音助手修改日程与待办（写接口仍要求设备令牌） */
+  allowControl: boolean;
+  /** 小智 OTA / WebSocket 服务地址 */
+  otaUrl: string;
+  /** 唤醒词，1–8 个，每个 2–12 个汉字 */
+  wakeWords: string[];
+  /** 唤醒灵敏度，0–100 */
+  wakeThreshold: number;
+  /** 音量，0–100 */
+  volume: number;
+}
+
+/** 用户级语音设置，与下发给设备的配置同构。 */
+export type VoiceSettings = DeviceVoiceConfig;
+
 /** ESP32 拉取的完整屏幕数据。 */
 export interface DeviceScreenPayload {
   schemaVersion: number;
@@ -409,6 +437,8 @@ export interface DeviceScreenPayload {
   courseTotal: number;
   /** 未完成待办的真实总数（todos 可能被截断） */
   todoTotal: number;
+  /** 语音助手配置；计入 ETag，null 表示旧版服务端未提供 */
+  voice?: DeviceVoiceConfig | null;
 }
 
 export interface DeviceTelemetry {
@@ -419,6 +449,49 @@ export interface DeviceTelemetry {
   rssi?: number;
   firmware?: string;
   uptimeSeconds?: number;
+}
+
+/* ------------------------------------------------------------------ *
+ * 设备「当前上下文」（语音助手工具调用前的只读快照）
+ * ------------------------------------------------------------------ */
+
+export interface DeviceContextNow {
+  iso: string;
+  /** YYYY-MM-DD */
+  date: string;
+  /** HH:MM */
+  time: string;
+  weekday: string;
+  utcOffsetMinutes: number;
+  timezone: string;
+}
+
+/** 上下文里的日程条目：只保留语音助手回答所需的字段。 */
+export interface DeviceContextEvent {
+  /** `${eventId}:${occurrenceKey}` */
+  id: string;
+  eventId: number;
+  title: string;
+  startAt: string;
+  endAt: string;
+  allDay: boolean;
+  location: string;
+  isCourse: boolean;
+}
+
+export interface DeviceContextTodo {
+  id: number;
+  title: string;
+  dueDate: string | null;
+  priority: Priority;
+}
+
+/** `GET /api/device/context` 的返回体：今天的全部可读上下文。 */
+export interface DeviceContext {
+  now: DeviceContextNow;
+  events: DeviceContextEvent[];
+  courses: DeviceContextEvent[];
+  todos: DeviceContextTodo[];
 }
 
 /** 控制台「设备」页展示的状态（多设备版）。 */
