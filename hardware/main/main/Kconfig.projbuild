@@ -31,4 +31,75 @@ menu "InkPane"
         bool "联网成功后上报遥测"
         default y
 
+    choice INKPANE_POWER_MODE
+        prompt "运行模式"
+        default INKPANE_POWER_MODE_RESIDENT
+        help
+            常驻语音模式保持 Wi-Fi 与麦克风常开，适合 USB 供电；
+            低功耗模式保留原来的「每分钟唤醒 + 深睡」看板行为，不编译语音。
+
+        config INKPANE_POWER_MODE_RESIDENT
+            bool "常驻语音（Wi-Fi 与麦克风常开）"
+
+        config INKPANE_POWER_MODE_LOW_POWER
+            bool "低功耗深睡看板（无语音）"
+    endchoice
+
+    config INKPANE_VOICE
+        bool "编译语音助手"
+        depends on INKPANE_POWER_MODE_RESIDENT
+        default y
+        help
+            常驻模式下启用小智协议语音助手：ES8311 麦克风/喇叭、AFE、
+            MultiNet 自定义唤醒词、Opus/WebSocket、MCP 设备工具。
+
+    config INKPANE_VOICE_OTA_URL
+        string "默认小智 OTA 地址"
+        default "https://api.tenclass.net/xiaozhi/ota/"
+        depends on INKPANE_VOICE
+        help
+            可在控制台「屏幕与设备 → 语音助手」或配网页覆盖。自建
+            xiaozhi-esp32-server 时填其 OTA 地址（通常是局域网 http://）。
+
+    config INKPANE_VOICE_WAKE_WORDS
+        string "默认唤醒词（逗号分隔，仅中文）"
+        default "你好小智"
+        depends on INKPANE_VOICE
+        help
+            由 MultiNet 运行时命令词实现，可在控制台或配网页修改。
+            仅支持中文汉字、每条 2–12 字、最多 8 条。
+
+    config INKPANE_VOICE_WAKE_THRESHOLD
+        int "默认唤醒灵敏度（0-100）"
+        range 0 100
+        default 65
+        depends on INKPANE_VOICE
+
+    config INKPANE_VOICE_VOLUME
+        int "默认音量（0-100）"
+        range 0 100
+        default 60
+        depends on INKPANE_VOICE
+
+    config INKPANE_VOICE_ALLOW_CONTROL
+        bool "默认允许语音修改日程与待办"
+        default y
+        depends on INKPANE_VOICE
+        help
+            关闭后设备只向小智注册只读工具（查询时间/日程/待办/设备状态），
+            不会注册新增、完成、删除类 MCP 工具。
+
+    config INKPANE_VOICE_WAKE_DURING_PLAYBACK
+        bool "播放回复时仍监听唤醒词（实验）"
+        default n
+        depends on INKPANE_VOICE
+        help
+            本板单麦、没有回采参考通道，硬件 AEC 不可用。播放 TTS 时继续
+            监听唤醒词可能被喇叭回声自触发；默认关闭，用 BOOT 键打断。
+
+    config INKPANE_VOICE_DEBUG
+        bool "语音调试日志"
+        default n
+        depends on INKPANE_VOICE
+
 endmenu

@@ -223,8 +223,99 @@ static void test_model(void)
     CHECK(screen->modules[INKPANE_MODULE_CLOCK].x == 32);
     CHECK(!screen->modules[INKPANE_MODULE_CLOCK].enabled);
 
+    /* Voice settings block: optional, disabled/missing fields use sentinels. */
+    const char *voice_json =
+        "{\"data\":{\"voice\":{\"enabled\":false,\"allowControl\":false,"
+        "\"otaUrl\":\"https://example.com/ota\","
+        "\"wakeWords\":[\"你好小智\",\"小窗小窗\"],"
+        "\"wakeThreshold\":80,\"volume\":35}}}";
+    CHECK(inkpane_screen_parse(voice_json, strlen(voice_json), screen, arena, 256 * 1024));
+    CHECK(screen->voice.present);
+    CHECK(!screen->voice.enabled);
+    CHECK(!screen->voice.allow_control);
+    CHECK_STR(screen->voice.ota_url, "https://example.com/ota");
+    CHECK(screen->voice.wake_word_count == 2);
+    CHECK_STR(screen->voice.wake_words[0], "你好小智");
+    CHECK_STR(screen->voice.wake_words[1], "小窗小窗");
+    CHECK(screen->voice.wake_threshold == 80);
+    CHECK(screen->voice.volume == 35);
+
+    const char *no_voice = "{\"data\":{\"screen\":{\"refreshMinutes\":30}}}";
+    CHECK(inkpane_screen_parse(no_voice, strlen(no_voice), screen, arena, 256 * 1024));
+    CHECK(!screen->voice.present);
+    CHECK(screen->voice.wake_threshold == -1);
+    CHECK(screen->voice.volume == -1);
+
+    const char *bad_voice = "{\"data\":{\"voice\":{\"wakeThreshold\":200,\"volume\":-3}}}";
+    CHECK(inkpane_screen_parse(bad_voice, strlen(bad_voice), screen, arena, 256 * 1024));
+    CHECK(screen->voice.present);
+    CHECK(screen->voice.wake_threshold == -1);
+    CHECK(screen->voice.volume == -1);
+    CHECK(screen->voice.wake_word_count == 0);
+
     free(arena);
     free(screen);
+}
+
+static int count_black(const uint8_t *framebuffer)
+{
+    int count = 0;
+    for (size_t i = 0; i < FB_SIZE; ++i) {
+        uint8_t value = framebuffer[i];
+        for (int bit = 0; bit < 8; ++bit) {
+            if ((value & (1u << bit)) == 0) {
+                ++count;
+            }
+        }
+    }
+    return count;
+}
+
+static void test_voice_ui(void)
+{
+    uint8_t *framebuffer = malloc(FB_SIZE);
+    CHECK(framebuffer != NULL);
+    if (framebuffer == NULL) {
+        return;
+    }
+
+    inkpane_voice_view_t view = {
+        .state_label = "聆听中",
+        .user_text = "明天下午三点开会",
+        .reply_text = "好的，已经帮你添加日程。",
+        .footer_hint = "BOOT 打断 · 长按 BOOT 静音唤醒词",
+    };
+    memset(framebuffer, 0xFF, FB_SIZE);
+    inkpane_ui_render_voice(framebuffer, &view);
+    CHECK(count_black(framebuffer) > 500);
+    CHECK(count_black(framebuffer) < FB_SIZE * 8 - 100);
+
+    memset(framebuffer, 0xFF, FB_SIZE);
+    inkpane_ui_render_voice_activation(framebuffer, "123456", "在 xiaozhi.me 输入激活码",
+                                       "xiaozhi.me");
+    CHECK(count_black(framebuffer) > 500);
+
+    memset(framebuffer, 0xFF, FB_SIZE);
+    inkpane_ui_render_voice_error(framebuffer, "语音助手不可用", "语音模型未加载", "看板不受影响");
+    CHECK(count_black(framebuffer) > 300);
+
+    char buffer[64];
+    size_t written = inkpane_ui_voice_copy(buffer, sizeof(buffer), "😀你好世界", 8);
+    CHECK(written > 0);
+    CHECK(strstr(buffer, "你好") != NULL);
+    /* The 4-byte emoji must have been replaced by a space, not drawn as a box. */
+    for (size_t i = 0; i < written; ++i) {
+        CHECK(((unsigned char)buffer[i]) < 0xF0);
+    }
+
+    char long_text[400];
+    memset(long_text, 'A', sizeof(long_text) - 1);
+    long_text[sizeof(long_text) - 1] = '\0';
+    written = inkpane_ui_voice_copy(buffer, sizeof(buffer), long_text, 12);
+    CHECK(written >= 3);
+    CHECK(strcmp(buffer + written - 3, "...") == 0);
+
+    free(framebuffer);
 }
 
 static void test_font_and_text(void)
@@ -560,6 +651,8 @@ int main(int argc, char **argv)
     test_model();
     printf("== font ==\n");
     test_font_and_text();
+    printf("== voice ui ==\n");
+    test_voice_ui();
     printf("== render ==\n");
     test_render();
     printf("== render zoomed ==\n");

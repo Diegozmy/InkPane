@@ -29,7 +29,8 @@ ESP-IDF v6.0.2 工程，包含屏幕驱动、板级驱动、六模块渲染、Wi
 | RTC | 保留 PCF85063 OS 位；未校时前显示「等待校时」，200 的 `localIso` 或 304 的 `Date` 头校准后清 OS |
 | 低电 | 低于 20% 时 200 与 304 都把联网间隔拉长到至少 120 分钟，并显示「低电」 |
 | 遥测 | SHTC3 温湿度、AXP2101 电量、RSSI、固件版本、运行时长 |
-| AP 配网 | 首次上电或按住 GPIO5 两秒进入；网页填写 Wi-Fi / 服务地址 / 设备令牌 |
+| 语音助手 | 常驻唤醒词（默认「你好小智」，控制台/配网可改）、小智 WebSocket 对话、墨水屏显示识别与回复文本、MCP 语音新增/完成/删除日程与待办 |
+| AP 配网 | 首次上电或按住 GPIO5 两秒进入；网页填写 Wi-Fi / 服务地址 / 设备令牌 / 语音设置 |
 | 离线与异常 | 保留上一屏；连续失败显示「离线」，令牌失效显示「令牌无效」，低电显示「低电」 |
 
 ![固件渲染预览](docs/screen-preview.png)
@@ -37,6 +38,25 @@ ESP-IDF v6.0.2 工程，包含屏幕驱动、板级驱动、六模块渲染、Wi
 > 上图为 host 渲染器用契约示例数据生成的 800 × 480 实际 1-bit 画面，可直接对照设备效果。
 > 架构、状态机与排障见 [docs/FIRMWARE.md](docs/FIRMWARE.md)，上真机前请按
 > [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md) 逐项验收。
+
+## 语音助手
+
+固件默认是**常驻模式**：Wi-Fi 与麦克风常开，唤醒词随时可用；看板仍按
+`refreshMinutes` 拉屏、每分钟局刷时钟。语音服务走小智 WebSocket 协议，OTA 地址可在
+控制台「屏幕与设备 → 语音助手」或配网页修改（默认官方云，也支持自建
+`xiaozhi-esp32-server`）。
+
+- **首次使用**：配网 → 控制台启用语音 → 设备屏幕显示 6 位激活码 → 到 `xiaozhi.me`
+  输入绑定。设备先校准时间再访问 HTTPS OTA。
+- **自定义唤醒词**：控制台/配网页填写，1–8 条、每条 2–12 个汉字；运行时重配 MultiNet
+  命令词，无需重新编译。词表限制与逐词验收方法见 [docs/VOICE.md](docs/VOICE.md)。
+- **语音控制**：可直接说「明天下午三点开会」「加一个待办」「今天有什么安排」
+  「把那个待办标记完成」，设备经 MCP 调用控制台设备写接口，回到看板后自动刷新。
+- **功耗**：常驻监听预计 100–200 mA，建议 USB 供电；需要电池长待机时把
+  `CONFIG_INKPANE_POWER_MODE` 切到 `LOW_POWER` 编译回原深睡看板（语音不初始化）。
+- **隐私**：唤醒前后音频不上传、不落盘；不需要时在控制台关闭语音，或长按 BOOT 静音。
+
+完整配置、限制、排障与真机验收清单见 [docs/VOICE.md](docs/VOICE.md)。
 
 ## 构建与烧录
 
@@ -52,6 +72,8 @@ Ninja + GCC（MSYS2，仅 host 测试需要）。
 # 构建（默认输出到 %TEMP%\inkpane-build，避免 Windows 260 字符路径限制）
 powershell -ExecutionPolicy Bypass -File hardware/tools/build.ps1
 
+# 首次构建会联网下载 ESP-SR / Opus / ES8311 / WebSocket 等 managed components；
+# 全量 flash 会同时写入 model 分区的语音模型，只烧 app 不会更新模型。
 # 指定 ESP-IDF 环境 profile（自动探测失败时）
 powershell -ExecutionPolicy Bypass -File hardware/tools/build.ps1 `
   -IdfProfile C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1
@@ -127,7 +149,8 @@ hardware/
 │   │   ├── inkpane_model/    # JSON/时间/调度/RTC 快照（纯 C，host 可测）
 │   │   ├── inkpane_ui/       # 1-bit 画布、字库、六模块
 │   │   ├── inkpane_net/      # Wi-Fi、HTTP、NVS 配置
-│   │   └── inkpane_prov/     # AP + DNS + 配网网页
+│   │   ├── inkpane_prov/     # AP + DNS + 配网网页
+│   │   └── inkpane_voice/    # 语音助手：音频/AFE/MultiNet、OTA、WebSocket、MCP
 │   ├── partitions.csv
 │   └── sdkconfig.defaults
 ├── tools/
@@ -136,7 +159,9 @@ hardware/
 ├── test/
 │   ├── host/                 # host 单测（Ninja + GCC）+ BMP 预览
 │   └── fixtures/             # 屏幕数据样例
-└── docs/FIRMWARE.md          # 架构、状态机、排障
+├── docs/ACCEPTANCE.md        # 真机验收清单
+├── docs/FIRMWARE.md          # 架构、状态机、排障
+└── docs/VOICE.md             # 语音助手配置、限制、语音控制、验收
 ```
 
 ## 开发环境

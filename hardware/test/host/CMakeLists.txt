@@ -39,8 +39,22 @@ target_link_libraries(inkpane_tests PRIVATE inkpane_host_core)
 add_executable(inkpane_preview preview.c)
 target_link_libraries(inkpane_preview PRIVATE inkpane_host_core)
 
+# Voice MCP port layer: pure C, no ESP-IDF. mcp_mock.c replaces the device HTTP
+# client so tool calls can be asserted without a network.
+set(VOICE_PORT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../main/components/inkpane_voice/port")
+add_executable(inkpane_mcp_tests
+    mcp_test.c
+    mcp_mock.c
+    "${VOICE_PORT_DIR}/mcp_server.c"
+    "${VOICE_PORT_DIR}/mcp_tools.c"
+)
+target_include_directories(inkpane_mcp_tests PRIVATE "${VOICE_PORT_DIR}")
+target_link_libraries(inkpane_mcp_tests PRIVATE inkpane_host_core)
+target_compile_definitions(inkpane_mcp_tests PRIVATE INKPANE_HOST_TEST=1)
+
 set(FONT_BLOB "${UI_DIR}/fonts/inkpane_fonts.bin")
 set(FIXTURES "${CMAKE_CURRENT_SOURCE_DIR}/../fixtures")
 
 enable_testing()
 add_test(NAME inkpane_host COMMAND inkpane_tests "${FONT_BLOB}" "${FIXTURES}")
+add_test(NAME inkpane_mcp COMMAND inkpane_mcp_tests)

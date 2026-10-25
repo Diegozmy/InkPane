@@ -11,6 +11,11 @@
 #define INKPANE_TOKEN_LEN 40
 #define INKPANE_URL_LEN 128
 #define INKPANE_ETAG_LEN 80
+#define INKPANE_OTA_URL_LEN 200
+#define INKPANE_WS_URL_LEN 200
+#define INKPANE_WS_TOKEN_LEN 160
+#define INKPANE_WAKE_WORDS_LEN 320
+#define INKPANE_UUID_LEN 40
 
 typedef struct {
     char ssid[INKPANE_SSID_LEN];
@@ -18,6 +23,21 @@ typedef struct {
     char api_url[INKPANE_URL_LEN];
     char token[INKPANE_TOKEN_LEN];
     char etag[INKPANE_ETAG_LEN];
+
+    /* Voice assistant. Persistent fields live in NVS; the WebSocket URL/token
+     * are filled in by the OTA/activation flow and survive reboots. */
+    char voice_ota_url[INKPANE_OTA_URL_LEN];
+    char voice_ws_url[INKPANE_WS_URL_LEN];
+    char voice_ws_token[INKPANE_WS_TOKEN_LEN];
+    char voice_wake_words[INKPANE_WAKE_WORDS_LEN];
+    char voice_uuid[INKPANE_UUID_LEN];
+    int voice_ws_version;
+    int voice_wake_threshold;
+    int voice_volume;
+    bool voice_enabled;
+    bool voice_allow_control;
+    bool voice_activated;
+
     int refresh_minutes;
     int utc_offset_minutes;
     bool provisioned;
@@ -30,10 +50,29 @@ esp_err_t inkpane_config_save_etag(const char *etag);
 esp_err_t inkpane_config_save_runtime(int refresh_minutes, int utc_offset_minutes);
 esp_err_t inkpane_config_erase(void);
 
+/** Persist the WebSocket config obtained from the xiaozhi OTA/activation flow. */
+esp_err_t inkpane_config_update_voice(const char *ws_url, const char *ws_token, int ws_version,
+                                      bool activated);
+
+/** Load or create the persistent UUIDv4 used as the xiaozhi Client-Id. */
+esp_err_t inkpane_config_ensure_uuid(char *out, size_t size);
+
+/** Persist only the voice tuning fields (wake words, threshold, volume, flags). */
+esp_err_t inkpane_config_save_voice(const inkpane_config_t *config);
+
 esp_err_t inkpane_wifi_connect(const char *ssid, const char *password, int timeout_ms);
 void inkpane_wifi_disconnect(void);
 bool inkpane_wifi_connected(void);
 int inkpane_wifi_rssi(void);
+
+/** Switch between modem sleep (idle) and no power save (voice session). */
+void inkpane_wifi_set_power_save(bool enabled);
+
+/**
+ * One-shot SNTP sync (used before TLS when the RTC has no valid time).
+ * Returns ESP_OK once the system clock is set; the caller copies it to the RTC.
+ */
+esp_err_t inkpane_wifi_sync_time(int timeout_ms);
 
 /** Copy the STA IPv4 address as dotted text ("192.168.71.53"). */
 esp_err_t inkpane_wifi_ip(char *out, size_t size);

@@ -2,14 +2,17 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_sntp.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/task.h"
 
 static const char *TAG = "wifi";
 
@@ -92,7 +95,10 @@ esp_err_t inkpane_wifi_connect(const char *ssid, const char *password, int timeo
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "mode");
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &config), TAG, "config");
     esp_err_t start = esp_wifi_start();
-    if (start != ESP_OK && start != ESP_ERR_WIFI_STATE) {
+    if (start == ESP_ERR_WIFI_STATE) {
+        /* Already started after a dropped link: kick a fresh association. */
+        esp_wifi_connect();
+    } else if (start != ESP_OK) {
         return start;
     }
 
@@ -103,9 +109,41 @@ esp_err_t inkpane_wifi_connect(const char *ssid, const char *password, int timeo
         esp_wifi_stop();
         return ESP_FAIL;
     }
-    esp_wifi_set_ps(WIFI_PS_NONE);
+    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
     ESP_LOGI(TAG, "connected to %s", ssid);
     return ESP_OK;
+}
+
+void inkpane_wifi_set_power_save(bool enabled)
+{
+    if (!s_initialized) {
+        return;
+    }
+    esp_wifi_set_ps(enabled ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE);
+}
+
+esp_err_t inkpane_wifi_sync_time(int timeout_ms)
+{
+    if (!s_connected) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "ntp.aliyun.com");
+    esp_sntp_init();
+    int elapsed = 0;
+    while (elapsed < timeout_ms && sntp_get_sync_status() != SNTP_SYNC_STATUS_COMPLETED) {
+        vTaskDelay(pdMS_TO_TICKS(200));
+        elapsed += 200;
+    }
+    bool synced = sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED;
+    if (synced) {
+        time_t now = time(NULL);
+        ESP_LOGI(TAG, "sntp synced: %lld", (long long)now);
+    } else {
+        ESP_LOGW(TAG, "sntp sync timed out");
+    }
+    esp_sntp_stop();
+    return synced ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
 void inkpane_wifi_disconnect(void)

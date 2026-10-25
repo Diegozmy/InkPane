@@ -336,6 +336,48 @@ static void parse_todos(const json_value_t *data, inkpane_screen_t *screen)
     }
 }
 
+static void parse_voice(const json_value_t *data, inkpane_screen_t *screen)
+{
+    const json_value_t *voice = json_object_get(data, "voice");
+    if (voice == NULL || voice->type != JSON_OBJECT) {
+        return;
+    }
+    screen->voice.present = true;
+    screen->voice.enabled = json_bool(json_object_get(voice, "enabled"), true);
+    screen->voice.allow_control = json_bool(json_object_get(voice, "allowControl"), true);
+    copy_utf8(screen->voice.ota_url, sizeof(screen->voice.ota_url),
+              json_string(json_object_get(voice, "otaUrl")));
+
+    const json_value_t *threshold = json_object_get(voice, "wakeThreshold");
+    if (threshold != NULL && threshold->type == JSON_NUMBER) {
+        int value = (int)threshold->number;
+        if (value >= 0 && value <= 100) {
+            screen->voice.wake_threshold = value;
+        }
+    }
+    const json_value_t *volume = json_object_get(voice, "volume");
+    if (volume != NULL && volume->type == JSON_NUMBER) {
+        int value = (int)volume->number;
+        if (value >= 0 && value <= 100) {
+            screen->voice.volume = value;
+        }
+    }
+
+    const json_value_t *words = json_object_get(voice, "wakeWords");
+    int count = json_array_size(words);
+    for (int i = 0; i < count && screen->voice.wake_word_count < INKPANE_MAX_WAKE_WORDS; ++i) {
+        const char *word = json_string(json_array_at(words, i));
+        if (word == NULL || word[0] == '\0') {
+            continue;
+        }
+        char *slot = screen->voice.wake_words[screen->voice.wake_word_count];
+        copy_utf8(slot, INKPANE_WAKE_WORD_LEN, word);
+        if (slot[0] != '\0') {
+            screen->voice.wake_word_count++;
+        }
+    }
+}
+
 bool inkpane_screen_parse(const char *json, size_t len, inkpane_screen_t *screen, char *arena,
                           size_t arena_size)
 {
@@ -361,8 +403,11 @@ bool inkpane_screen_parse(const char *json, size_t len, inkpane_screen_t *screen
         (int)json_number(json_object_get(data, "schemaVersion"), INKPANE_SCHEMA_VERSION);
     copy_utf8(screen->timezone, sizeof(screen->timezone),
               json_string(json_object_get(data, "timezone")));
+    screen->voice.wake_threshold = -1;
+    screen->voice.volume = -1;
 
     parse_layout(data, screen);
+    parse_voice(data, screen);
     parse_now(data, screen);
     parse_month(data, screen);
     parse_weather(data, screen);

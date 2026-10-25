@@ -1,8 +1,11 @@
 # InkPane 16 MB flash layout.
-# factory 8.75 MB: 字库 5.35 MB 嵌入应用，二进制 ~6.2 MB，留 2.5 MB 余量。
-# storage 0.5 MB 暂未被代码使用（保留预留）。
+# factory 11.25 MB: 字库 5.35 MB 嵌入应用；语音助手（ES8311 + Opus + TLS + ESP-SR 代码）
+# 后二进制预计 9–10 MB，预留余量。
+# model 4 MB: ESP-SR 模型分区（MultiNet7 中文 + VADNet）。idf.py flash 会自动写入
+# srmodels.bin；只 flash app 不会更新模型。
+# 原来的 storage 分区未被任何代码使用，已移除。
 # Name,   Type, SubType, Offset,   Size,     Flags
 nvs,      data, nvs,     0x9000,   0x6000,
-phy_init, data, phy,     0xf000,   0x1000,
-factory,  app,  factory, 0x10000,  0x8C0000,
-storage,  data, spiffs,  0x8D0000, 0x80000,
+phy_init, data, phy,     0xF000,   0x1000,
+factory,  app,  factory, 0x10000,  0xB40000,
+model,    data, spiffs,  0xB50000, 0x400000,

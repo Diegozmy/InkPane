@@ -1,9 +1,23 @@
 # InkPane 固件说明
 
 本文写给要改固件或排查设备问题的人。构建/烧录/配网的快速步骤见
-[hardware/README](../README.md)。
+[hardware/README](../README.md)，语音助手见 [VOICE.md](VOICE.md)。
 
-## 1. 运行模型
+## 0. 两种运行模式
+
+`main/Kconfig.projbuild` 的 `INKPANE_POWER_MODE` 决定 `app_main` 走哪条路径：
+
+- **RESIDENT（默认）**：常驻语音模式。Wi-Fi 与麦克风常开，`inkpane_voice` 运行
+  OTA/激活、MultiNet 唤醒词、WebSocket 对话与 MCP 工具；主任务每 20 ms 轮询按键与
+  语音事件，按 `refreshMinutes` 拉屏、每分钟局刷时钟。不进入深睡。
+- **LOW_POWER**：原「每分钟唤醒 + 深睡」看板；语音不初始化、不占用音频/AFE 资源
+  （组件仍参与链接，以保留看板状态位接口）。下面第 1 节的流程描述的是这条路径；
+  两条路径共享渲染、网络与配置代码。
+
+常驻模式的页面切换：看板 ↔ 对话页（状态/识别文本/回复）↔ 激活页 ↔ 错误页。语音会话
+期间暂停看板定时刷新，回到待命 3 秒内重绘看板；MCP 写入会清 ETag 并强制下一次拉屏。
+
+## 1. 运行模型（LOW_POWER）
 
 固件没有常驻业务线程：每次唤醒跑完一轮就深睡，屏幕由墨水屏自身保持。
 

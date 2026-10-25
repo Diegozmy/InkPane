@@ -23,6 +23,13 @@ static const char *TAG = "prov";
 
 #define PROV_TIMEOUT_SECONDS 600
 
+#ifndef CONFIG_INKPANE_VOICE_OTA_URL
+#define CONFIG_INKPANE_VOICE_OTA_URL "https://api.tenclass.net/xiaozhi/ota/"
+#endif
+#ifndef CONFIG_INKPANE_VOICE_WAKE_WORDS
+#define CONFIG_INKPANE_VOICE_WAKE_WORDS "你好小智"
+#endif
+
 static bool s_dns_stop;
 static TaskHandle_t s_dns_task;
 
@@ -54,6 +61,22 @@ static const char PROV_PAGE[] =
     "<button type=\"submit\">保存并重启</button></form>"
     "<small>令牌在控制台「屏幕与设备 → 添加设备」创建时只显示一次；"
     "服务地址形如 http://192.168.1.10:4000 。</small>"
+    "<h2 style=\"font-size:15px;margin:22px 0 0\">语音助手（可留空保持原值）</h2>"
+    "<label style=\"display:flex;gap:8px;align-items:center\">"
+    "<input type=\"checkbox\" name=\"voice_on\" style=\"width:auto\" checked> 启用语音助手</label>"
+    "<label>小智 OTA 地址</label>"
+    "<input name=\"voice_ota\" value=\"" CONFIG_INKPANE_VOICE_OTA_URL "\">"
+    "<label>唤醒词（逗号分隔，仅中文）</label>"
+    "<input name=\"wake_words\" value=\"" CONFIG_INKPANE_VOICE_WAKE_WORDS "\">"
+    "<label>唤醒灵敏度（0-100）</label>"
+    "<input name=\"wake_thr\" type=\"number\" min=\"0\" max=\"100\" value=\"65\">"
+    "<label>音量（0-100）</label>"
+    "<input name=\"voice_vol\" type=\"number\" min=\"0\" max=\"100\" value=\"60\">"
+    "<label style=\"display:flex;gap:8px;align-items:center\">"
+    "<input type=\"checkbox\" name=\"voice_ctrl\" style=\"width:auto\" checked> "
+    "允许语音修改日程与待办</label>"
+    "<small>语音助手会常驻监听唤醒词；不需要时取消勾选。自定义唤醒词仅支持中文，"
+    "且受设备模型词表限制。</small>"
     "<script>fetch('/scan').then(r=>r.json()).then(list=>{const d=document.getElementById('aps');"
     "list.forEach(a=>{const o=document.createElement('option');o.value=a.ssid;d.appendChild(o)})})"
     ".catch(()=>{});</script></main></body></html>";
@@ -258,17 +281,22 @@ static esp_err_t scan_handler(httpd_req_t *request)
 
 static esp_err_t save_handler(httpd_req_t *request)
 {
-    char body[512];
+    char body[2048];
     int received = httpd_req_recv(request, body, sizeof(body) - 1);
     if (received <= 0) {
         return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "empty body");
     }
     body[received] = '\0';
 
+    /* Start from the persisted config so re-provisioning Wi-Fi does not wipe
+     * the voice credentials/UUID, then override only submitted fields. */
     inkpane_config_t config;
-    memset(&config, 0, sizeof(config));
-    config.refresh_minutes = 30;
-    config.utc_offset_minutes = 480;
+    if (inkpane_config_load(&config) != ESP_OK) {
+        memset(&config, 0, sizeof(config));
+        config.refresh_minutes = 30;
+        config.utc_offset_minutes = 480;
+    }
+
     if (!form_value(body, "ssid", config.ssid, sizeof(config.ssid)) ||
         !form_value(body, "api_url", config.api_url, sizeof(config.api_url)) ||
         !form_value(body, "token", config.token, sizeof(config.token))) {
@@ -288,9 +316,55 @@ static esp_err_t save_handler(httpd_req_t *request)
         return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST, "api_url must start with http://");
     }
 
-    ESP_LOGI(TAG, "provisioning: ssid=%s url=%s", config.ssid, config.api_url);
-    inkpane_config_erase();
+    char value[INKPANE_OTA_URL_LEN];
+    const bool has_voice_form = strstr(body, "voice_ota=") != NULL ||
+                                strstr(body, "voice_on=") != NULL ||
+                                strstr(body, "wake_words=") != NULL;
+    if (form_value(body, "voice_ota", value, sizeof(value)) && value[0] != '\0') {
+        if (strncmp(value, "http://", 7) != 0 && strncmp(value, "https://", 8) != 0) {
+            return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                       "voice_ota must start with http:// or https://");
+        }
+        if (strcmp(value, config.voice_ota_url) != 0) {
+            snprintf(config.voice_ota_url, sizeof(config.voice_ota_url), "%s", value);
+            /* A different OTA service needs a fresh activation/WebSocket config. */
+            config.voice_ws_url[0] = '\0';
+            config.voice_ws_token[0] = '\0';
+            config.voice_ws_version = 1;
+            config.voice_activated = false;
+        }
+    }
+    char wake_words[INKPANE_WAKE_WORDS_LEN];
+    if (form_value(body, "wake_words", wake_words, sizeof(wake_words)) && wake_words[0] != '\0') {
+        size_t length = strnlen(wake_words, sizeof(wake_words) - 1);
+        memcpy(config.voice_wake_words, wake_words, length);
+        config.voice_wake_words[length] = '\0';
+    }
+    if (form_value(body, "wake_thr", value, sizeof(value))) {
+        int threshold = atoi(value);
+        if (threshold >= 0 && threshold <= 100) {
+            config.voice_wake_threshold = threshold;
+        }
+    }
+    if (form_value(body, "voice_vol", value, sizeof(value))) {
+        int volume = atoi(value);
+        if (volume >= 0 && volume <= 100) {
+            config.voice_volume = volume;
+        }
+    }
+    if (has_voice_form) {
+        /* Unchecked checkboxes are simply absent from the form body. */
+        config.voice_enabled = form_value(body, "voice_on", value, sizeof(value));
+        config.voice_allow_control = form_value(body, "voice_ctrl", value, sizeof(value));
+    }
+    config.provisioned = true;
+
+    ESP_LOGI(TAG, "provisioning: ssid=%s url=%s voice=%d", config.ssid, config.api_url,
+             (int)config.voice_enabled);
     esp_err_t err = inkpane_config_save(&config);
+    if (err == ESP_OK) {
+        err = inkpane_config_save_etag("");
+    }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "save failed: %s", esp_err_to_name(err));
         return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR, "nvs write failed");

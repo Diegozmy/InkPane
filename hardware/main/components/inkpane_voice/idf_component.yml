@@ -1,0 +1,11 @@
+dependencies:
+  # ESP-IDF 6 no longer ships cJSON as a built-in component.
+  espressif/cjson: "^1.7.19"
+  # ESP-SR provides AFE (VAD/uplink) and MultiNet custom wake-word commands.
+  # WakeNet/NSNet/TTS are intentionally left out to save flash and RAM.
+  espressif/esp-sr: "==2.4.7"
+  espressif/esp_audio_codec: "~2.5.0"
+  espressif/esp_codec_dev: "~1.6.2"
+  espressif/esp_audio_effects: "~1.3.0"
+  espressif/esp_websocket_client: "^1.7.0"
+  idf: ">=6.0.1"

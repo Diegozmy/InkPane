@@ -2,12 +2,14 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_attr.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_idf_version.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_sleep.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -20,6 +22,7 @@
 #include "inkpane_prov.h"
 #include "inkpane_snapshot.h"
 #include "inkpane_ui.h"
+#include "inkpane_voice.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
 
@@ -158,6 +161,14 @@ static unsigned status_flags(void)
     int battery = inkpane_board_battery_percent();
     if (battery >= 0 && battery < 20) {
         status |= INKPANE_STATUS_LOW_BATTERY;
+    }
+    inkpane_voice_snapshot_t voice;
+    inkpane_voice_get_snapshot(&voice);
+    if (voice.muted) {
+        status |= INKPANE_STATUS_VOICE_MUTED;
+    }
+    if (voice.state == INKPANE_VOICE_ERROR) {
+        status |= INKPANE_STATUS_VOICE_ERROR;
     }
     return status;
 }
@@ -860,7 +871,8 @@ static uint32_t wakeup_causes(void)
 #endif
 }
 
-void app_main(void)
+#if CONFIG_INKPANE_POWER_MODE_LOW_POWER
+static void low_power_cycle(void)
 {
     uint32_t causes = wakeup_causes();
     bool cold_boot = causes == 0;
@@ -1023,3 +1035,681 @@ void app_main(void)
     rtc_ok = read_clock(&dt);
     go_to_sleep(&config, rtc_ok, rtc_ok ? &dt : NULL);
 }
+
+void app_main(void)
+{
+    low_power_cycle();
+}
+#endif /* CONFIG_INKPANE_POWER_MODE_LOW_POWER */
+
+/* ------------------------------------------------------------------ */
+/* Resident mode: always-on dashboard + voice assistant                */
+/* ------------------------------------------------------------------ */
+
+#if !CONFIG_INKPANE_POWER_MODE_LOW_POWER
+
+#define RESIDENT_TICK_MS 20
+#define RESIDENT_BATTERY_CHECK_MS (60 * 1000)
+#define RESIDENT_WIFI_RETRY_MS (30 * 1000)
+#define RESIDENT_VOICE_RENDER_MS 800
+#define RESIDENT_ERROR_PAGE_MS (15 * 1000)
+#define RESIDENT_ACTIVATION_PAGE_MS (5 * 60 * 1000)
+
+typedef struct {
+    bool down;
+    bool long_sent;
+    int64_t down_ms;
+} resident_button_t;
+
+static resident_button_t s_buttons[4];
+static bool s_dashboard_ready;
+static bool s_screen_dirty;
+static bool s_voice_page;
+static bool s_activation_page;
+static bool s_error_page;
+static bool s_error_dismissed;
+static int64_t s_error_until_ms;
+static int64_t s_activation_until_ms;
+static bool s_voice_dirty;
+static int64_t s_last_voice_render_ms;
+static int64_t s_last_wifi_attempt_ms = -RESIDENT_WIFI_RETRY_MS;
+static int64_t s_last_battery_check_ms;
+static bool s_last_network_up;
+static char s_wake_words[INKPANE_VOICE_MAX_WAKE_WORDS][INKPANE_VOICE_WAKE_WORD_LEN];
+static char s_device_mac[18];
+static char s_firmware_version[16] = FIRMWARE_VERSION;
+static char s_timezone[40];
+
+static const int RESIDENT_BUTTON_PINS[] = {0, 4, 5, 6};
+
+static bool voice_state_is_conversation(inkpane_voice_state_t state)
+{
+    return state == INKPANE_VOICE_CONNECTING || state == INKPANE_VOICE_LISTENING ||
+           state == INKPANE_VOICE_THINKING || state == INKPANE_VOICE_SPEAKING;
+}
+
+static const char *voice_state_label(inkpane_voice_state_t state)
+{
+    switch (state) {
+    case INKPANE_VOICE_OFFLINE:
+        return "网络未连接";
+    case INKPANE_VOICE_ACTIVATING:
+        return "等待激活";
+    case INKPANE_VOICE_READY:
+        return "待命";
+    case INKPANE_VOICE_CONNECTING:
+        return "正在连接";
+    case INKPANE_VOICE_LISTENING:
+        return "聆听中";
+    case INKPANE_VOICE_THINKING:
+        return "思考中";
+    case INKPANE_VOICE_SPEAKING:
+        return "正在回答";
+    case INKPANE_VOICE_ERROR:
+        return "语音出错";
+    case INKPANE_VOICE_DISABLED:
+    default:
+        return "未启用";
+    }
+}
+
+static void resident_read_mac(void)
+{
+    uint8_t mac[6] = {0};
+    if (esp_read_mac(mac, ESP_MAC_WIFI_STA) != ESP_OK) {
+        memset(mac, 0, sizeof(mac));
+    }
+    snprintf(s_device_mac, sizeof(s_device_mac), "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1],
+             mac[2], mac[3], mac[4], mac[5]);
+}
+
+/** Full-width Chinese comma (U+FF0C) is three UTF-8 bytes. */
+static bool resident_is_cjk_comma(const char *cursor)
+{
+    if (cursor[0] == '\0' || cursor[1] == '\0' || cursor[2] == '\0') {
+        return false;
+    }
+    return (unsigned char)cursor[0] == 0xEF && (unsigned char)cursor[1] == 0xBC &&
+           (unsigned char)cursor[2] == 0x8C;
+}
+
+/** Split the comma-separated wake word config into the array the voice API uses. */
+static int resident_parse_wake_words(const char *source)
+{
+    int count = 0;
+    const char *cursor = source != NULL ? source : "";
+    while (*cursor != '\0' && count < INKPANE_VOICE_MAX_WAKE_WORDS) {
+        while (*cursor == ' ' || *cursor == '\t' || *cursor == ',' || resident_is_cjk_comma(cursor)) {
+            if (resident_is_cjk_comma(cursor)) {
+                cursor += 3;
+            } else {
+                ++cursor;
+            }
+        }
+        const char *start = cursor;
+        while (*cursor != '\0' && *cursor != ',' && !resident_is_cjk_comma(cursor)) {
+            ++cursor;
+        }
+        const char *end = cursor;
+        while (end > start && (end[-1] == ' ' || end[-1] == '\t')) {
+            --end;
+        }
+        size_t length = (size_t)(end - start);
+        if (length >= INKPANE_VOICE_WAKE_WORD_LEN) {
+            length = INKPANE_VOICE_WAKE_WORD_LEN - 1;
+            while (length > 0 && (((unsigned char)start[length]) & 0xC0) == 0x80) {
+                --length;
+            }
+        }
+        if (length > 0) {
+            memcpy(s_wake_words[count], start, length);
+            s_wake_words[count][length] = '\0';
+            ++count;
+        }
+        if (*cursor == ',') {
+            ++cursor;
+        } else if (resident_is_cjk_comma(cursor)) {
+            cursor += 3;
+        }
+    }
+    if (count == 0) {
+        snprintf(s_wake_words[0], INKPANE_VOICE_WAKE_WORD_LEN, "你好小智");
+        count = 1;
+    }
+    return count;
+}
+
+static void resident_build_voice_config(const inkpane_config_t *config,
+                                        inkpane_voice_config_t *voice)
+{
+    memset(voice, 0, sizeof(*voice));
+    voice->enabled = config->voice_enabled;
+    voice->allow_control = config->voice_allow_control;
+    voice->ota_url = config->voice_ota_url;
+    voice->ws_url = config->voice_ws_url;
+    voice->ws_token = config->voice_ws_token;
+    voice->ws_version = config->voice_ws_version;
+    voice->wake_word_count = resident_parse_wake_words(config->voice_wake_words);
+    for (int i = 0; i < voice->wake_word_count; ++i) {
+        voice->wake_words[i] = s_wake_words[i];
+    }
+    voice->wake_threshold = config->voice_wake_threshold;
+    voice->volume = config->voice_volume;
+    voice->device_mac = s_device_mac;
+    voice->device_uuid = config->voice_uuid;
+    voice->firmware_version = s_firmware_version;
+    voice->timezone = s_timezone[0] != '\0' ? s_timezone : "Asia/Shanghai";
+    voice->api_url = config->api_url;
+    voice->api_token = config->token;
+    voice->utc_offset_minutes = config->utc_offset_minutes;
+}
+
+static void resident_apply_voice_settings(const inkpane_config_t *config)
+{
+    inkpane_voice_config_t voice;
+    resident_build_voice_config(config, &voice);
+    inkpane_voice_apply_config(&voice);
+}
+
+/** Join the payload wake words back into the comma-separated NVS format. */
+static void resident_join_wake_words(const inkpane_voice_settings_t *voice, char *out, size_t size)
+{
+    size_t used = 0;
+    out[0] = '\0';
+    for (int i = 0; i < voice->wake_word_count && i < INKPANE_MAX_WAKE_WORDS; ++i) {
+        const char *word = voice->wake_words[i];
+        if (word[0] == '\0' || size == 0) {
+            continue;
+        }
+        int written = snprintf(out + used, size - used, "%s%s", used > 0 ? "," : "", word);
+        if (written < 0 || (size_t)written >= size - used) {
+            break;
+        }
+        used += (size_t)written;
+    }
+}
+
+/**
+ * Apply the voice block delivered with the screen payload. Live-tunable fields
+ * (wake words, threshold, volume, allowControl) are applied immediately; a
+ * change of enable state or OTA endpoint restarts the device so activation and
+ * the audio engine start from a clean state.
+ */
+static void resident_apply_server_voice(inkpane_config_t *config)
+{
+    const inkpane_voice_settings_t *voice = &s_screen->voice;
+    if (!voice->present) {
+        return;
+    }
+    bool changed = false;
+    bool restart = false;
+
+    if (voice->enabled != config->voice_enabled) {
+        config->voice_enabled = voice->enabled;
+        changed = true;
+        restart = true;
+    }
+    if (voice->allow_control != config->voice_allow_control) {
+        config->voice_allow_control = voice->allow_control;
+        changed = true;
+    }
+    if (voice->ota_url[0] != '\0' && strcmp(voice->ota_url, config->voice_ota_url) != 0) {
+        snprintf(config->voice_ota_url, sizeof(config->voice_ota_url), "%s", voice->ota_url);
+        config->voice_ws_url[0] = '\0';
+        config->voice_ws_token[0] = '\0';
+        config->voice_ws_version = 1;
+        config->voice_activated = false;
+        inkpane_config_update_voice("", "", 1, false);
+        changed = true;
+        restart = true;
+    }
+    if (voice->wake_threshold >= 0 &&
+        voice->wake_threshold != config->voice_wake_threshold) {
+        config->voice_wake_threshold = voice->wake_threshold;
+        changed = true;
+    }
+    if (voice->volume >= 0 && voice->volume != config->voice_volume) {
+        config->voice_volume = voice->volume;
+        changed = true;
+    }
+    if (voice->wake_word_count > 0) {
+        char words[INKPANE_WAKE_WORDS_LEN];
+        resident_join_wake_words(voice, words, sizeof(words));
+        if (words[0] != '\0' && strcmp(words, config->voice_wake_words) != 0) {
+            snprintf(config->voice_wake_words, sizeof(config->voice_wake_words), "%s", words);
+            changed = true;
+        }
+    }
+    if (!changed) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "voice settings from server: enabled=%d ctrl=%d words=%s", (int)config->voice_enabled,
+             (int)config->voice_allow_control, config->voice_wake_words);
+    if (inkpane_config_save_voice(config) != ESP_OK) {
+        ESP_LOGW(TAG, "cannot persist voice settings; keeping runtime values");
+        return;
+    }
+    if (restart) {
+        ESP_LOGW(TAG, "voice enable/OTA changed; restarting to apply");
+        vTaskDelay(pdMS_TO_TICKS(300));
+        esp_restart();
+    }
+    resident_apply_voice_settings(config);
+}
+
+/** Ask the panel for a fresh dashboard after a voice-driven mutation. */
+static void resident_handle_voice_event(const inkpane_voice_event_t *event,
+                                        inkpane_config_t *config)
+{
+    s_voice_dirty = true;
+    switch (event->type) {
+    case INKPANE_VOICE_EVT_SESSION:
+        snprintf(config->voice_ws_url, sizeof(config->voice_ws_url), "%s", event->ws_url);
+        snprintf(config->voice_ws_token, sizeof(config->voice_ws_token), "%s", event->ws_token);
+        config->voice_ws_version = event->ws_version;
+        config->voice_activated = event->activated;
+        if (inkpane_config_update_voice(config->voice_ws_url, config->voice_ws_token,
+                                        config->voice_ws_version, config->voice_activated) == ESP_OK) {
+            ESP_LOGI(TAG, "voice websocket config saved (version %d)", event->ws_version);
+        }
+        resident_apply_voice_settings(config);
+        break;
+    case INKPANE_VOICE_EVT_REFRESH:
+        /* The assistant changed a todo/event: force a full 200 payload so the
+         * dashboard reflects it as soon as the conversation page goes away. */
+        clear_saved_etag(config);
+        s_screen_dirty = true;
+        ESP_LOGI(TAG, "voice mutation -> screen refresh queued");
+        break;
+    case INKPANE_VOICE_EVT_ERROR:
+        s_error_until_ms = esp_timer_get_time() / 1000 + RESIDENT_ERROR_PAGE_MS;
+        break;
+    default:
+        break;
+    }
+}
+
+static void resident_render_notice(const char *title, const char *line1, const char *line2,
+                                   const char *line3)
+{
+    if (s_framebuffer == NULL) {
+        return;
+    }
+    inkpane_ui_render_notice(s_framebuffer, title, line1, line2, line3, NULL);
+    if (inkpane_epd_show_full(s_framebuffer) != ESP_OK) {
+        s_persist.panel_warm = false;
+    }
+}
+
+static void resident_render_dashboard(void)
+{
+    if (!s_dashboard_ready || s_screen == NULL) {
+        resident_render_notice("正在连接日程服务", "设备保持常驻，请稍候", "首次连接可能需要几秒",
+                               NULL);
+        return;
+    }
+    if (s_persist.zoomed_module >= 0) {
+        if (render_zoomed_module(s_persist.zoomed_module) == ESP_OK) {
+            return;
+        }
+        s_persist.panel_warm = false;
+    }
+    render_overview();
+}
+
+static void resident_render_voice(const inkpane_voice_snapshot_t *snapshot, bool full)
+{
+    if (s_framebuffer == NULL) {
+        return;
+    }
+    inkpane_voice_view_t view = {
+        .state_label = voice_state_label(snapshot->state),
+        .user_text = snapshot->user_text,
+        .reply_text = snapshot->reply_text,
+        .footer_hint = snapshot->control_allowed
+                           ? "BOOT 打断 · 长按 BOOT 静音唤醒词"
+                           : "BOOT 打断 · 语音修改已关闭",
+    };
+    inkpane_ui_render_voice(s_framebuffer, &view);
+    esp_err_t err;
+    if (full) {
+        err = inkpane_epd_show_full(s_framebuffer);
+    } else {
+        /* One partial window covers the status, user and reply bands. */
+        err = inkpane_epd_show_region(s_framebuffer, 0, 0, INKPANE_SCREEN_WIDTH, 432);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "voice page refresh failed: %s", esp_err_to_name(err));
+        s_persist.panel_warm = false;
+    }
+}
+
+static void resident_render_activation(const inkpane_voice_snapshot_t *snapshot)
+{
+    if (s_framebuffer == NULL) {
+        return;
+    }
+    inkpane_ui_render_voice_activation(s_framebuffer, snapshot->activation_code,
+                                       snapshot->activation_message, "xiaozhi.me");
+    if (inkpane_epd_show_full(s_framebuffer) != ESP_OK) {
+        s_persist.panel_warm = false;
+    }
+}
+
+static void resident_render_voice_error(const inkpane_voice_snapshot_t *snapshot)
+{
+    if (s_framebuffer == NULL) {
+        return;
+    }
+    const char *reason = snapshot->error[0] != '\0' ? snapshot->error : "语音服务暂时不可用";
+    inkpane_ui_render_voice_error(s_framebuffer, "语音助手不可用", reason,
+                                  "看板功能不受影响 · BOOT 返回");
+    if (inkpane_epd_show_full(s_framebuffer) != ESP_OK) {
+        s_persist.panel_warm = false;
+    }
+}
+
+static void resident_poll_buttons(inkpane_config_t *config)
+{
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    for (size_t i = 0; i < sizeof(RESIDENT_BUTTON_PINS) / sizeof(RESIDENT_BUTTON_PINS[0]); ++i) {
+        int pin = RESIDENT_BUTTON_PINS[i];
+        resident_button_t *button = &s_buttons[i];
+        bool down = inkpane_board_button_held(pin);
+        if (down && !button->down) {
+            button->down = true;
+            button->down_ms = now_ms;
+            button->long_sent = false;
+        } else if (down && button->down && !button->long_sent && pin == 0 &&
+                   now_ms - button->down_ms >= 3000) {
+            button->long_sent = true;
+            inkpane_voice_button(true);
+            s_voice_dirty = true;
+            ESP_LOGI(TAG, "BOOT long press: wake word mute toggle");
+        } else if (!down && button->down) {
+            button->down = false;
+            int64_t held_ms = now_ms - button->down_ms;
+            if (pin == 0) {
+                if (!button->long_sent) {
+                    if (s_error_page) {
+                        s_error_dismissed = true;
+                        s_error_page = false;
+                        s_voice_dirty = true;
+                    }
+                    inkpane_voice_button(false);
+                    s_voice_dirty = true;
+                }
+                continue;
+            }
+            if (s_activation_page && pin == 5) {
+                inkpane_voice_set_activation_visible(false);
+                s_voice_dirty = true;
+                continue;
+            }
+            if (s_voice_page || s_error_page || held_ms >= 1500) {
+                continue;
+            }
+            bool handled = handle_zoom_button(pin);
+            if (handled) {
+                s_dashboard_ready = true;
+            }
+        }
+    }
+    (void)config;
+}
+
+static void resident_sync_time_to_rtc(const inkpane_config_t *config)
+{
+    if (inkpane_wifi_sync_time(5000) != ESP_OK) {
+        return;
+    }
+    time_t now = time(NULL);
+    inkpane_datetime_t dt;
+    int64_t local = (int64_t)now + (int64_t)config->utc_offset_minutes * 60;
+    inkpane_datetime_from_local_epoch(local, &dt);
+    if (inkpane_board_time_set(&dt) == ESP_OK) {
+        ESP_LOGI(TAG, "rtc calibrated from sntp: %04d-%02d-%02d %02d:%02d", dt.year, dt.month,
+                 dt.day, dt.hour, dt.minute);
+    }
+}
+
+static void resident_network_tick(inkpane_config_t *config)
+{
+    bool connected = inkpane_wifi_connected();
+    if (connected != s_last_network_up) {
+        s_last_network_up = connected;
+        inkpane_voice_notify_network(connected);
+    }
+
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    if (!connected) {
+        if (now_ms - s_last_wifi_attempt_ms < RESIDENT_WIFI_RETRY_MS) {
+            return;
+        }
+        s_last_wifi_attempt_ms = now_ms;
+        ESP_LOGI(TAG, "wifi reconnect attempt");
+        if (!connect_wifi(config)) {
+            s_persist.fail_count++;
+            s_persist.retry_seconds = retry_delay_seconds(config);
+            return;
+        }
+    }
+
+    inkpane_datetime_t dt = {0};
+    bool rtc_ok = read_clock(&dt);
+    int64_t now_epoch = rtc_ok ? inkpane_local_epoch(&dt) : 0;
+    bool due = !rtc_ok || s_persist.next_net_epoch == 0 ||
+               now_epoch >= s_persist.next_net_epoch || s_screen_dirty;
+    if (!due) {
+        return;
+    }
+    if (s_voice_page || s_activation_page || s_error_page ||
+        inkpane_voice_session_active()) {
+        /* Do not repaint the dashboard over a conversation/activation/error
+         * page; the refresh runs as soon as that page is dismissed. */
+        return;
+    }
+
+    bool force_full = !rtc_ok || s_screen_dirty ||
+                      (s_persist.partial_count >= CONFIG_INKPANE_FULL_REFRESH_INTERVAL) ||
+                      !s_dashboard_ready;
+    bool paint_notice = !s_dashboard_ready;
+    fetch_and_render(config, force_full, now_epoch, rtc_ok, &dt, paint_notice);
+    if (!s_persist.auth_error && s_persist.fail_count == 0) {
+        s_dashboard_ready = true;
+        s_screen_dirty = false;
+#if CONFIG_INKPANE_TELEMETRY
+        post_telemetry(config);
+#endif
+    }
+    if (s_screen->timezone[0] != '\0') {
+        snprintf(s_timezone, sizeof(s_timezone), "%s", s_screen->timezone);
+    }
+    resident_apply_server_voice(config);
+    resident_apply_voice_settings(config);
+}
+
+static void resident_battery_check(void)
+{
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    if (now_ms - s_last_battery_check_ms < RESIDENT_BATTERY_CHECK_MS) {
+        return;
+    }
+    s_last_battery_check_ms = now_ms;
+    int battery = inkpane_board_battery_percent();
+    if (battery < 0) {
+        return;
+    }
+    if (battery < 15) {
+        inkpane_voice_set_muted(true);
+    }
+    if (battery < 5 && !inkpane_board_vbus_present()) {
+        ESP_LOGW(TAG, "battery critical (%d%%), powering off", battery);
+        resident_render_notice("电量过低", "设备即将关机以保护电池", "请连接 USB 充电", NULL);
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        inkpane_board_power_off();
+    }
+}
+
+static void resident_main(void)
+{
+    nvs_init();
+
+    /* Always start from a clean view: the first successful fetch rebuilds it. */
+    memset(&s_persist, 0, sizeof(s_persist));
+    s_persist.magic = PERSIST_MAGIC;
+    s_persist.tz_offset_minutes = 480;
+    s_persist.zoomed_module = -1;
+    inkpane_snapshot_invalidate(&s_snapshot);
+    s_last_battery_check_ms = esp_timer_get_time() / 1000;
+
+    ESP_LOGI(TAG, "resident boot: reason=%d", (int)esp_reset_reason());
+    if (inkpane_board_init() != ESP_OK) {
+        ESP_LOGE(TAG, "board init failed");
+    }
+    resident_read_mac();
+
+    s_framebuffer = heap_caps_malloc(INKPANE_EPD_FB_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_json_arena = heap_caps_malloc(JSON_ARENA_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_http_body = heap_caps_malloc(HTTP_BODY_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_screen = heap_caps_malloc(sizeof(inkpane_screen_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_framebuffer == NULL || s_json_arena == NULL || s_http_body == NULL || s_screen == NULL) {
+        ESP_LOGE(TAG, "PSRAM allocation failed");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        esp_restart();
+    }
+    memset(s_framebuffer, 0xFF, INKPANE_EPD_FB_SIZE);
+    inkpane_screen_reset(s_screen);
+
+    if (inkpane_ui_init(NULL, 0) != ESP_OK) {
+        ESP_LOGE(TAG, "font init failed");
+    }
+
+    inkpane_config_t config;
+    inkpane_config_load(&config);
+    snprintf(s_timezone, sizeof(s_timezone), "Asia/Shanghai");
+
+    esp_err_t epd = inkpane_epd_init(false);
+    if (epd != ESP_OK) {
+        ESP_LOGE(TAG, "epd init failed: %s", esp_err_to_name(epd));
+        s_persist.panel_warm = false;
+    } else {
+        s_persist.panel_warm = true;
+    }
+
+    if (provisioning_requested(true, &config)) {
+        char ssid[40];
+        inkpane_prov_ap_ssid(ssid, sizeof(ssid));
+        if (s_framebuffer != NULL) {
+            inkpane_ui_render_setup(s_framebuffer, ssid, "http://192.168.4.1");
+            inkpane_epd_show_full(s_framebuffer);
+        }
+        inkpane_prov_run(ssid);
+    }
+
+    resident_render_notice("正在连接日程服务", config.ssid, "设备保持常驻，请稍候", NULL);
+
+    bool online = connect_wifi(&config);
+    if (!online) {
+        s_persist.fail_count = 1;
+        s_persist.retry_seconds = retry_delay_seconds(&config);
+        resident_render_notice("无法连接 Wi-Fi", config.ssid, "确认路由器与密码后重启",
+                               "长按中键重新配网");
+    } else {
+        resident_network_tick(&config);
+    }
+
+    inkpane_voice_config_t voice_config;
+    resident_build_voice_config(&config, &voice_config);
+    esp_err_t voice_err = ESP_ERR_NOT_SUPPORTED;
+    if (config.voice_enabled) {
+        voice_err = inkpane_voice_init(&voice_config);
+    }
+    if (voice_err == ESP_OK) {
+        resident_sync_time_to_rtc(&config);
+        if (inkpane_voice_start() != ESP_OK) {
+            ESP_LOGW(TAG, "voice start failed; dashboard continues");
+        }
+    } else {
+        ESP_LOGW(TAG, "voice unavailable (%s); dashboard-only", esp_err_to_name(voice_err));
+    }
+
+    int64_t last_tick_ms = esp_timer_get_time() / 1000;
+    while (true) {
+        int64_t now_ms = esp_timer_get_time() / 1000;
+        resident_poll_buttons(&config);
+
+        inkpane_voice_event_t event;
+        while (inkpane_voice_poll_event(&event)) {
+            resident_handle_voice_event(&event, &config);
+        }
+
+        inkpane_voice_snapshot_t snapshot;
+        inkpane_voice_get_snapshot(&snapshot);
+        bool want_voice = voice_state_is_conversation(snapshot.state);
+        bool want_activation = snapshot.state == INKPANE_VOICE_ACTIVATING &&
+                               snapshot.activation_visible;
+        bool want_error = snapshot.state == INKPANE_VOICE_ERROR;
+        if (!want_error) {
+            s_error_dismissed = false;
+        }
+        bool show_voice = want_voice;
+        bool show_activation = want_activation && !want_voice;
+        bool show_error = want_error && !want_voice && !want_activation && !s_error_dismissed;
+
+        if (s_error_page && now_ms > s_error_until_ms) {
+            s_error_dismissed = true;
+            show_error = false;
+        }
+        if (s_activation_page && now_ms > s_activation_until_ms) {
+            inkpane_voice_set_activation_visible(false);
+            show_activation = false;
+        }
+
+        if (show_voice != s_voice_page || show_activation != s_activation_page ||
+            show_error != s_error_page) {
+            s_voice_page = show_voice;
+            s_activation_page = show_activation;
+            s_error_page = show_error;
+            s_voice_dirty = false;
+            if (s_voice_page) {
+                resident_render_voice(&snapshot, true);
+                s_last_voice_render_ms = now_ms;
+            } else if (s_activation_page) {
+                s_activation_until_ms = now_ms + RESIDENT_ACTIVATION_PAGE_MS;
+                resident_render_activation(&snapshot);
+            } else if (s_error_page) {
+                s_error_until_ms = now_ms + RESIDENT_ERROR_PAGE_MS;
+                resident_render_voice_error(&snapshot);
+            } else {
+                s_dashboard_ready = s_dashboard_ready || inkpane_snapshot_valid(&s_snapshot);
+                resident_render_dashboard();
+            }
+        } else if (s_voice_page && s_voice_dirty &&
+                   now_ms - s_last_voice_render_ms >= RESIDENT_VOICE_RENDER_MS) {
+            resident_render_voice(&snapshot, false);
+            s_last_voice_render_ms = now_ms;
+            s_voice_dirty = false;
+        }
+
+        if (now_ms - last_tick_ms >= 1000) {
+            last_tick_ms = now_ms;
+            if (!s_voice_page && !s_activation_page && !s_error_page && s_dashboard_ready &&
+                s_persist.zoomed_module < 0) {
+                refresh_clock_partial(&config);
+            }
+            resident_network_tick(&config);
+            resident_battery_check();
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(RESIDENT_TICK_MS));
+    }
+}
+
+void app_main(void)
+{
+    resident_main();
+}
+
+#endif /* !CONFIG_INKPANE_POWER_MODE_LOW_POWER */

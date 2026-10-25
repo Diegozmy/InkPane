@@ -1,0 +1,1087 @@
+#include "inkpane_voice.h"
+
+#include "audio_codec.h"
+#include "audio_service.h"
+#include "voice_board.h"
+#include "voice_identity.h"
+#include "voice_ota.h"
+#include "websocket_protocol.h"
+
+extern "C" {
+#include "inkpane_api.h"
+#include "mcp_server.h"
+#include "mcp_tools.h"
+}
+
+extern "C" {
+#include "cJSON.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+#include "inkpane_board.h"
+#include "inkpane_net.h"
+#include "inkpane_time.h"
+}
+
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <mutex>
+#include <string>
+
+#define TAG "voice"
+
+#define VOICE_EVENT_QUEUE_LEN 8
+#define VOICE_COMMAND_QUEUE_LEN 8
+#define VOICE_MCP_QUEUE_LEN 2
+#define VOICE_CONTROL_STACK 8192
+#define VOICE_CONTROL_PRIORITY 5
+#define VOICE_LISTEN_TIMEOUT_MS 20000
+#define VOICE_THINK_TIMEOUT_MS 20000
+#define VOICE_SPEAK_TIMEOUT_MS 60000
+#define VOICE_ERROR_PAGE_MS 12000
+
+enum class VoiceCmd : uint8_t {
+    WakeWord,
+    SendAudio,
+    ButtonShort,
+    ButtonLong,
+    NetworkUp,
+    NetworkDown,
+    ApplyConfig,
+    TtsStart,
+    TtsStop,
+    SttText,
+    ReplyText,
+    ChannelClosed,
+    Error,
+    McpPayload,
+    Stop,
+};
+
+struct VoiceCommand {
+    VoiceCmd type;
+    char text[512];
+};
+
+static std::mutex s_lock;
+static inkpane_voice_snapshot_t s_snapshot;
+static QueueHandle_t s_event_queue;
+static QueueHandle_t s_cmd_queue;
+static QueueHandle_t s_mcp_queue;
+static TaskHandle_t s_control_task;
+static AudioService* s_audio;
+static AudioCodec* s_codec;
+static WebsocketProtocol* s_protocol;
+static mcp_server_t* s_mcp;
+static mcp_tools_env_t s_mcp_env;
+static volatile bool s_stop;
+static volatile bool s_started;
+static bool s_activated;
+static bool s_muted;
+static ListeningMode s_listening_mode = kListeningModeAutoStop;
+static int64_t s_last_activity_ms;
+static int64_t s_error_since_ms;
+
+/* Borrowed config strings copied so the caller may reuse its struct. */
+static bool s_enabled;
+static bool s_allow_control;
+static char s_ota_url[INKPANE_VOICE_OTA_URL_LEN];
+static char s_ws_url[INKPANE_VOICE_WS_URL_LEN];
+static char s_ws_token[INKPANE_VOICE_WS_TOKEN_LEN];
+static int s_ws_version = 1;
+static char s_mac[18];
+static char s_uuid[40];
+static char s_timezone[40];
+static char s_api_url[INKPANE_URL_LEN];
+static char s_api_token[INKPANE_TOKEN_LEN];
+static char s_firmware[16];
+static char s_wake_words[INKPANE_VOICE_MAX_WAKE_WORDS][INKPANE_VOICE_WAKE_WORD_LEN];
+static const char* s_wake_ptrs[INKPANE_VOICE_MAX_WAKE_WORDS];
+static int s_wake_count;
+static int s_threshold = 65;
+static int s_volume = 60;
+static int s_utc_offset = 480;
+
+static int64_t now_ms()
+{
+    return esp_timer_get_time() / 1000;
+}
+
+static void copy_str(char* dst, size_t size, const char* src)
+{
+    if (size == 0) {
+        return;
+    }
+    if (src == nullptr) {
+        dst[0] = '\0';
+        return;
+    }
+    size_t length = strlen(src);
+    if (length >= size) {
+        length = size - 1;
+        while (length > 0 && (((unsigned char)src[length]) & 0xC0) == 0x80) {
+            --length;
+        }
+    }
+    memcpy(dst, src, length);
+    dst[length] = '\0';
+}
+
+/* ------------------------------------------------------------------ */
+/* Identity accessors used by the ported audio/protocol code           */
+/* ------------------------------------------------------------------ */
+
+extern "C" const char* inkpane_voice_device_mac(void) { return s_mac; }
+extern "C" const char* inkpane_voice_device_uuid(void) { return s_uuid; }
+extern "C" const char* const* inkpane_voice_wake_words(int* count)
+{
+    if (count != nullptr) {
+        *count = s_wake_count;
+    }
+    return s_wake_ptrs;
+}
+extern "C" float inkpane_voice_wake_threshold(void)
+{
+    return (float)s_threshold / 100.0f;
+}
+
+/* ------------------------------------------------------------------ */
+/* Snapshot + event helpers                                           */
+/* ------------------------------------------------------------------ */
+
+static void post_event(inkpane_voice_event_type_t type, const char* ws_url = nullptr,
+                       const char* ws_token = nullptr, int version = 0, bool activated = false)
+{
+    if (s_event_queue == nullptr) {
+        return;
+    }
+    inkpane_voice_event_t event;
+    memset(&event, 0, sizeof(event));
+    event.type = type;
+    if (ws_url != nullptr) {
+        copy_str(event.ws_url, sizeof(event.ws_url), ws_url);
+    }
+    if (ws_token != nullptr) {
+        copy_str(event.ws_token, sizeof(event.ws_token), ws_token);
+    }
+    event.ws_version = version;
+    event.activated = activated;
+    xQueueSend(s_event_queue, &event, 0);
+}
+
+static void snapshot_set_state(inkpane_voice_state_t state)
+{
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(s_lock);
+        if (s_snapshot.state != state) {
+            s_snapshot.state = state;
+            changed = true;
+        }
+    }
+    if (changed) {
+        post_event(INKPANE_VOICE_EVT_STATE);
+    }
+}
+
+static inkpane_voice_state_t snapshot_state()
+{
+    std::lock_guard<std::mutex> lock(s_lock);
+    return s_snapshot.state;
+}
+
+static void snapshot_reset_text()
+{
+    std::lock_guard<std::mutex> lock(s_lock);
+    s_snapshot.user_text[0] = '\0';
+    s_snapshot.reply_text[0] = '\0';
+}
+
+static void snapshot_set_user(const char* text)
+{
+    std::lock_guard<std::mutex> lock(s_lock);
+    copy_str(s_snapshot.user_text, sizeof(s_snapshot.user_text), text);
+    post_event(INKPANE_VOICE_EVT_TEXT);
+}
+
+static void snapshot_append_reply(const char* text)
+{
+    std::lock_guard<std::mutex> lock(s_lock);
+    size_t used = strlen(s_snapshot.reply_text);
+    size_t capacity = sizeof(s_snapshot.reply_text);
+    if (used >= capacity - 1) {
+        /* Keep the latest text: drop the oldest half at a UTF-8 boundary. */
+        size_t drop = used / 2;
+        while (drop < used && (((unsigned char)s_snapshot.reply_text[drop]) & 0xC0) == 0x80) {
+            ++drop;
+        }
+        memmove(s_snapshot.reply_text, s_snapshot.reply_text + drop, used - drop + 1);
+        used = strlen(s_snapshot.reply_text);
+    }
+    if (used > 0) {
+        s_snapshot.reply_text[used++] = '\n';
+        s_snapshot.reply_text[used] = '\0';
+    }
+    copy_str(s_snapshot.reply_text + used, capacity - used, text);
+    post_event(INKPANE_VOICE_EVT_TEXT);
+}
+
+static void snapshot_set_error(const char* text)
+{
+    std::lock_guard<std::mutex> lock(s_lock);
+    copy_str(s_snapshot.error, sizeof(s_snapshot.error), text);
+    post_event(INKPANE_VOICE_EVT_ERROR);
+}
+
+static void snapshot_set_activation(const char* code, const char* message)
+{
+    std::lock_guard<std::mutex> lock(s_lock);
+    copy_str(s_snapshot.activation_code, sizeof(s_snapshot.activation_code), code);
+    copy_str(s_snapshot.activation_message, sizeof(s_snapshot.activation_message), message);
+    s_snapshot.activation_visible = true;
+    post_event(INKPANE_VOICE_EVT_ACTIVATION);
+}
+
+static void snapshot_set_ws(bool connected)
+{
+    std::lock_guard<std::mutex> lock(s_lock);
+    s_snapshot.ws_connected = connected;
+}
+
+static void post_command(VoiceCmd type, const char* text = nullptr)
+{
+    if (s_cmd_queue == nullptr) {
+        return;
+    }
+    VoiceCommand command;
+    memset(&command, 0, sizeof(command));
+    command.type = type;
+    if (text != nullptr) {
+        copy_str(command.text, sizeof(command.text), text);
+    }
+    xQueueSend(s_cmd_queue, &command, 0);
+}
+
+/* ------------------------------------------------------------------ */
+/* MCP bridge                                                         */
+/* ------------------------------------------------------------------ */
+
+static int voice_mcp_send(void* context, const char* json, size_t len)
+{
+    (void)context;
+    if (s_protocol == nullptr) {
+        return -1;
+    }
+    s_protocol->SendMcpMessage(std::string(json, len));
+    return 0;
+}
+
+static bool voice_mcp_time(void* context, int* year, int* month, int* day, int* hour, int* minute,
+                           int* second, int* offset_minutes)
+{
+    (void)context;
+    inkpane_datetime_t dt;
+    if (!inkpane_board_time_valid() || inkpane_board_time_get(&dt) != ESP_OK) {
+        return false;
+    }
+    *year = dt.year;
+    *month = dt.month;
+    *day = dt.day;
+    *hour = dt.hour;
+    *minute = dt.minute;
+    *second = dt.second;
+    *offset_minutes = s_utc_offset;
+    return true;
+}
+
+static void voice_mcp_mutation(void* context)
+{
+    (void)context;
+    post_event(INKPANE_VOICE_EVT_REFRESH);
+}
+
+static void voice_init_mcp()
+{
+    memset(&s_mcp_env, 0, sizeof(s_mcp_env));
+    s_mcp_env.allow_control = s_allow_control;
+    s_mcp_env.get_local_time = voice_mcp_time;
+    s_mcp_env.timezone = s_timezone;
+    s_mcp_env.on_mutation = voice_mcp_mutation;
+    s_mcp = mcp_server_create(voice_mcp_send, nullptr, &s_mcp_env);
+}
+
+/* Local providers for the self.inkpane.device.status / volume.set tools. The
+ * port layer cannot read board sensors, so voice_app installs them here. */
+static int voice_status_json(char* json, size_t capacity)
+{
+    if (json == nullptr || capacity == 0) {
+        return -1;
+    }
+    int battery = inkpane_board_battery_percent();
+    int millivolt = inkpane_board_battery_millivolt();
+    inkpane_env_t env;
+    bool has_env = inkpane_board_read_env(&env);
+    int rssi = inkpane_wifi_rssi();
+    int written = snprintf(
+        json, capacity,
+        "{\"batteryPercent\":%d,\"batteryMillivolt\":%d,\"temperature\":%.1f,"
+        "\"humidity\":%.1f,\"rssi\":%d,\"volume\":%d,\"wakeWords\":[\"%s\"],"
+        "\"allowControl\":%s}",
+        battery, millivolt, has_env ? env.temperature_c : -999.0f,
+        has_env ? env.humidity_pct : -1.0f, rssi, s_volume, s_wake_ptrs[0],
+        s_allow_control ? "true" : "false");
+    if (written < 0 || (size_t)written >= capacity) {
+        return -1;
+    }
+    return written;
+}
+
+static int voice_set_volume(int volume)
+{
+    if (volume < 0 || volume > 100) {
+        return -1;
+    }
+    s_volume = volume;
+    if (s_codec != nullptr) {
+        s_codec->SetOutputVolume(volume);
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Audio callbacks                                                    */
+/* ------------------------------------------------------------------ */
+
+static void on_send_queue_available()
+{
+    post_command(VoiceCmd::SendAudio);
+}
+
+static void on_wake_word(const std::string& wake_word)
+{
+    {
+        std::lock_guard<std::mutex> lock(s_lock);
+        copy_str(s_snapshot.wake_word, sizeof(s_snapshot.wake_word), wake_word.c_str());
+    }
+    post_command(VoiceCmd::WakeWord, wake_word.c_str());
+}
+
+static void on_vad_change(bool speaking) { (void)speaking; }
+
+static void on_playback_drained() {}
+
+/* ------------------------------------------------------------------ */
+/* Protocol callbacks                                                 */
+/* ------------------------------------------------------------------ */
+
+static void on_incoming_audio(std::unique_ptr<AudioStreamPacket> packet)
+{
+    if (s_audio != nullptr) {
+        s_audio->PushPacketToDecodeQueue(std::move(packet));
+    }
+}
+
+static void on_incoming_json(const cJSON* root)
+{
+    s_last_activity_ms = now_ms();
+    const cJSON* type = cJSON_GetObjectItem(root, "type");
+    if (!cJSON_IsString(type)) {
+        return;
+    }
+    const char* value = type->valuestring;
+    if (strcmp(value, "stt") == 0) {
+        const cJSON* text = cJSON_GetObjectItem(root, "text");
+        if (cJSON_IsString(text)) {
+            post_command(VoiceCmd::SttText, text->valuestring);
+        }
+    } else if (strcmp(value, "tts") == 0) {
+        const cJSON* state = cJSON_GetObjectItem(root, "state");
+        if (!cJSON_IsString(state)) {
+            return;
+        }
+        if (strcmp(state->valuestring, "start") == 0) {
+            post_command(VoiceCmd::TtsStart);
+        } else if (strcmp(state->valuestring, "stop") == 0) {
+            post_command(VoiceCmd::TtsStop);
+        } else if (strcmp(state->valuestring, "sentence_start") == 0) {
+            const cJSON* text = cJSON_GetObjectItem(root, "text");
+            if (cJSON_IsString(text)) {
+                post_command(VoiceCmd::ReplyText, text->valuestring);
+            }
+        }
+    } else if (strcmp(value, "mcp") == 0) {
+        const cJSON* payload = cJSON_GetObjectItem(root, "payload");
+        if (cJSON_IsObject(payload) && s_mcp_queue != nullptr) {
+            char* json = cJSON_PrintUnformatted(payload);
+            if (json != nullptr) {
+                size_t length = strlen(json);
+                char* copy =
+                    (char*)heap_caps_malloc(length + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                if (copy == nullptr) {
+                    copy = (char*)heap_caps_malloc(length + 1, MALLOC_CAP_INTERNAL);
+                }
+                if (copy != nullptr) {
+                    memcpy(copy, json, length + 1);
+                    if (xQueueSend(s_mcp_queue, &copy, 0) != pdTRUE) {
+                        heap_caps_free(copy);
+                    }
+                }
+                cJSON_free(json);
+            }
+        }
+    } else if (strcmp(value, "alert") == 0) {
+        const cJSON* message = cJSON_GetObjectItem(root, "message");
+        if (cJSON_IsString(message)) {
+            post_command(VoiceCmd::Error, message->valuestring);
+        }
+    } else if (strcmp(value, "system") == 0) {
+        ESP_LOGI(TAG, "ignoring system command");
+    }
+}
+
+static void on_audio_channel_opened()
+{
+    snapshot_set_ws(true);
+    s_last_activity_ms = now_ms();
+}
+
+static void on_audio_channel_closed()
+{
+    snapshot_set_ws(false);
+    post_command(VoiceCmd::ChannelClosed);
+}
+
+static void on_network_error(const std::string& message)
+{
+    snapshot_set_error(message.c_str());
+    post_command(VoiceCmd::Error, message.c_str());
+}
+
+/* ------------------------------------------------------------------ */
+/* Protocol lifecycle                                                 */
+/* ------------------------------------------------------------------ */
+
+static bool open_audio_channel()
+{
+    if (s_protocol == nullptr) {
+        return false;
+    }
+    if (s_protocol->IsAudioChannelOpened()) {
+        return true;
+    }
+    snapshot_set_state(INKPANE_VOICE_CONNECTING);
+    if (!s_protocol->OpenAudioChannel()) {
+        snapshot_set_state(INKPANE_VOICE_READY);
+        return false;
+    }
+    snapshot_set_ws(true);
+    return true;
+}
+
+static void close_audio_channel(bool reenable_wake_word)
+{
+    if (s_protocol != nullptr) {
+        s_protocol->CloseAudioChannel();
+    }
+    if (s_audio != nullptr) {
+        s_audio->EnableVoiceProcessing(false);
+        s_audio->EnableWakeWordDetection(reenable_wake_word && !s_muted);
+    }
+    snapshot_set_ws(false);
+}
+
+static void start_listening(ListeningMode mode)
+{
+    if (!open_audio_channel()) {
+        return;
+    }
+    s_listening_mode = mode;
+    s_audio->EnableWakeWordDetection(false);
+    s_audio->EnableVoiceProcessing(true);
+    s_protocol->SendStartListening(mode);
+    snapshot_set_state(INKPANE_VOICE_LISTENING);
+    s_last_activity_ms = now_ms();
+}
+
+static void start_conversation(bool manual)
+{
+    inkpane_voice_state_t state = snapshot_state();
+    if (state != INKPANE_VOICE_READY && state != INKPANE_VOICE_OFFLINE) {
+        return;
+    }
+    if (s_audio == nullptr) {
+        snapshot_set_state(INKPANE_VOICE_ERROR);
+        return;
+    }
+    snapshot_reset_text();
+    start_listening(manual ? kListeningModeManualStop : kListeningModeAutoStop);
+}
+
+/* ------------------------------------------------------------------ */
+/* Command handling                                                   */
+/* ------------------------------------------------------------------ */
+
+static void handle_tts_start()
+{
+    snapshot_set_state(INKPANE_VOICE_SPEAKING);
+    s_audio->EnableVoiceProcessing(false);
+#if CONFIG_INKPANE_VOICE_WAKE_DURING_PLAYBACK
+    s_audio->EnableWakeWordDetection(!s_muted);
+#else
+    s_audio->EnableWakeWordDetection(false);
+#endif
+    s_last_activity_ms = now_ms();
+}
+
+static void handle_tts_stop()
+{
+    close_audio_channel(true);
+    snapshot_set_state(INKPANE_VOICE_READY);
+    s_last_activity_ms = now_ms();
+}
+
+static void handle_button_short()
+{
+    inkpane_voice_state_t state = snapshot_state();
+    switch (state) {
+    case INKPANE_VOICE_READY:
+    case INKPANE_VOICE_OFFLINE:
+        start_conversation(true);
+        break;
+    case INKPANE_VOICE_LISTENING:
+        if (s_listening_mode == kListeningModeManualStop) {
+            s_protocol->SendStopListening();
+            s_audio->EnableVoiceProcessing(false);
+            snapshot_set_state(INKPANE_VOICE_THINKING);
+            s_last_activity_ms = now_ms();
+        } else {
+            close_audio_channel(true);
+            snapshot_set_state(INKPANE_VOICE_READY);
+        }
+        break;
+    case INKPANE_VOICE_SPEAKING:
+        s_protocol->SendAbortSpeaking(kAbortReasonNone);
+        close_audio_channel(true);
+        snapshot_set_state(INKPANE_VOICE_READY);
+        break;
+    case INKPANE_VOICE_THINKING:
+        close_audio_channel(true);
+        snapshot_set_state(INKPANE_VOICE_READY);
+        break;
+    default:
+        break;
+    }
+}
+
+static void handle_button_long()
+{
+    s_muted = !s_muted;
+    {
+        std::lock_guard<std::mutex> lock(s_lock);
+        s_snapshot.muted = s_muted;
+    }
+    post_event(INKPANE_VOICE_EVT_STATE);
+    if (s_audio != nullptr) {
+        if (s_muted) {
+            s_audio->EnableWakeWordDetection(false);
+        } else if (snapshot_state() == INKPANE_VOICE_READY) {
+            s_audio->EnableWakeWordDetection(true);
+        }
+    }
+}
+
+static void handle_apply_config()
+{
+    if (s_codec != nullptr) {
+        s_codec->SetOutputVolume(s_volume);
+    }
+    if (s_audio != nullptr) {
+        s_audio->ReloadWakeWords();
+    }
+    if (s_mcp != nullptr) {
+        s_mcp_env.allow_control = s_allow_control;
+        mcp_server_set_env(s_mcp, &s_mcp_env);
+    }
+    std::lock_guard<std::mutex> lock(s_lock);
+    s_snapshot.control_allowed = s_allow_control;
+}
+
+static void handle_error(const char* text)
+{
+    snapshot_set_error(text != nullptr ? text : "语音服务异常");
+    if (s_error_since_ms == 0) {
+        s_error_since_ms = now_ms();
+    }
+    if (snapshot_state() != INKPANE_VOICE_ERROR) {
+        close_audio_channel(true);
+        snapshot_set_state(INKPANE_VOICE_ERROR);
+    }
+}
+
+static void handle_mcp_payload()
+{
+    if (s_mcp == nullptr) {
+        return;
+    }
+    char* payload = nullptr;
+    if (xQueueReceive(s_mcp_queue, &payload, 0) == pdTRUE && payload != nullptr) {
+        mcp_server_handle_json(s_mcp, payload, strlen(payload));
+        heap_caps_free(payload);
+    }
+}
+
+static void control_tick()
+{
+    int64_t current = now_ms();
+    inkpane_voice_state_t state = snapshot_state();
+    if (state == INKPANE_VOICE_LISTENING &&
+        current - s_last_activity_ms > VOICE_LISTEN_TIMEOUT_MS) {
+        if (s_listening_mode == kListeningModeManualStop) {
+            s_protocol->SendStopListening();
+        }
+        s_audio->EnableVoiceProcessing(false);
+        snapshot_set_state(INKPANE_VOICE_THINKING);
+        s_last_activity_ms = current;
+    } else if (state == INKPANE_VOICE_THINKING &&
+               current - s_last_activity_ms > VOICE_THINK_TIMEOUT_MS) {
+        close_audio_channel(true);
+        snapshot_set_state(INKPANE_VOICE_READY);
+    } else if (state == INKPANE_VOICE_SPEAKING &&
+               current - s_last_activity_ms > VOICE_SPEAK_TIMEOUT_MS) {
+        s_protocol->SendAbortSpeaking(kAbortReasonNone);
+        close_audio_channel(true);
+        snapshot_set_state(INKPANE_VOICE_READY);
+    } else if (state == INKPANE_VOICE_ERROR && s_error_since_ms != 0 &&
+               current - s_error_since_ms > VOICE_ERROR_PAGE_MS) {
+        s_error_since_ms = 0;
+        close_audio_channel(true);
+        snapshot_set_state(INKPANE_VOICE_READY);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Init / activation / control task                                   */
+/* ------------------------------------------------------------------ */
+
+static bool copy_config(const inkpane_voice_config_t* config)
+{
+    if (config == nullptr) {
+        return false;
+    }
+    s_enabled = config->enabled;
+    s_allow_control = config->allow_control;
+    copy_str(s_ota_url, sizeof(s_ota_url), config->ota_url);
+    copy_str(s_ws_url, sizeof(s_ws_url), config->ws_url);
+    copy_str(s_ws_token, sizeof(s_ws_token), config->ws_token);
+    s_ws_version = config->ws_version >= 1 && config->ws_version <= 3 ? config->ws_version : 1;
+    copy_str(s_mac, sizeof(s_mac), config->device_mac);
+    copy_str(s_uuid, sizeof(s_uuid), config->device_uuid);
+    copy_str(s_timezone, sizeof(s_timezone), config->timezone);
+    copy_str(s_api_url, sizeof(s_api_url), config->api_url);
+    copy_str(s_api_token, sizeof(s_api_token), config->api_token);
+    copy_str(s_firmware, sizeof(s_firmware), config->firmware_version);
+    s_threshold = config->wake_threshold;
+    s_volume = config->volume;
+    s_utc_offset = config->utc_offset_minutes;
+    s_wake_count = config->wake_word_count;
+    if (s_wake_count < 0) {
+        s_wake_count = 0;
+    }
+    if (s_wake_count > INKPANE_VOICE_MAX_WAKE_WORDS) {
+        s_wake_count = INKPANE_VOICE_MAX_WAKE_WORDS;
+    }
+    for (int i = 0; i < s_wake_count; ++i) {
+        copy_str(s_wake_words[i], sizeof(s_wake_words[i]), config->wake_words[i]);
+        s_wake_ptrs[i] = s_wake_words[i];
+    }
+    if (s_wake_count == 0) {
+        copy_str(s_wake_words[0], sizeof(s_wake_words[0]), "你好小智");
+        s_wake_ptrs[0] = s_wake_words[0];
+        s_wake_count = 1;
+    }
+    s_activated = s_ws_url[0] != '\0';
+    return true;
+}
+
+static bool ensure_time_ready()
+{
+    if (time(nullptr) > 1700000000) {
+        return true;
+    }
+    if (inkpane_wifi_sync_time(5000) != ESP_OK) {
+        return false;
+    }
+    inkpane_datetime_t dt;
+    int64_t local = (int64_t)time(nullptr) + (int64_t)s_utc_offset * 60;
+    inkpane_datetime_from_local_epoch(local, &dt);
+    return inkpane_board_time_set(&dt) == ESP_OK;
+}
+
+static bool save_session(const VoiceOtaResult& result)
+{
+    if (result.ws_url.empty()) {
+        snapshot_set_error("语音服务未返回 WebSocket 地址");
+        snapshot_set_state(INKPANE_VOICE_ERROR);
+        return false;
+    }
+    copy_str(s_ws_url, sizeof(s_ws_url), result.ws_url.c_str());
+    copy_str(s_ws_token, sizeof(s_ws_token), result.ws_token.c_str());
+    s_ws_version = result.ws_version >= 1 && result.ws_version <= 3 ? result.ws_version : 1;
+    s_activated = true;
+    {
+        std::lock_guard<std::mutex> lock(s_lock);
+        s_snapshot.activation_visible = false;
+    }
+    post_event(INKPANE_VOICE_EVT_SESSION, s_ws_url, s_ws_token, s_ws_version, true);
+    ESP_LOGI(TAG, "voice session ready: %s (v%d)", s_ws_url, s_ws_version);
+    return true;
+}
+
+static bool ensure_activated()
+{
+    if (s_activated && s_ws_url[0] != '\0') {
+        return true;
+    }
+    if (s_ota_url[0] == '\0') {
+        snapshot_set_error("未配置语音 OTA 地址");
+        snapshot_set_state(INKPANE_VOICE_ERROR);
+        return false;
+    }
+    if (!ensure_time_ready()) {
+        snapshot_set_error("系统时间未校准，无法校验 TLS 证书");
+        snapshot_set_state(INKPANE_VOICE_OFFLINE);
+        vTaskDelay(pdMS_TO_TICKS(20000));
+        return false;
+    }
+
+    snapshot_set_state(INKPANE_VOICE_ACTIVATING);
+    while (!s_stop) {
+        VoiceOtaResult result = voice_ota_check(s_ota_url, s_mac, s_uuid, s_firmware);
+        if (result.status == VoiceOtaResult::OK) {
+            if (save_session(result)) {
+                return true;
+            }
+            continue;
+        }
+        if (result.status == VoiceOtaResult::ACTIVATION_REQUIRED) {
+            snapshot_set_activation(result.activation_code.c_str(),
+                                    result.activation_message.c_str());
+            for (int i = 0; i < 10 && !s_stop; ++i) {
+                int activation = voice_ota_activate(s_ota_url, s_mac, s_uuid, s_firmware);
+                if (activation == 0) {
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(activation == 1 ? 3000 : 10000));
+            }
+            continue;
+        }
+        const char* message = result.status == VoiceOtaResult::MQTT_ONLY
+                                  ? "该语音服务仅返回 MQTT 配置，墨窗仅支持 WebSocket"
+                                  : (result.error.empty() ? "语音服务暂时不可达"
+                                                          : result.error.c_str());
+        snapshot_set_error(message);
+        snapshot_set_state(INKPANE_VOICE_OFFLINE);
+        ESP_LOGW(TAG, "voice OTA failed: %s", message);
+        for (int i = 0; i < 30 && !s_stop; ++i) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+    return false;
+}
+
+static bool init_audio()
+{
+    s_codec = inkpane_voice_board_codec();
+    if (s_codec == nullptr) {
+        snapshot_set_error("音频编解码器初始化失败（ES8311）");
+        snapshot_set_state(INKPANE_VOICE_ERROR);
+        return false;
+    }
+    s_codec->SetOutputVolume(s_volume);
+
+    s_audio = new AudioService();
+    if (s_audio == nullptr) {
+        snapshot_set_error("音频服务内存不足");
+        snapshot_set_state(INKPANE_VOICE_ERROR);
+        return false;
+    }
+    AudioServiceCallbacks callbacks;
+    callbacks.on_send_queue_available = on_send_queue_available;
+    callbacks.on_wake_word_detected = on_wake_word;
+    callbacks.on_vad_change = on_vad_change;
+    callbacks.on_playback_drained = on_playback_drained;
+    s_audio->SetCallbacks(callbacks);
+    s_audio->Initialize(s_codec);
+    s_audio->Start();
+    s_audio->EnableWakeWordDetection(true);
+    if (!s_audio->IsWakeWordRunning() || s_audio->GetWakeWords().empty()) {
+        snapshot_set_error("唤醒词模型未加载，请执行 idf.py flash 烧录 model 分区");
+        snapshot_set_state(INKPANE_VOICE_ERROR);
+        return false;
+    }
+
+    s_protocol = new WebsocketProtocol();
+    s_protocol->SetConfig(s_ws_url, s_ws_token, s_ws_version);
+    s_protocol->OnIncomingAudio(on_incoming_audio);
+    s_protocol->OnIncomingJson(on_incoming_json);
+    s_protocol->OnAudioChannelOpened(on_audio_channel_opened);
+    s_protocol->OnAudioChannelClosed(on_audio_channel_closed);
+    s_protocol->OnNetworkError(on_network_error);
+    s_protocol->Start();
+
+    voice_init_mcp();
+    mcp_tools_set_device_hooks(voice_status_json, voice_set_volume);
+    return true;
+}
+
+static void control_task(void* argument)
+{
+    (void)argument;
+    ESP_LOGI(TAG, "voice control task started");
+
+    if (s_enabled) {
+        while (!s_stop && !ensure_activated()) {
+            vTaskDelay(pdMS_TO_TICKS(30000));
+        }
+        if (!s_stop && init_audio()) {
+            snapshot_set_state(INKPANE_VOICE_READY);
+            post_event(INKPANE_VOICE_EVT_STATE);
+        }
+    } else {
+        snapshot_set_state(INKPANE_VOICE_DISABLED);
+    }
+
+    VoiceCommand command;
+    while (!s_stop) {
+        if (xQueueReceive(s_cmd_queue, &command, pdMS_TO_TICKS(200)) == pdTRUE) {
+            switch (command.type) {
+            case VoiceCmd::WakeWord:
+                start_conversation(false);
+                break;
+            case VoiceCmd::SendAudio:
+                if (s_protocol != nullptr) {
+                    while (auto packet = s_audio->PopPacketFromSendQueue()) {
+                        if (!s_protocol->SendAudio(std::move(packet))) {
+                            while (s_audio->PopPacketFromSendQueue()) {
+                            }
+                            break;
+                        }
+                    }
+                }
+                break;
+            case VoiceCmd::ButtonShort:
+                handle_button_short();
+                break;
+            case VoiceCmd::ButtonLong:
+                handle_button_long();
+                break;
+            case VoiceCmd::NetworkUp:
+                if (snapshot_state() == INKPANE_VOICE_OFFLINE) {
+                    snapshot_set_state(INKPANE_VOICE_READY);
+                }
+                break;
+            case VoiceCmd::NetworkDown:
+                close_audio_channel(false);
+                snapshot_set_state(INKPANE_VOICE_OFFLINE);
+                break;
+            case VoiceCmd::ApplyConfig:
+                handle_apply_config();
+                break;
+            case VoiceCmd::TtsStart:
+                handle_tts_start();
+                break;
+            case VoiceCmd::TtsStop:
+                handle_tts_stop();
+                break;
+            case VoiceCmd::SttText:
+                snapshot_set_user(command.text);
+                snapshot_set_state(INKPANE_VOICE_THINKING);
+                s_last_activity_ms = now_ms();
+                break;
+            case VoiceCmd::ReplyText:
+                snapshot_append_reply(command.text);
+                snapshot_set_state(INKPANE_VOICE_SPEAKING);
+                s_last_activity_ms = now_ms();
+                break;
+            case VoiceCmd::ChannelClosed:
+                close_audio_channel(true);
+                if (snapshot_state() != INKPANE_VOICE_ERROR &&
+                    snapshot_state() != INKPANE_VOICE_OFFLINE) {
+                    snapshot_set_state(INKPANE_VOICE_READY);
+                }
+                break;
+            case VoiceCmd::Error:
+                handle_error(command.text);
+                break;
+            case VoiceCmd::McpPayload:
+                handle_mcp_payload();
+                break;
+            case VoiceCmd::Stop:
+                break;
+            default:
+                break;
+            }
+        }
+        handle_mcp_payload();
+        control_tick();
+    }
+
+    close_audio_channel(false);
+    if (s_audio != nullptr) {
+        s_audio->Stop();
+    }
+    s_control_task = nullptr;
+    vTaskDelete(nullptr);
+}
+
+/* ------------------------------------------------------------------ */
+/* Public C API                                                       */
+/* ------------------------------------------------------------------ */
+
+extern "C" esp_err_t inkpane_voice_init(const inkpane_voice_config_t* config)
+{
+    if (config == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!copy_config(config)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(&s_snapshot, 0, sizeof(s_snapshot));
+    s_snapshot.state = s_enabled ? INKPANE_VOICE_OFFLINE : INKPANE_VOICE_DISABLED;
+    s_snapshot.control_allowed = s_allow_control;
+    s_snapshot.muted = false;
+
+    inkpane_api_init(s_api_url, s_api_token);
+
+    if (s_event_queue == nullptr) {
+        s_event_queue = xQueueCreate(VOICE_EVENT_QUEUE_LEN, sizeof(inkpane_voice_event_t));
+    }
+    if (s_cmd_queue == nullptr) {
+        s_cmd_queue = xQueueCreate(VOICE_COMMAND_QUEUE_LEN, sizeof(VoiceCommand));
+    }
+    if (s_mcp_queue == nullptr) {
+        s_mcp_queue = xQueueCreate(VOICE_MCP_QUEUE_LEN, sizeof(char*));
+    }
+    if (s_event_queue == nullptr || s_cmd_queue == nullptr || s_mcp_queue == nullptr) {
+        ESP_LOGE(TAG, "cannot create voice queues");
+        return ESP_ERR_NO_MEM;
+    }
+    s_stop = false;
+    if (!s_enabled) {
+        return ESP_OK;
+    }
+    return ESP_OK;
+}
+
+extern "C" esp_err_t inkpane_voice_apply_config(const inkpane_voice_config_t* config)
+{
+    if (config == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    bool was_activated = s_activated;
+    if (!copy_config(config)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_started) {
+        return ESP_OK;
+    }
+    /* A changed OTA endpoint invalidates the old WebSocket credentials. */
+    if (!was_activated || s_ws_url[0] == '\0') {
+        s_activated = false;
+    }
+    post_command(VoiceCmd::ApplyConfig);
+    return ESP_OK;
+}
+
+extern "C" esp_err_t inkpane_voice_start(void)
+{
+    if (!s_enabled) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (s_started) {
+        return ESP_OK;
+    }
+    if (s_cmd_queue == nullptr) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_started = true;
+    BaseType_t created = xTaskCreate(control_task, "voice_control", VOICE_CONTROL_STACK, nullptr,
+                                     VOICE_CONTROL_PRIORITY, &s_control_task);
+    return created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
+extern "C" void inkpane_voice_stop(void)
+{
+    s_stop = true;
+    post_command(VoiceCmd::Stop);
+}
+
+extern "C" bool inkpane_voice_poll_event(inkpane_voice_event_t* out)
+{
+    if (out == nullptr || s_event_queue == nullptr) {
+        return false;
+    }
+    return xQueueReceive(s_event_queue, out, 0) == pdTRUE;
+}
+
+extern "C" void inkpane_voice_get_snapshot(inkpane_voice_snapshot_t* out)
+{
+    if (out == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(s_lock);
+    *out = s_snapshot;
+}
+
+extern "C" bool inkpane_voice_session_active(void)
+{
+    inkpane_voice_state_t state = snapshot_state();
+    return state == INKPANE_VOICE_CONNECTING || state == INKPANE_VOICE_LISTENING ||
+           state == INKPANE_VOICE_THINKING || state == INKPANE_VOICE_SPEAKING;
+}
+
+extern "C" void inkpane_voice_button(bool long_press)
+{
+    post_command(long_press ? VoiceCmd::ButtonLong : VoiceCmd::ButtonShort);
+}
+
+extern "C" void inkpane_voice_set_muted(bool muted)
+{
+    if (s_muted == muted) {
+        return;
+    }
+    s_muted = muted;
+    {
+        std::lock_guard<std::mutex> lock(s_lock);
+        s_snapshot.muted = muted;
+    }
+    post_event(INKPANE_VOICE_EVT_STATE);
+    if (s_audio != nullptr) {
+        if (muted) {
+            s_audio->EnableWakeWordDetection(false);
+        } else if (snapshot_state() == INKPANE_VOICE_READY) {
+            s_audio->EnableWakeWordDetection(true);
+        }
+    }
+}
+
+extern "C" void inkpane_voice_notify_network(bool up)
+{
+    post_command(up ? VoiceCmd::NetworkUp : VoiceCmd::NetworkDown);
+}
+
+extern "C" void inkpane_voice_notify_time_ready(void)
+{
+    /* Time is validated lazily inside ensure_activated(); nothing to do. */
+}
+
+extern "C" void inkpane_voice_set_activation_visible(bool visible)
+{
+    std::lock_guard<std::mutex> lock(s_lock);
+    s_snapshot.activation_visible = visible;
+    post_event(INKPANE_VOICE_EVT_ACTIVATION);
+}

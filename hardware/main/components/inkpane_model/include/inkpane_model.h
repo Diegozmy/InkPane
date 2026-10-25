@@ -14,6 +14,10 @@
 #define INKPANE_MAX_TODOS 8
 #define INKPANE_MAX_MARKS 31
 #define INKPANE_MAX_FORECAST 3
+#define INKPANE_MAX_WAKE_WORDS 8
+/* 12 Chinese characters are 36 UTF-8 bytes; leave room for a terminator. */
+#define INKPANE_WAKE_WORD_LEN 48
+#define INKPANE_VOICE_OTA_URL_LEN 200
 #define INKPANE_TITLE_LEN 96
 #define INKPANE_LOCATION_LEN 48
 #define INKPANE_TEXT_LEN 32
@@ -95,10 +99,28 @@ typedef struct {
     uint8_t marks[INKPANE_MAX_MARKS];
 } inkpane_month_t;
 
+/**
+ * Voice assistant settings delivered with the screen payload (root `voice`).
+ * Missing fields keep their device-side defaults: `enabled`/`allow_control`
+ * default to true, `wake_threshold`/`volume` use -1 to mean "not provided".
+ */
+typedef struct {
+    bool present;
+    bool enabled;
+    bool allow_control;
+    char ota_url[INKPANE_VOICE_OTA_URL_LEN];
+    int wake_threshold;
+    int volume;
+    int wake_word_count;
+    char wake_words[INKPANE_MAX_WAKE_WORDS][INKPANE_WAKE_WORD_LEN];
+} inkpane_voice_settings_t;
+
 typedef struct {
     int schema_version;
     char timezone[40];
     int refresh_minutes;
+
+    inkpane_voice_settings_t voice;
 
     inkpane_rect_t modules[INKPANE_MAX_MODULES];
 

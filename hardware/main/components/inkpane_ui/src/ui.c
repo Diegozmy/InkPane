@@ -229,6 +229,12 @@ static const char *status_text(unsigned status)
     if (status & INKPANE_STATUS_LOW_BATTERY) {
         return "低电";
     }
+    if (status & INKPANE_STATUS_VOICE_ERROR) {
+        return "语音不可用";
+    }
+    if (status & INKPANE_STATUS_VOICE_MUTED) {
+        return "语音静音";
+    }
     return NULL;
 }
 
@@ -1108,4 +1114,276 @@ void inkpane_ui_render_notice(uint8_t *framebuffer, const char *title, const cha
     inkpane_text_draw(&canvas, small, 40, INKPANE_SCREEN_HEIGHT - small->line_height - 16,
                       "InkPane 墨窗 · 设备端", INKPANE_SCREEN_WIDTH - 80, INKPANE_ALIGN_CENTER,
                       true);
+}
+
+/* ------------------------------------------------------------------ */
+/* Voice assistant pages                                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Draw `text` word-wrapped inside `width`, using up to `max_lines` lines.
+ * Breaks whenever the next glyph would overflow; explicit '\n' also breaks.
+ * When text remains after the last line an ASCII "..." is appended so the
+ * caller can see the answer was truncated (the e-paper page cannot scroll).
+ */
+static void draw_wrapped(inkpane_canvas_t *canvas, const inkpane_font_t *font, int x, int y,
+                         int width, int max_lines, const char *text, bool black)
+{
+    if (canvas == NULL || font == NULL || text == NULL || max_lines <= 0 || width <= 0) {
+        return;
+    }
+    const char *cursor = text;
+    int baseline = y + font->ascent;
+    for (int line = 0; line < max_lines; ++line) {
+        while (*cursor == ' ') {
+            ++cursor;
+        }
+        if (*cursor == '\0') {
+            return;
+        }
+        if (*cursor == '\n') {
+            ++cursor;
+            baseline += font->line_height;
+            continue;
+        }
+        const char *line_start = cursor;
+        const char *line_end = cursor;
+        int used = 0;
+        while (*cursor != '\0') {
+            const char *glyph_start = cursor;
+            uint32_t codepoint = utf8_next(&cursor);
+            if (codepoint == '\n') {
+                break;
+            }
+            int advance = glyph_advance(font, codepoint);
+            if (used + advance > width && line_end != line_start) {
+                cursor = glyph_start;
+                break;
+            }
+            used += advance;
+            line_end = cursor;
+        }
+        draw_run(canvas, font, x, baseline, line_start, line_end, black);
+        bool more = *cursor != '\0';
+        if (line == max_lines - 1 && more) {
+            draw_glyph(canvas, font, x + used + 2, baseline, 0x2026, black);
+        }
+        if (line_end == line_start) {
+            /* A single glyph wider than the line: advance so we cannot loop. */
+            if (*cursor != '\0') {
+                utf8_next(&cursor);
+            }
+        }
+        baseline += font->line_height;
+        if (*cursor == '\0') {
+            return;
+        }
+    }
+}
+
+static void utf8_encode(char *out, uint32_t codepoint, size_t *length)
+{
+    if (codepoint < 0x80) {
+        out[0] = (char)codepoint;
+        *length = 1;
+    } else if (codepoint < 0x800) {
+        out[0] = (char)(0xC0 | (codepoint >> 6));
+        out[1] = (char)(0x80 | (codepoint & 0x3F));
+        *length = 2;
+    } else if (codepoint < 0x10000) {
+        out[0] = (char)(0xE0 | (codepoint >> 12));
+        out[1] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (codepoint & 0x3F));
+        *length = 3;
+    } else {
+        out[0] = (char)(0xF0 | (codepoint >> 18));
+        out[1] = (char)(0x80 | ((codepoint >> 12) & 0x3F));
+        out[2] = (char)(0x80 | ((codepoint >> 6) & 0x3F));
+        out[3] = (char)(0x80 | (codepoint & 0x3F));
+        *length = 4;
+    }
+}
+
+size_t inkpane_ui_voice_copy(char *dst, size_t cap, const char *src, size_t max_glyphs)
+{
+    if (dst == NULL || cap == 0) {
+        return 0;
+    }
+    dst[0] = '\0';
+    if (src == NULL || max_glyphs == 0) {
+        return 0;
+    }
+    const inkpane_font_t *font = inkpane_font_medium();
+    if (font == NULL) {
+        font = inkpane_font_small();
+    }
+    /* Reserve room for the trailing "..." so a truncated string always ends
+     * with it instead of a chopped UTF-8 sequence. */
+    const size_t content_cap = cap > 4 ? cap - 4 : 0;
+    size_t used = 0;
+    size_t glyphs = 0;
+    const char *cursor = src;
+    bool truncated = false;
+    while (*cursor != '\0') {
+        uint32_t codepoint = utf8_next(&cursor);
+        if (codepoint == '\r') {
+            continue;
+        }
+        if (glyphs >= max_glyphs) {
+            truncated = true;
+            break;
+        }
+        if (codepoint == '\n') {
+            if (used + 1 > content_cap) {
+                truncated = true;
+                break;
+            }
+            dst[used++] = '\n';
+            glyphs++;
+            continue;
+        }
+        if (codepoint < 0x20 || codepoint == 0xFFFD) {
+            codepoint = ' ';
+        }
+        if (codepoint != ' ' && codepoint != 0x3000 && font != NULL &&
+            inkpane_font_glyph(font, codepoint, NULL, NULL, NULL, NULL, NULL) == NULL) {
+            /* The 1-bit font cannot draw this code point; a space keeps the
+             * layout stable and avoids the hollow-box fallback. */
+            codepoint = ' ';
+        }
+        char encoded[4];
+        size_t encoded_len = 0;
+        utf8_encode(encoded, codepoint, &encoded_len);
+        if (used + encoded_len > content_cap) {
+            truncated = true;
+            break;
+        }
+        memcpy(dst + used, encoded, encoded_len);
+        used += encoded_len;
+        glyphs++;
+    }
+    if (truncated && cap >= 4) {
+        memcpy(dst + used, "...", 3);
+        used += 3;
+    }
+    dst[used] = '\0';
+    return used;
+}
+
+void inkpane_ui_render_voice(uint8_t *framebuffer, const inkpane_voice_view_t *view)
+{
+    if (framebuffer == NULL || view == NULL) {
+        return;
+    }
+    inkpane_canvas_t canvas;
+    inkpane_canvas_init(&canvas, framebuffer, INKPANE_SCREEN_WIDTH, INKPANE_SCREEN_HEIGHT, 0, 0);
+    inkpane_canvas_clear(&canvas, true);
+
+    const inkpane_font_t *large = inkpane_font_large();
+    const inkpane_font_t *medium = inkpane_font_medium();
+    const inkpane_font_t *small = inkpane_font_small();
+    if (large == NULL || medium == NULL || small == NULL) {
+        return;
+    }
+
+    inkpane_text_draw(&canvas, large, 40, 20, "语音助手", INKPANE_SCREEN_WIDTH - 80,
+                      INKPANE_ALIGN_LEFT, true);
+    char state[48];
+    inkpane_ui_voice_copy(state, sizeof(state), view->state_label, 16);
+    inkpane_text_draw(&canvas, medium, 40, 30, state, INKPANE_SCREEN_WIDTH - 80,
+                      INKPANE_ALIGN_RIGHT, true);
+    inkpane_canvas_hline(&canvas, 40, 80, INKPANE_SCREEN_WIDTH - 80, true);
+
+    char user_line[320];
+    snprintf(user_line, sizeof(user_line), "你：%s", view->user_text != NULL ? view->user_text : "");
+    draw_wrapped(&canvas, medium, 40, 96, INKPANE_SCREEN_WIDTH - 80, 2, user_line, true);
+
+    draw_wrapped(&canvas, medium, 40, 180, INKPANE_SCREEN_WIDTH - 80, 7, view->reply_text, true);
+
+    inkpane_canvas_hline(&canvas, 40, INKPANE_SCREEN_HEIGHT - 44, INKPANE_SCREEN_WIDTH - 80, true);
+    const char *hint = view->footer_hint != NULL ? view->footer_hint
+                                                 : "BOOT 打断 · 长按 BOOT 静音唤醒词";
+    char footer[160];
+    inkpane_ui_voice_copy(footer, sizeof(footer), hint, 48);
+    inkpane_text_draw(&canvas, small, 40, INKPANE_SCREEN_HEIGHT - small->line_height - 12, footer,
+                      INKPANE_SCREEN_WIDTH - 80, INKPANE_ALIGN_CENTER, true);
+}
+
+void inkpane_ui_render_voice_activation(uint8_t *framebuffer, const char *code, const char *message,
+                                        const char *url)
+{
+    if (framebuffer == NULL) {
+        return;
+    }
+    inkpane_canvas_t canvas;
+    inkpane_canvas_init(&canvas, framebuffer, INKPANE_SCREEN_WIDTH, INKPANE_SCREEN_HEIGHT, 0, 0);
+    inkpane_canvas_clear(&canvas, true);
+
+    const inkpane_font_t *large = inkpane_font_large();
+    const inkpane_font_t *huge = inkpane_font_huge();
+    const inkpane_font_t *medium = inkpane_font_medium();
+    const inkpane_font_t *small = inkpane_font_small();
+    if (large == NULL || huge == NULL || medium == NULL || small == NULL) {
+        return;
+    }
+
+    inkpane_text_draw(&canvas, large, 40, 28, "语音助手未激活", INKPANE_SCREEN_WIDTH - 80,
+                      INKPANE_ALIGN_CENTER, true);
+    inkpane_canvas_hline(&canvas, 40, 92, INKPANE_SCREEN_WIDTH - 80, true);
+
+    char digits[16];
+    inkpane_ui_voice_copy(digits, sizeof(digits), code, 12);
+    if (digits[0] == '\0') {
+        snprintf(digits, sizeof(digits), "------");
+    }
+    inkpane_text_draw(&canvas, huge, 40, 120, digits, INKPANE_SCREEN_WIDTH - 80,
+                      INKPANE_ALIGN_CENTER, true);
+
+    char body[256];
+    inkpane_ui_voice_copy(body, sizeof(body), message, 120);
+    if (body[0] == '\0') {
+        snprintf(body, sizeof(body), "在 xiaozhi.me 输入上面的激活码绑定设备");
+    }
+    draw_wrapped(&canvas, medium, 40, 240, INKPANE_SCREEN_WIDTH - 80, 3, body, true);
+
+    char line[160];
+    snprintf(line, sizeof(line), "绑定地址：%s", (url != NULL && url[0] != '\0') ? url : "xiaozhi.me");
+    inkpane_text_draw(&canvas, medium, 40, 340, line, INKPANE_SCREEN_WIDTH - 80,
+                      INKPANE_ALIGN_CENTER, true);
+    inkpane_text_draw(&canvas, small, 40, INKPANE_SCREEN_HEIGHT - small->line_height - 16,
+                      "激活后自动进入待命 · 按中键返回看板", INKPANE_SCREEN_WIDTH - 80,
+                      INKPANE_ALIGN_CENTER, true);
+}
+
+void inkpane_ui_render_voice_error(uint8_t *framebuffer, const char *title, const char *reason,
+                                   const char *hint)
+{
+    if (framebuffer == NULL) {
+        return;
+    }
+    inkpane_canvas_t canvas;
+    inkpane_canvas_init(&canvas, framebuffer, INKPANE_SCREEN_WIDTH, INKPANE_SCREEN_HEIGHT, 0, 0);
+    inkpane_canvas_clear(&canvas, true);
+
+    const inkpane_font_t *large = inkpane_font_large();
+    const inkpane_font_t *medium = inkpane_font_medium();
+    const inkpane_font_t *small = inkpane_font_small();
+    if (large == NULL || medium == NULL || small == NULL) {
+        return;
+    }
+
+    char heading[96];
+    inkpane_ui_voice_copy(heading, sizeof(heading), title, 24);
+    inkpane_text_draw(&canvas, large, 40, 48, heading[0] ? heading : "语音助手不可用",
+                      INKPANE_SCREEN_WIDTH - 80, INKPANE_ALIGN_CENTER, true);
+    inkpane_canvas_hline(&canvas, 40, 120, INKPANE_SCREEN_WIDTH - 80, true);
+
+    char body[320];
+    inkpane_ui_voice_copy(body, sizeof(body), reason, 120);
+    draw_wrapped(&canvas, medium, 40, 160, INKPANE_SCREEN_WIDTH - 80, 4, body, true);
+
+    char footer[192];
+    inkpane_ui_voice_copy(footer, sizeof(footer), hint, 80);
+    inkpane_text_draw(&canvas, small, 40, INKPANE_SCREEN_HEIGHT - small->line_height - 16, footer,
+                      INKPANE_SCREEN_WIDTH - 80, INKPANE_ALIGN_CENTER, true);
 }

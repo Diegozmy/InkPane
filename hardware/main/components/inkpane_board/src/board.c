@@ -174,6 +174,11 @@ bool inkpane_board_button_held(int gpio)
     return gpio_get_level((gpio_num_t)gpio) == 0;
 }
 
+i2c_master_bus_handle_t inkpane_board_i2c_bus(void)
+{
+    return g_i2c_bus;
+}
+
 esp_err_t inkpane_board_configure_button_wakeup(void)
 {
     uint64_t mask = 0;

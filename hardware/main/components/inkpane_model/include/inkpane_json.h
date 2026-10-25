@@ -3,6 +3,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * Minimal JSON reader used by the device payload parser.
  *
@@ -48,3 +52,7 @@ double json_number(const json_value_t *value, double fallback);
 bool json_bool(const json_value_t *value, bool fallback);
 int json_array_size(const json_value_t *value);
 const json_value_t *json_array_at(const json_value_t *value, int index);
+
+#ifdef __cplusplus
+}
+#endif

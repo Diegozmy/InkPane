@@ -30,10 +30,12 @@ typedef struct {
 #define INKPANE_STATUS_OFFLINE (1u << 0)
 #define INKPANE_STATUS_AUTH (1u << 1)
 #define INKPANE_STATUS_LOW_BATTERY (1u << 2)
+/* Voice state shown in the clock module's status line. */
+#define INKPANE_STATUS_VOICE_MUTED (1u << 3)
+#define INKPANE_STATUS_VOICE_ERROR (1u << 4)
 
 /** Load the font blob; pass NULL to use the blob embedded in the firmware. */
 esp_err_t inkpane_ui_init(const uint8_t *font_blob, size_t font_size);
-
 /** Redraw every enabled module from a parsed payload. */
 void inkpane_ui_render_full(uint8_t *framebuffer, const inkpane_screen_t *screen);
 
@@ -71,3 +73,34 @@ void inkpane_ui_render_notice(uint8_t *framebuffer, const char *title, const cha
 int inkpane_text_width(const inkpane_font_t *font, const char *text);
 int inkpane_text_draw(inkpane_canvas_t *canvas, const inkpane_font_t *font, int x, int y,
                       const char *text, int max_width, inkpane_align_t align, bool black);
+
+/* ------------------------------------------------------------------ */
+/* Voice assistant pages                                              */
+/* ------------------------------------------------------------------ */
+
+/** One voice-page frame; all strings are NUL-terminated and may be NULL. */
+typedef struct {
+    const char *state_label; /* 连接中/聆听中/思考中/正在回答/待命/网络未连接 */
+    const char *user_text;
+    const char *reply_text;
+    const char *footer_hint;
+} inkpane_voice_view_t;
+
+/** Full-screen conversation page (status + recognised text + reply). */
+void inkpane_ui_render_voice(uint8_t *framebuffer, const inkpane_voice_view_t *view);
+
+/** Full-screen activation page (6-digit code + message + xiaozhi.me hint). */
+void inkpane_ui_render_voice_activation(uint8_t *framebuffer, const char *code, const char *message,
+                                        const char *url);
+
+/** Full-screen voice error page (model missing / network / token failure). */
+void inkpane_ui_render_voice_error(uint8_t *framebuffer, const char *title, const char *reason,
+                                   const char *hint);
+
+/**
+ * Copy `src` into `dst` while dropping code points the 1-bit font cannot draw
+ * (emoji, rare hanzi, control chars), clamping to `max_glyphs` glyphs and
+ * appending "..." when truncated. Newlines are preserved. Returns the number
+ * of bytes written (excluding the terminator).
+ */
+size_t inkpane_ui_voice_copy(char *dst, size_t cap, const char *src, size_t max_glyphs);

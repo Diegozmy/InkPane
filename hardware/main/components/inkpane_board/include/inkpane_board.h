@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "driver/i2c_master.h"
 #include "esp_err.h"
 #include "inkpane_time.h"
 
@@ -39,6 +40,12 @@ void inkpane_board_power_off(void);
 
 /** Level of one of the four user buttons (GPIO 0/4/5/6), active low. */
 bool inkpane_board_button_held(int gpio);
+
+/**
+ * Shared I2C master bus (SDA 41 / SCL 42). The voice component adds the ES8311
+ * audio codec to this bus; everything else on the board is already attached.
+ */
+i2c_master_bus_handle_t inkpane_board_i2c_bus(void);
 
 /**
  * Enable deep-sleep wakeup on the buttons (EXT1, any low).
