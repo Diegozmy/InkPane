@@ -26,6 +26,7 @@ extern "C" {
 #include "inkpane_time.h"
 }
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -37,14 +38,20 @@ extern "C" {
 
 #define TAG "voice"
 
-#define VOICE_EVENT_QUEUE_LEN 8
-#define VOICE_COMMAND_QUEUE_LEN 8
+#define VOICE_EVENT_QUEUE_LEN 16
+#define VOICE_COMMAND_QUEUE_LEN 24
 #define VOICE_MCP_QUEUE_LEN 2
 #define VOICE_CONTROL_STACK 8192
 #define VOICE_CONTROL_PRIORITY 5
 #define VOICE_LISTEN_TIMEOUT_MS 20000
 #define VOICE_THINK_TIMEOUT_MS 20000
 #define VOICE_SPEAK_TIMEOUT_MS 60000
+/* Silence after speech before the client ends the turn itself. Keeps the reply
+ * latency independent of the server's (slower) VAD timeout. */
+#define VOICE_END_OF_SPEECH_MS 800
+/* The control loop wakes this often so queued microphone audio is never far
+ * behind, even when the command queue is busy. */
+#define VOICE_LOOP_TICK_MS 20
 #define VOICE_ERROR_PAGE_MS 12000
 
 enum class VoiceCmd : uint8_t {
@@ -88,6 +95,17 @@ static bool s_muted;
 static ListeningMode s_listening_mode = kListeningModeAutoStop;
 static int64_t s_last_activity_ms;
 static int64_t s_error_since_ms;
+
+/* Microphone audio pending: set by the audio task, drained by the control task.
+ * The flag makes audio delivery independent of command-queue space. */
+static std::atomic<bool> s_audio_pending{false};
+/* Client-side end-of-speech detection (see on_vad_change/control_tick). */
+static std::atomic<bool> s_vad_speaking{false};
+static std::atomic<bool> s_vad_heard_speech{false};
+static std::atomic<int64_t> s_vad_silence_ms{0};
+/* First reply packet of a turn; guards a single SPEAKING transition even when
+ * the server's tts start message is missing. */
+static std::atomic<bool> s_reply_audio_seen{false};
 
 /* Borrowed config strings copied so the caller may reuse its struct. */
 static bool s_enabled;
@@ -179,14 +197,17 @@ static void post_event(inkpane_voice_event_type_t type, const char* ws_url = nul
 static void snapshot_set_state(inkpane_voice_state_t state)
 {
     bool changed = false;
+    inkpane_voice_state_t previous;
     {
         std::lock_guard<std::mutex> lock(s_lock);
-        if (s_snapshot.state != state) {
+        previous = s_snapshot.state;
+        if (previous != state) {
             s_snapshot.state = state;
             changed = true;
         }
     }
     if (changed) {
+        ESP_LOGI(TAG, "state %d -> %d", (int)previous, (int)state);
         post_event(INKPANE_VOICE_EVT_STATE);
     }
 }
@@ -255,10 +276,10 @@ static void snapshot_set_ws(bool connected)
     s_snapshot.ws_connected = connected;
 }
 
-static void post_command(VoiceCmd type, const char* text = nullptr)
+static bool post_command(VoiceCmd type, const char* text = nullptr)
 {
     if (s_cmd_queue == nullptr) {
-        return;
+        return false;
     }
     VoiceCommand command;
     memset(&command, 0, sizeof(command));
@@ -266,7 +287,15 @@ static void post_command(VoiceCmd type, const char* text = nullptr)
     if (text != nullptr) {
         copy_str(command.text, sizeof(command.text), text);
     }
-    xQueueSend(s_cmd_queue, &command, 0);
+    if (xQueueSend(s_cmd_queue, &command, 0) != pdTRUE) {
+        /* Audio notifications are retried via s_audio_pending; every other
+         * command carries data that would otherwise be lost silently. */
+        if (type != VoiceCmd::SendAudio) {
+            ESP_LOGW(TAG, "command queue full, dropped type %d", (int)type);
+        }
+        return false;
+    }
+    return true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -361,6 +390,7 @@ static int voice_set_volume(int volume)
 
 static void on_send_queue_available()
 {
+    s_audio_pending.store(true);
     post_command(VoiceCmd::SendAudio);
 }
 
@@ -373,7 +403,20 @@ static void on_wake_word(const std::string& wake_word)
     post_command(VoiceCmd::WakeWord, wake_word.c_str());
 }
 
-static void on_vad_change(bool speaking) { (void)speaking; }
+static void on_vad_change(bool speaking)
+{
+    if (snapshot_state() != INKPANE_VOICE_LISTENING) {
+        return;
+    }
+    if (speaking) {
+        s_vad_speaking.store(true);
+        s_vad_heard_speech.store(true);
+        s_vad_silence_ms.store(0);
+    } else if (s_vad_speaking.load()) {
+        s_vad_speaking.store(false);
+        s_vad_silence_ms.store(now_ms());
+    }
+}
 
 static void on_playback_drained() {}
 
@@ -383,6 +426,11 @@ static void on_playback_drained() {}
 
 static void on_incoming_audio(std::unique_ptr<AudioStreamPacket> packet)
 {
+    if (!s_reply_audio_seen.exchange(true)) {
+        /* First reply packet of this turn: make sure the page leaves "listening"
+         * and the microphone stops streaming, even if tts start was dropped. */
+        post_command(VoiceCmd::TtsStart);
+    }
     if (s_audio != nullptr) {
         s_audio->PushPacketToDecodeQueue(std::move(packet));
     }
@@ -498,11 +546,30 @@ static void prewarm_audio_channel()
     }
 }
 
+static void send_pending_audio()
+{
+    if (s_audio == nullptr || s_protocol == nullptr || !s_protocol->IsAudioChannelOpened()) {
+        /* Channel still opening: leave the packets queued (start_listening
+         * flushes them once the server has been told to listen). */
+        return;
+    }
+    while (auto packet = s_audio->PopPacketFromSendQueue()) {
+        if (!s_protocol->SendAudio(std::move(packet))) {
+            while (s_audio->PopPacketFromSendQueue()) {
+            }
+            break;
+        }
+    }
+}
+
 static void close_audio_channel(bool reenable_wake_word)
 {
     if (s_protocol != nullptr) {
         s_protocol->CloseAudioChannel();
     }
+    s_vad_heard_speech.store(false);
+    s_vad_silence_ms.store(0);
+    s_vad_speaking.store(false);
     if (s_audio != nullptr) {
         s_audio->EnableVoiceProcessing(false);
         s_audio->EnableWakeWordDetection(reenable_wake_word && !s_muted);
@@ -524,6 +591,10 @@ static void start_listening(ListeningMode mode)
         }
     }
     s_listening_mode = mode;
+    s_vad_speaking.store(false);
+    s_vad_heard_speech.store(false);
+    s_vad_silence_ms.store(0);
+    s_reply_audio_seen.store(false);
     s_audio->EnableWakeWordDetection(false);
     s_audio->EnableVoiceProcessing(true);
     s_protocol->SendStartListening(mode);
@@ -559,6 +630,8 @@ static void start_conversation(bool manual)
 static void handle_tts_start()
 {
     snapshot_set_state(INKPANE_VOICE_SPEAKING);
+    s_vad_heard_speech.store(false);
+    s_vad_silence_ms.store(0);
     s_audio->EnableVoiceProcessing(false);
 #if CONFIG_INKPANE_VOICE_WAKE_DURING_PLAYBACK
     s_audio->EnableWakeWordDetection(!s_muted);
@@ -673,6 +746,22 @@ static void control_tick()
 {
     int64_t current = now_ms();
     inkpane_voice_state_t state = snapshot_state();
+    if (state == INKPANE_VOICE_LISTENING && s_listening_mode == kListeningModeAutoStop &&
+        s_vad_heard_speech.load() && !s_vad_speaking.load() && s_vad_silence_ms.load() != 0 &&
+        current - s_vad_silence_ms.load() >= VOICE_END_OF_SPEECH_MS) {
+        /* Client-side endpointing: the user stopped talking, so finalise the turn
+         * now instead of waiting for the server's slower VAD timeout. */
+        ESP_LOGI(TAG, "end of speech after %d ms of silence", (int)VOICE_END_OF_SPEECH_MS);
+        s_vad_heard_speech.store(false);
+        s_vad_silence_ms.store(0);
+        s_audio->EnableVoiceProcessing(false);
+        if (s_protocol != nullptr) {
+            s_protocol->SendStopListening();
+        }
+        snapshot_set_state(INKPANE_VOICE_THINKING);
+        s_last_activity_ms = current;
+        return;
+    }
     if (state == INKPANE_VOICE_LISTENING &&
         current - s_last_activity_ms > VOICE_LISTEN_TIMEOUT_MS) {
         if (s_listening_mode == kListeningModeManualStop) {
@@ -952,23 +1041,13 @@ static void control_task(void* argument)
 
     VoiceCommand command;
     while (!s_stop) {
-        if (xQueueReceive(s_cmd_queue, &command, pdMS_TO_TICKS(200)) == pdTRUE) {
+        if (xQueueReceive(s_cmd_queue, &command, pdMS_TO_TICKS(VOICE_LOOP_TICK_MS)) == pdTRUE) {
             switch (command.type) {
             case VoiceCmd::WakeWord:
                 start_conversation(false);
                 break;
             case VoiceCmd::SendAudio:
-                /* While the channel is still opening the packets stay queued
-                 * (send queue holds ~2.4 s); start_listening flushes them. */
-                if (s_protocol != nullptr && s_protocol->IsAudioChannelOpened()) {
-                    while (auto packet = s_audio->PopPacketFromSendQueue()) {
-                        if (!s_protocol->SendAudio(std::move(packet))) {
-                            while (s_audio->PopPacketFromSendQueue()) {
-                            }
-                            break;
-                        }
-                    }
-                }
+                send_pending_audio();
                 break;
             case VoiceCmd::ButtonShort:
                 handle_button_short();
@@ -1022,6 +1101,9 @@ static void control_task(void* argument)
             default:
                 break;
             }
+        }
+        if (s_audio_pending.exchange(false)) {
+            send_pending_audio();
         }
         handle_mcp_payload();
         control_tick();
