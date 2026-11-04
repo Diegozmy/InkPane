@@ -444,6 +444,7 @@ static void on_incoming_json(const cJSON* root)
         return;
     }
     const char* value = type->valuestring;
+    ESP_LOGI(TAG, "ws message: %s", value);
     if (strcmp(value, "stt") == 0) {
         const cJSON* text = cJSON_GetObjectItem(root, "text");
         if (cJSON_IsString(text)) {
