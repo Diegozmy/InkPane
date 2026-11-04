@@ -1061,6 +1061,8 @@ void app_main(void)
 #define RESIDENT_VOICE_RENDER_MS 1500
 #define RESIDENT_ERROR_PAGE_MS (15 * 1000)
 #define RESIDENT_ACTIVATION_PAGE_MS (5 * 60 * 1000)
+/* Keep the finished answer on screen a few seconds before the dashboard returns. */
+#define RESIDENT_VOICE_LINGER_MS (6 * 1000)
 
 /* Field diagnostics: a low-priority task keeps logging while the main loop is
  * stuck, so "no serial output" can be told apart from "main task blocked". */
@@ -1099,6 +1101,8 @@ static int64_t s_error_until_ms;
 static int64_t s_activation_until_ms;
 static bool s_voice_dirty;
 static uint32_t s_voice_signature;
+static bool s_voice_in_turn;
+static int64_t s_voice_linger_until_ms;
 static int64_t s_last_voice_render_ms;
 static int64_t s_last_wifi_attempt_ms = -RESIDENT_WIFI_RETRY_MS;
 static int64_t s_last_battery_check_ms;
@@ -1716,7 +1720,14 @@ static void resident_main(void)
         if (!want_error) {
             s_error_dismissed = false;
         }
-        bool show_voice = want_voice;
+        /* Keep the finished turn on screen long enough to read the answer. */
+        if (!want_voice && s_voice_in_turn) {
+            s_voice_linger_until_ms = now_ms + RESIDENT_VOICE_LINGER_MS;
+        }
+        s_voice_in_turn = want_voice;
+        const bool linger_voice = !want_voice && !want_error && !want_activation &&
+                                  now_ms < s_voice_linger_until_ms;
+        bool show_voice = want_voice || linger_voice;
         bool show_activation = want_activation && !want_voice;
         bool show_error = want_error && !want_voice && !want_activation && !s_error_dismissed;
 

@@ -49,6 +49,10 @@ extern "C" {
 /* Silence after speech before the client ends the turn itself. Keeps the reply
  * latency independent of the server's (slower) VAD timeout. */
 #define VOICE_END_OF_SPEECH_MS 800
+/* Continuous conversation: after a reply, reopen the microphone once the
+ * speaker has drained and listen for a follow-up without another wake word. */
+#define VOICE_FOLLOWUP_DELAY_MS 900
+#define VOICE_FOLLOWUP_TIMEOUT_MS 7000
 /* The control loop wakes this often so queued microphone audio is never far
  * behind, even when the command queue is busy. */
 #define VOICE_LOOP_TICK_MS 20
@@ -106,6 +110,9 @@ static std::atomic<int64_t> s_vad_silence_ms{0};
 /* First reply packet of a turn; guards a single SPEAKING transition even when
  * the server's tts start message is missing. */
 static std::atomic<bool> s_reply_audio_seen{false};
+/* Continuous conversation bookkeeping. */
+static std::atomic<int64_t> s_followup_at_ms{0};
+static std::atomic<bool> s_followup_active{false};
 
 /* Borrowed config strings copied so the caller may reuse its struct. */
 static bool s_enabled;
@@ -412,6 +419,8 @@ static void on_vad_change(bool speaking)
         s_vad_speaking.store(true);
         s_vad_heard_speech.store(true);
         s_vad_silence_ms.store(0);
+        /* A follow-up question arrived: this is a normal turn now. */
+        s_followup_active.store(false);
     } else if (s_vad_speaking.load()) {
         s_vad_speaking.store(false);
         s_vad_silence_ms.store(now_ms());
@@ -426,6 +435,14 @@ static void on_playback_drained() {}
 
 static void on_incoming_audio(std::unique_ptr<AudioStreamPacket> packet)
 {
+    const inkpane_voice_state_t state = snapshot_state();
+    if (state != INKPANE_VOICE_CONNECTING && state != INKPANE_VOICE_LISTENING &&
+        state != INKPANE_VOICE_THINKING && state != INKPANE_VOICE_SPEAKING) {
+        /* Server-initiated audio outside a turn (e.g. the session goodbye after
+         * an idle channel): drop it instead of popping up the voice page. */
+        ESP_LOGI(TAG, "ignoring stray audio in state %d", (int)state);
+        return;
+    }
     if (!s_reply_audio_seen.exchange(true)) {
         /* First reply packet of this turn: make sure the page leaves "listening"
          * and the microphone stops streaming, even if tts start was dropped. */
@@ -445,12 +462,25 @@ static void on_incoming_json(const cJSON* root)
     }
     const char* value = type->valuestring;
     ESP_LOGI(TAG, "ws message: %s", value);
+    const inkpane_voice_state_t current = snapshot_state();
+    const bool in_turn = current == INKPANE_VOICE_CONNECTING || current == INKPANE_VOICE_LISTENING ||
+                         current == INKPANE_VOICE_THINKING || current == INKPANE_VOICE_SPEAKING;
     if (strcmp(value, "stt") == 0) {
+        if (!in_turn) {
+            ESP_LOGI(TAG, "ignoring stray stt in state %d", (int)current);
+            return;
+        }
         const cJSON* text = cJSON_GetObjectItem(root, "text");
         if (cJSON_IsString(text)) {
             post_command(VoiceCmd::SttText, text->valuestring);
         }
     } else if (strcmp(value, "tts") == 0) {
+        if (!in_turn) {
+            /* The server says goodbye when an idle session ends; without this
+             * guard the device would pop up the voice page and play it. */
+            ESP_LOGI(TAG, "ignoring stray tts in state %d", (int)current);
+            return;
+        }
         const cJSON* state = cJSON_GetObjectItem(root, "state");
         if (!cJSON_IsString(state)) {
             return;
@@ -571,6 +601,8 @@ static void close_audio_channel(bool reenable_wake_word)
     s_vad_heard_speech.store(false);
     s_vad_silence_ms.store(0);
     s_vad_speaking.store(false);
+    s_followup_at_ms.store(0);
+    s_followup_active.store(false);
     if (s_audio != nullptr) {
         s_audio->EnableVoiceProcessing(false);
         s_audio->EnableWakeWordDetection(reenable_wake_word && !s_muted);
@@ -618,6 +650,8 @@ static void start_conversation(bool manual)
         return;
     }
     snapshot_reset_text();
+    s_followup_at_ms.store(0);
+    s_followup_active.store(false);
     /* Capture the microphone from the wake instant: if the channel still has to
      * connect, those frames wait in the send queue and are flushed afterwards. */
     s_audio->EnableVoiceProcessing(true);
@@ -649,8 +683,16 @@ static void handle_tts_stop()
      * which arrives as ChannelClosed and returns the assistant to READY. */
     s_audio->EnableVoiceProcessing(false);
     s_audio->EnableWakeWordDetection(!s_muted);
+    s_vad_heard_speech.store(false);
+    s_vad_silence_ms.store(0);
+    s_reply_audio_seen.store(false);
     snapshot_set_state(INKPANE_VOICE_READY);
     s_last_activity_ms = now_ms();
+    if (s_enabled && !s_muted) {
+        /* Continuous conversation: reopen the microphone once the speaker has
+         * drained and wait for a follow-up question. */
+        s_followup_at_ms.store(now_ms() + VOICE_FOLLOWUP_DELAY_MS);
+    }
 }
 
 static void handle_button_short()
@@ -747,6 +789,29 @@ static void control_tick()
 {
     int64_t current = now_ms();
     inkpane_voice_state_t state = snapshot_state();
+    /* Continuous conversation: reopen the microphone shortly after a reply,
+     * then leave the conversation when nobody follows up. */
+    const int64_t followup_at = s_followup_at_ms.load();
+    if (followup_at != 0 && current >= followup_at) {
+        s_followup_at_ms.store(0);
+        if (state == INKPANE_VOICE_READY) {
+            ESP_LOGI(TAG, "continuous conversation: listening for a follow-up");
+            s_followup_active.store(true);
+            start_listening(kListeningModeAutoStop);
+            s_last_activity_ms = current;
+            return;
+        }
+    }
+    if (state == INKPANE_VOICE_LISTENING && s_followup_active.load() &&
+        !s_vad_heard_speech.load() &&
+        current - s_last_activity_ms >= VOICE_FOLLOWUP_TIMEOUT_MS) {
+        ESP_LOGI(TAG, "no follow-up, ending the conversation");
+        s_followup_active.store(false);
+        close_audio_channel(true);
+        snapshot_set_state(INKPANE_VOICE_READY);
+        s_last_activity_ms = current;
+        return;
+    }
     if (state == INKPANE_VOICE_LISTENING && s_listening_mode == kListeningModeAutoStop &&
         s_vad_heard_speech.load() && !s_vad_speaking.load() && s_vad_silence_ms.load() != 0 &&
         current - s_vad_silence_ms.load() >= VOICE_END_OF_SPEECH_MS) {
