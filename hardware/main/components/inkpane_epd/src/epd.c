@@ -308,11 +308,10 @@ esp_err_t inkpane_epd_show_region(const uint8_t *framebuffer, int x, int y, int 
         err = send_data(0x80);
     }
     /* SSD1683 window registers: 0x44 takes pixel X start/end, 0x45 takes the Y
-     * pair. This partial path sends Y start then Y end (empirically tuned here;
-     * the vendor demo sends Y end then Y start, and that is the order the full
-     * window in set_full_window() must use — swapping the full window's Y pair
-     * turned the panel into static noise). Keep the two paths as they are
-     * unless you can test on hardware. */
+     * pair in the same order as set_full_window(): Y end first, then Y start.
+     * The previous version sent Y start first here, which made every partial
+     * window scan backwards and left the panel unchanged (the clock never
+     * ticked). Keep both paths in the same order. */
     const int pixel_x0 = x0;
     const int pixel_x1 = x1 - 8;
     const int pixel_y0 = y;
@@ -324,10 +323,10 @@ esp_err_t inkpane_epd_show_region(const uint8_t *framebuffer, int x, int y, int 
     if (err == ESP_OK) err = send_data(pixel_x1 & 0xFF);
     if (err == ESP_OK) err = send_data((pixel_x1 >> 8) & 0xFF);
     if (err == ESP_OK) err = send_command(0x45);
-    if (err == ESP_OK) err = send_data(pixel_y0 & 0xFF);
-    if (err == ESP_OK) err = send_data((pixel_y0 >> 8) & 0xFF);
     if (err == ESP_OK) err = send_data(pixel_y1 & 0xFF);
     if (err == ESP_OK) err = send_data((pixel_y1 >> 8) & 0xFF);
+    if (err == ESP_OK) err = send_data(pixel_y0 & 0xFF);
+    if (err == ESP_OK) err = send_data((pixel_y0 >> 8) & 0xFF);
     if (err == ESP_OK) err = send_command(0x4E);
     if (err == ESP_OK) err = send_data(pixel_x0 & 0xFF);
     if (err == ESP_OK) err = send_data((pixel_x0 >> 8) & 0xFF);
@@ -340,6 +339,19 @@ esp_err_t inkpane_epd_show_region(const uint8_t *framebuffer, int x, int y, int 
     if (err == ESP_OK) err = send_data(0xFF);
     if (err == ESP_OK) err = send_command(0x20);
     if (err == ESP_OK) err = wait_busy();
+
+    /* The differential update compares RAM 0x24 (new) against 0x26 ("old",
+     * i.e. what the panel currently shows). Refresh 0x26 with the frame just
+     * drawn so the next partial update diffs against the real display instead
+     * of a stale one (that is what left the clock area frozen/ghosted). */
+    if (err == ESP_OK) err = send_command(0x4E);
+    if (err == ESP_OK) err = send_data(pixel_x0 & 0xFF);
+    if (err == ESP_OK) err = send_data((pixel_x0 >> 8) & 0xFF);
+    if (err == ESP_OK) err = send_command(0x4F);
+    if (err == ESP_OK) err = send_data(pixel_y0 & 0xFF);
+    if (err == ESP_OK) err = send_data((pixel_y0 >> 8) & 0xFF);
+    if (err == ESP_OK) err = send_command(0x26);
+    if (err == ESP_OK) err = send_buffer(packed, packed_size);
 
     heap_caps_free(packed);
     return err;

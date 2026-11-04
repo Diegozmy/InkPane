@@ -277,6 +277,9 @@ static void show_failure_notice(const inkpane_config_t *config)
     }
 }
 
+static int s_clock_key = -1;
+static unsigned s_clock_status_key;
+
 static void refresh_clock_partial(const inkpane_config_t *config)
 {
     /* The mini-module clock rectangle only exists on the overview view. While
@@ -297,14 +300,29 @@ static void refresh_clock_partial(const inkpane_config_t *config)
     if (rect == NULL) {
         return;
     }
+    /* Only repaint when the displayed minute or the status line changed. The
+     * loop ticks every second, so without this guard the panel would partial
+     * refresh once a second (slow, and it wears the panel / ghosts the area). */
+    const unsigned status = status_flags();
+    const int key = valid ? ((((dt.year * 100 + dt.month) * 100 + dt.day) * 100 + dt.hour) * 100 +
+                             dt.minute)
+                          : -1;
+    if (key == s_clock_key && status == s_clock_status_key) {
+        return;
+    }
+    s_clock_key = key;
+    s_clock_status_key = status;
     s_persist.partial_count++;
-    inkpane_ui_render_clock(s_framebuffer, rect, &clock, status_flags());
+    inkpane_ui_render_clock(s_framebuffer, rect, &clock, status);
     esp_err_t err = inkpane_epd_show_region(s_framebuffer, rect->x, rect->y, rect->w, rect->h);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "clock partial refresh failed: %s", esp_err_to_name(err));
         /* The warm-panel assumption may be wrong (rail glitch, controller
          * reset): force a cold panel init + full refresh on the next wake. */
         s_persist.panel_warm = false;
+    } else {
+        ESP_LOGI(TAG, "clock partial refresh %dx%d at (%d,%d)", rect->w, rect->h, rect->x,
+                 rect->y);
     }
 }
 
