@@ -771,6 +771,24 @@ void AudioService::PlaySound(const std::string_view& ogg) {
     (void)ogg;
 }
 
+bool AudioService::PlayLocalPcm(std::vector<int16_t>&& pcm) {
+    if (pcm.empty() || service_stopped_.load()) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    if (audio_playback_queue_.full()) {
+        return false;
+    }
+    AudioTask task;
+    task.type = kAudioTaskTypeDecodeToPlaybackQueue;
+    task.pcm = std::move(pcm);
+    audio_playback_queue_.push_back(std::move(task));
+    /* Same bookkeeping as the decode path so on_playback_drained still fires. */
+    playback_drained_notified_ = false;
+    audio_queue_cv_.notify_all();
+    return true;
+}
+
 bool AudioService::IsIdle() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
     return audio_encode_queue_.empty() && IsPlaybackDrainedLocked() && audio_testing_queue_.empty();

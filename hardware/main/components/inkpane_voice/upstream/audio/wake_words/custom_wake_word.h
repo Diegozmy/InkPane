@@ -73,6 +73,10 @@ private:
     std::condition_variable wake_word_cv_;
 
     void FeedSamples(const int16_t* data, size_t samples, bool mono);
+    /** Fill commands_ from voice_identity, dropping phrases MultiNet cannot take. */
+    void LoadConfiguredCommands();
+    /** Register commands_ with MultiNet; false when none were accepted. */
+    bool ApplyCommands();
 };
 
 #endif

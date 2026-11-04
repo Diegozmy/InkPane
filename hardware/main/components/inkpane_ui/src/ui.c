@@ -561,6 +561,15 @@ static void draw_todos(inkpane_canvas_t *canvas, const inkpane_rect_t *rect,
 /* Full-screen zoomed renderings                                      */
 /* ------------------------------------------------------------------ */
 
+/* The zoomed pages are read across the room, so they lay out with the 32 px
+ * face and spread the rows over the full panel height instead of leaving the
+ * lower half empty. */
+#define ZOOM_MARGIN 32
+#define ZOOM_CONTENT_W (INKPANE_SCREEN_WIDTH - 2 * ZOOM_MARGIN)
+#define ZOOM_HEADER_Y 20
+#define ZOOM_ROW_MIN 64
+#define ZOOM_ROW_MAX 96
+
 void inkpane_ui_render_clock_full(uint8_t *framebuffer, const inkpane_clock_t *clock,
                                   unsigned status)
 {
@@ -572,9 +581,9 @@ void inkpane_ui_render_clock_full(uint8_t *framebuffer, const inkpane_clock_t *c
     inkpane_canvas_clear(&canvas, true);
 
     const inkpane_font_t *large = inkpane_font_large();
-    const inkpane_font_t *small = inkpane_font_small();
+    const inkpane_font_t *medium = inkpane_font_medium();
     const inkpane_font_t *huge = inkpane_font_huge();
-    if (large == NULL || small == NULL || huge == NULL) {
+    if (large == NULL || medium == NULL || huge == NULL) {
         return;
     }
 
@@ -589,7 +598,7 @@ void inkpane_ui_render_clock_full(uint8_t *framebuffer, const inkpane_clock_t *c
      * natural digit pitch (no extra letter-spacing). */
     int cell = huge->digit_advance > 0 ? huge->digit_advance : huge->px / 2;
     int total = cell * 5;
-    int time_y = 110;
+    int time_y = 84;
     int baseline = time_y + huge->ascent;
     int pen = (INKPANE_SCREEN_WIDTH - total) / 2;
     for (int i = 0; time_text[i] != '\0'; ++i) {
@@ -605,17 +614,17 @@ void inkpane_ui_render_clock_full(uint8_t *framebuffer, const inkpane_clock_t *c
     } else {
         snprintf(label, sizeof(label), "等待校时");
     }
-    int label_y = time_y + huge->line_height + 40;
+    int label_y = time_y + huge->line_height + 48;
     inkpane_text_draw(&canvas, large, 0, label_y, label, INKPANE_SCREEN_WIDTH,
                       INKPANE_ALIGN_CENTER, true);
 
-    inkpane_canvas_hline(&canvas, INKPANE_SCREEN_WIDTH / 2 - 140, label_y + large->line_height + 50,
-                         280, true);
+    inkpane_canvas_hline(&canvas, INKPANE_SCREEN_WIDTH / 2 - 160, label_y + large->line_height + 56,
+                          320, true);
 
     const char *text = status_text(status);
     if (text != NULL) {
-        inkpane_text_draw(&canvas, small, 0, INKPANE_SCREEN_HEIGHT - small->line_height - 20, text,
-                          INKPANE_SCREEN_WIDTH, INKPANE_ALIGN_CENTER, true);
+        inkpane_text_draw(&canvas, medium, 0, INKPANE_SCREEN_HEIGHT - medium->line_height - 18,
+                          text, INKPANE_SCREEN_WIDTH, INKPANE_ALIGN_CENTER, true);
     }
 }
 
@@ -628,35 +637,35 @@ void inkpane_ui_render_calendar_full(uint8_t *framebuffer, const inkpane_month_t
     inkpane_canvas_init(&canvas, framebuffer, INKPANE_SCREEN_WIDTH, INKPANE_SCREEN_HEIGHT, 0, 0);
     inkpane_canvas_clear(&canvas, true);
 
-    const inkpane_font_t *small = inkpane_font_small();
     const inkpane_font_t *medium = inkpane_font_medium();
-    if (small == NULL || medium == NULL) {
+    const inkpane_font_t *large = inkpane_font_large();
+    if (medium == NULL || large == NULL) {
         return;
     }
     if (!month->present) {
-        inkpane_text_draw(&canvas, medium, 0, INKPANE_SCREEN_HEIGHT / 2, "日历暂无数据",
-                          INKPANE_SCREEN_WIDTH, INKPANE_ALIGN_CENTER, true);
+        inkpane_text_draw(&canvas, large, 0, INKPANE_SCREEN_HEIGHT / 2 - large->line_height / 2,
+                          "日历暂无数据", INKPANE_SCREEN_WIDTH, INKPANE_ALIGN_CENTER, true);
         return;
     }
 
     char title[32];
     snprintf(title, sizeof(title), "%d年%d月", month->year, month->month);
-    inkpane_text_draw(&canvas, medium, 0, 30, title, INKPANE_SCREEN_WIDTH, INKPANE_ALIGN_CENTER,
+    inkpane_text_draw(&canvas, large, 0, 16, title, INKPANE_SCREEN_WIDTH, INKPANE_ALIGN_CENTER,
                       true);
 
-    int grid_x = 40;
-    int grid_w = INKPANE_SCREEN_WIDTH - 80;
+    int grid_x = ZOOM_MARGIN;
+    int grid_w = ZOOM_CONTENT_W;
     int cell_w = grid_w / 7;
-    int header_y = 90;
+    int header_y = 16 + large->line_height + 14;
     for (int i = 0; i < 7; ++i) {
-        inkpane_text_draw(&canvas, small, grid_x + i * cell_w, header_y, inkpane_weekday_short(i),
+        inkpane_text_draw(&canvas, medium, grid_x + i * cell_w, header_y, inkpane_weekday_short(i),
                           cell_w, INKPANE_ALIGN_CENTER, true);
     }
 
-    int grid_y = header_y + small->line_height + 12;
-    int row_h = (INKPANE_SCREEN_HEIGHT - grid_y - 24) / 6;
-    if (row_h > 56) {
-        row_h = 56;
+    int grid_y = header_y + medium->line_height + 10;
+    int row_h = (INKPANE_SCREEN_HEIGHT - grid_y - 20) / 6;
+    if (row_h < large->line_height + 6) {
+        row_h = large->line_height + 6;
     }
     int mark_count = month->mark_count;
     if (mark_count < 0) {
@@ -684,25 +693,25 @@ void inkpane_ui_render_calendar_full(uint8_t *framebuffer, const inkpane_month_t
                 number[1] = '\0';
             }
             bool is_today = day == month->today;
-            int text_y = cy + row_h / 2 - medium->line_height / 2;
+            int text_y = cy + row_h / 2 - large->line_height / 2;
             if (is_today) {
-                int block_w = cell_w - 8;
-                int block_h = medium->line_height + 10;
+                int block_w = cell_w - 12;
+                int block_h = large->line_height + 8;
                 int block_x = cx + cell_w / 2 - block_w / 2;
                 int block_y = cy + row_h / 2 - block_h / 2;
                 inkpane_canvas_fill(&canvas, block_x, block_y, block_w, block_h, true);
-                inkpane_text_draw(&canvas, medium, cx, text_y, number, cell_w,
+                inkpane_text_draw(&canvas, large, cx, text_y, number, cell_w,
                                   INKPANE_ALIGN_CENTER, false);
             } else {
-                inkpane_text_draw(&canvas, medium, cx, text_y, number, cell_w,
+                inkpane_text_draw(&canvas, large, cx, text_y, number, cell_w,
                                   INKPANE_ALIGN_CENTER, true);
             }
             for (int i = 0; i < mark_count; ++i) {
                 if (month->marks[i] == day) {
                     bool white = is_today;
-                    int dot_y = cy + row_h - 8;
-                    int dot_x = cx + cell_w / 2 - 2;
-                    inkpane_canvas_fill(&canvas, dot_x, dot_y, 4, 4, !white);
+                    int dot_y = cy + row_h - 7;
+                    int dot_x = cx + cell_w / 2 - 3;
+                    inkpane_canvas_fill(&canvas, dot_x, dot_y, 6, 6, !white);
                 }
             }
             day++;
@@ -719,48 +728,48 @@ void inkpane_ui_render_weather_full(uint8_t *framebuffer, const inkpane_weather_
     inkpane_canvas_init(&canvas, framebuffer, INKPANE_SCREEN_WIDTH, INKPANE_SCREEN_HEIGHT, 0, 0);
     inkpane_canvas_clear(&canvas, true);
 
-    const inkpane_font_t *small = inkpane_font_small();
-    const inkpane_font_t *large = inkpane_font_large();
     const inkpane_font_t *medium = inkpane_font_medium();
-    if (small == NULL || large == NULL || medium == NULL) {
+    const inkpane_font_t *large = inkpane_font_large();
+    const inkpane_font_t *huge = inkpane_font_huge();
+    if (medium == NULL || large == NULL || huge == NULL) {
         return;
     }
 
     if (!weather->present) {
-        inkpane_text_draw(&canvas, medium, 0, INKPANE_SCREEN_HEIGHT / 2, "天气暂无数据",
-                          INKPANE_SCREEN_WIDTH, INKPANE_ALIGN_CENTER, true);
+        inkpane_text_draw(&canvas, large, 0, INKPANE_SCREEN_HEIGHT / 2 - large->line_height / 2,
+                          "天气暂无数据", INKPANE_SCREEN_WIDTH, INKPANE_ALIGN_CENTER, true);
         return;
     }
 
-    inkpane_text_draw(&canvas, small, 40, 30, weather->city, INKPANE_SCREEN_WIDTH - 80,
+    inkpane_text_draw(&canvas, medium, ZOOM_MARGIN, 20, weather->city, ZOOM_CONTENT_W,
                       INKPANE_ALIGN_LEFT, true);
 
     char value[32];
     format_tenths(value, sizeof(value), weather->temperature);
     char temperature[40];
     snprintf(temperature, sizeof(temperature), "%s°", value);
-    int temp_y = 70;
-    inkpane_text_draw(&canvas, large, 40, temp_y, temperature, INKPANE_SCREEN_WIDTH - 80,
+    int temp_y = 56;
+    inkpane_text_draw(&canvas, huge, ZOOM_MARGIN, temp_y, temperature, ZOOM_CONTENT_W,
                       INKPANE_ALIGN_LEFT, true);
 
-    int cond_y = temp_y + large->line_height + 20;
-    inkpane_text_draw(&canvas, medium, 40, cond_y, weather->condition, INKPANE_SCREEN_WIDTH - 80,
+    int cond_y = temp_y + huge->line_height;
+    inkpane_text_draw(&canvas, large, ZOOM_MARGIN, cond_y, weather->condition, ZOOM_CONTENT_W,
                       INKPANE_ALIGN_LEFT, true);
 
     char details[64];
     snprintf(details, sizeof(details), "湿度 %d%%  风 %.0fkm/h", (int)weather->humidity,
              weather->wind_speed);
-    int details_y = cond_y + medium->line_height + 12;
-    inkpane_text_draw(&canvas, small, 40, details_y, details, INKPANE_SCREEN_WIDTH - 80,
+    int details_y = cond_y + large->line_height + 4;
+    inkpane_text_draw(&canvas, medium, ZOOM_MARGIN, details_y, details, ZOOM_CONTENT_W,
                       INKPANE_ALIGN_LEFT, true);
 
-    int line_y = details_y + small->line_height + 30;
-    inkpane_canvas_hline(&canvas, 40, line_y, INKPANE_SCREEN_WIDTH - 80, true);
-    int header_y2 = line_y + 10;
-    inkpane_text_draw(&canvas, small, 40, header_y2, "未来三天", INKPANE_SCREEN_WIDTH - 80,
+    int line_y = details_y + medium->line_height + 18;
+    inkpane_canvas_hline(&canvas, ZOOM_MARGIN, line_y, ZOOM_CONTENT_W, true);
+    int header_y2 = line_y + 12;
+    inkpane_text_draw(&canvas, medium, ZOOM_MARGIN, header_y2, "未来三天", ZOOM_CONTENT_W,
                       INKPANE_ALIGN_LEFT, true);
 
-    int forecast_top = header_y2 + small->line_height + 24;
+    int forecast_top = header_y2 + medium->line_height + 16;
     int forecast_count = weather->forecast_count;
     if (forecast_count < 0) {
         forecast_count = 0;
@@ -770,26 +779,28 @@ void inkpane_ui_render_weather_full(uint8_t *framebuffer, const inkpane_weather_
     }
     int forecast_row = (INKPANE_SCREEN_HEIGHT - forecast_top - 24) /
                        (forecast_count > 0 ? forecast_count : 3);
-    if (forecast_row > 100) {
-        forecast_row = 100;
+    if (forecast_row > 96) {
+        forecast_row = 96;
     }
     for (int i = 0; i < forecast_count; ++i) {
         int row_y = forecast_top + i * forecast_row;
         if (row_y > INKPANE_SCREEN_HEIGHT - 30) {
             break;
         }
-        inkpane_text_draw(&canvas, medium, 40, row_y, weather->forecast[i].weekday, 100,
+        inkpane_text_draw(&canvas, large, ZOOM_MARGIN, row_y, weather->forecast[i].weekday, 112,
                           INKPANE_ALIGN_LEFT, true);
-        inkpane_text_draw(&canvas, medium, 40 + 104, row_y, weather->forecast[i].condition,
-                          INKPANE_SCREEN_WIDTH - 80 - 104 - 130, INKPANE_ALIGN_LEFT, true);
+        int cond_x = ZOOM_MARGIN + 116;
+        inkpane_text_draw(&canvas, large, cond_x, row_y, weather->forecast[i].condition,
+                          INKPANE_SCREEN_WIDTH - ZOOM_MARGIN - cond_x - 152,
+                          INKPANE_ALIGN_LEFT, true);
         char range[32];
         int minimum = (int)(weather->forecast[i].min +
                            (weather->forecast[i].min >= 0 ? 0.5f : -0.5f));
         int maximum = (int)(weather->forecast[i].max +
                             (weather->forecast[i].max >= 0 ? 0.5f : -0.5f));
         snprintf(range, sizeof(range), "%d~%d°", minimum, maximum);
-        inkpane_text_draw(&canvas, medium, INKPANE_SCREEN_WIDTH - 40 - 110, row_y, range, 110,
-                          INKPANE_ALIGN_RIGHT, true);
+        inkpane_text_draw(&canvas, large, INKPANE_SCREEN_WIDTH - ZOOM_MARGIN - 140, row_y, range,
+                          140, INKPANE_ALIGN_RIGHT, true);
     }
 }
 
@@ -803,36 +814,36 @@ void inkpane_ui_render_events_full(uint8_t *framebuffer, const inkpane_event_t *
     inkpane_canvas_init(&canvas, framebuffer, INKPANE_SCREEN_WIDTH, INKPANE_SCREEN_HEIGHT, 0, 0);
     inkpane_canvas_clear(&canvas, true);
 
-    const inkpane_font_t *small = inkpane_font_small();
     const inkpane_font_t *medium = inkpane_font_medium();
-    if (small == NULL || medium == NULL) {
+    const inkpane_font_t *large = inkpane_font_large();
+    if (medium == NULL || large == NULL) {
         return;
     }
     if (total < count) {
         total = count;
     }
 
-    inkpane_text_draw(&canvas, medium, 40, 30, courses ? "今日课程" : "今日日程",
-                      INKPANE_SCREEN_WIDTH - 80, INKPANE_ALIGN_LEFT, true);
+    inkpane_text_draw(&canvas, large, ZOOM_MARGIN, ZOOM_HEADER_Y, courses ? "今日课程" : "今日日程",
+                      ZOOM_CONTENT_W, INKPANE_ALIGN_LEFT, true);
 
     char counter[16];
     snprintf(counter, sizeof(counter), "%d 项", total);
-    inkpane_text_draw(&canvas, medium, 40, 30, counter, INKPANE_SCREEN_WIDTH - 80,
+    inkpane_text_draw(&canvas, large, ZOOM_MARGIN, ZOOM_HEADER_Y, counter, ZOOM_CONTENT_W,
                       INKPANE_ALIGN_RIGHT, true);
 
-    int divider_y = 30 + medium->line_height + 12;
-    inkpane_canvas_hline(&canvas, 40, divider_y, INKPANE_SCREEN_WIDTH - 80, true);
+    int divider_y = ZOOM_HEADER_Y + large->line_height + 14;
+    inkpane_canvas_hline(&canvas, ZOOM_MARGIN, divider_y, ZOOM_CONTENT_W, true);
 
     if (total == 0) {
-        inkpane_text_draw(&canvas, medium, 0, INKPANE_SCREEN_HEIGHT / 2,
+        inkpane_text_draw(&canvas, large, 0, INKPANE_SCREEN_HEIGHT / 2 - large->line_height / 2,
                           courses ? "今日无课" : "今天没有日程", INKPANE_SCREEN_WIDTH,
                           INKPANE_ALIGN_CENTER, true);
         return;
     }
 
-    int row_h = courses ? 48 : 56;
-    int start_y = divider_y + 16;
-    int max_rows = (INKPANE_SCREEN_HEIGHT - 40 - start_y) / row_h;
+    int start_y = divider_y + 22;
+    int bottom = 26;
+    int max_rows = (INKPANE_SCREEN_HEIGHT - bottom - start_y) / ZOOM_ROW_MIN;
     int rows = count < max_rows ? count : max_rows;
     if (rows < 0) {
         rows = 0;
@@ -840,6 +851,11 @@ void inkpane_ui_render_events_full(uint8_t *framebuffer, const inkpane_event_t *
     if (rows > 0 && rows < total) {
         rows -= 1; /* reserve one row for the "more" hint */
     }
+    int row_h = rows > 0 ? (INKPANE_SCREEN_HEIGHT - bottom - start_y) / rows : ZOOM_ROW_MIN;
+    if (row_h > ZOOM_ROW_MAX) {
+        row_h = ZOOM_ROW_MAX;
+    }
+    const int time_w = 116;
     for (int i = 0; i < rows; ++i) {
         int row_y = start_y + i * row_h;
         char time_text[8];
@@ -848,15 +864,17 @@ void inkpane_ui_render_events_full(uint8_t *framebuffer, const inkpane_event_t *
         } else {
             format_hm(time_text, sizeof(time_text), events[i].start_minute);
         }
-        inkpane_text_draw(&canvas, medium, 40, row_y, time_text, 100, INKPANE_ALIGN_LEFT, true);
-        inkpane_text_draw(&canvas, medium, 40 + 104, row_y, events[i].title,
-                          INKPANE_SCREEN_WIDTH - 80 - 104, INKPANE_ALIGN_LEFT, true);
+        inkpane_text_draw(&canvas, large, ZOOM_MARGIN, row_y, time_text, time_w,
+                          INKPANE_ALIGN_LEFT, true);
+        inkpane_text_draw(&canvas, large, ZOOM_MARGIN + time_w, row_y, events[i].title,
+                          INKPANE_SCREEN_WIDTH - ZOOM_MARGIN - ZOOM_MARGIN - time_w,
+                          INKPANE_ALIGN_LEFT, true);
     }
     if (rows < total) {
         char more[32];
         snprintf(more, sizeof(more), "还有 %d 项", total - rows);
-        inkpane_text_draw(&canvas, small, 40, start_y + rows * row_h, more,
-                          INKPANE_SCREEN_WIDTH - 80, INKPANE_ALIGN_LEFT, true);
+        inkpane_text_draw(&canvas, medium, ZOOM_MARGIN, start_y + rows * row_h, more,
+                          ZOOM_CONTENT_W, INKPANE_ALIGN_LEFT, true);
     }
 }
 
@@ -870,33 +888,33 @@ void inkpane_ui_render_todos_full(uint8_t *framebuffer, const inkpane_todo_t *to
     inkpane_canvas_init(&canvas, framebuffer, INKPANE_SCREEN_WIDTH, INKPANE_SCREEN_HEIGHT, 0, 0);
     inkpane_canvas_clear(&canvas, true);
 
-    const inkpane_font_t *small = inkpane_font_small();
     const inkpane_font_t *medium = inkpane_font_medium();
-    if (small == NULL || medium == NULL) {
+    const inkpane_font_t *large = inkpane_font_large();
+    if (medium == NULL || large == NULL) {
         return;
     }
     if (total < count) {
         total = count;
     }
 
-    inkpane_text_draw(&canvas, medium, 40, 30, "待办", INKPANE_SCREEN_WIDTH - 80,
+    inkpane_text_draw(&canvas, large, ZOOM_MARGIN, ZOOM_HEADER_Y, "待办", ZOOM_CONTENT_W,
                       INKPANE_ALIGN_LEFT, true);
     char counter[16];
     snprintf(counter, sizeof(counter), "%d 项", total);
-    inkpane_text_draw(&canvas, medium, 40, 30, counter, INKPANE_SCREEN_WIDTH - 80,
+    inkpane_text_draw(&canvas, large, ZOOM_MARGIN, ZOOM_HEADER_Y, counter, ZOOM_CONTENT_W,
                       INKPANE_ALIGN_RIGHT, true);
-    int divider_y = 30 + medium->line_height + 12;
-    inkpane_canvas_hline(&canvas, 40, divider_y, INKPANE_SCREEN_WIDTH - 80, true);
+    int divider_y = ZOOM_HEADER_Y + large->line_height + 14;
+    inkpane_canvas_hline(&canvas, ZOOM_MARGIN, divider_y, ZOOM_CONTENT_W, true);
 
     if (total == 0) {
-        inkpane_text_draw(&canvas, medium, 0, INKPANE_SCREEN_HEIGHT / 2, "没有待办",
-                          INKPANE_SCREEN_WIDTH, INKPANE_ALIGN_CENTER, true);
+        inkpane_text_draw(&canvas, large, 0, INKPANE_SCREEN_HEIGHT / 2 - large->line_height / 2,
+                          "没有待办", INKPANE_SCREEN_WIDTH, INKPANE_ALIGN_CENTER, true);
         return;
     }
 
-    int start_y = divider_y + 16;
-    int row_h = 56;
-    int max_rows = (INKPANE_SCREEN_HEIGHT - 40 - start_y) / row_h;
+    int start_y = divider_y + 22;
+    int bottom = 26;
+    int max_rows = (INKPANE_SCREEN_HEIGHT - bottom - start_y) / ZOOM_ROW_MIN;
     int rows = count < max_rows ? count : max_rows;
     if (rows < 0) {
         rows = 0;
@@ -904,33 +922,40 @@ void inkpane_ui_render_todos_full(uint8_t *framebuffer, const inkpane_todo_t *to
     if (rows > 0 && rows < total) {
         rows -= 1; /* reserve one row for the "more" hint */
     }
+    int row_h = rows > 0 ? (INKPANE_SCREEN_HEIGHT - bottom - start_y) / rows : ZOOM_ROW_MIN;
+    if (row_h > ZOOM_ROW_MAX) {
+        row_h = ZOOM_ROW_MAX;
+    }
     for (int i = 0; i < rows; ++i) {
         const inkpane_todo_t *todo = &todos[i];
         int row_y = start_y + i * row_h;
         bool urgent = strcmp(todo->priority, "urgent") == 0 ||
                       strcmp(todo->priority, "high") == 0;
-        int box_x = 40;
-        int box_y = row_y + (medium->px - 20) / 2;
-        inkpane_canvas_frame(&canvas, box_x, box_y, 20, 20, true);
+        const int box = 34;
+        int box_x = ZOOM_MARGIN;
+        int box_y = row_y + (large->line_height - box) / 2;
+        inkpane_canvas_frame(&canvas, box_x, box_y, box, box, true);
         if (urgent) {
-            inkpane_canvas_fill(&canvas, box_x + 4, box_y + 4, 12, 12, true);
+            inkpane_canvas_fill(&canvas, box_x + 6, box_y + 6, box - 12, box - 12, true);
         }
         char due[8] = {0};
         format_due(due, sizeof(due), todo->due_date);
-        int due_w = due[0] ? 90 : 0;
-        inkpane_text_draw(&canvas, medium, 40 + 24 + 10, row_y, todo->title,
-                          INKPANE_SCREEN_WIDTH - 80 - 34 - due_w, INKPANE_ALIGN_LEFT, true);
+        int due_w = due[0] ? 120 : 0;
+        int title_x = box_x + box + 18;
+        inkpane_text_draw(&canvas, large, title_x, row_y, todo->title,
+                          INKPANE_SCREEN_WIDTH - ZOOM_MARGIN - title_x - due_w,
+                          INKPANE_ALIGN_LEFT, true);
         if (due_w > 0) {
-            int due_y = row_y + (medium->px - small->px) / 2;
-            inkpane_text_draw(&canvas, small, INKPANE_SCREEN_WIDTH - 40 - due_w, due_y, due, due_w,
-                              INKPANE_ALIGN_RIGHT, true);
+            int due_y = row_y + (large->line_height - medium->line_height) / 2;
+            inkpane_text_draw(&canvas, medium, INKPANE_SCREEN_WIDTH - ZOOM_MARGIN - due_w, due_y,
+                              due, due_w, INKPANE_ALIGN_RIGHT, true);
         }
     }
     if (rows < total) {
         char more[32];
         snprintf(more, sizeof(more), "还有 %d 项", total - rows);
-        inkpane_text_draw(&canvas, small, 40, start_y + rows * row_h, more,
-                          INKPANE_SCREEN_WIDTH - 80, INKPANE_ALIGN_LEFT, true);
+        inkpane_text_draw(&canvas, medium, ZOOM_MARGIN, start_y + rows * row_h, more,
+                          ZOOM_CONTENT_W, INKPANE_ALIGN_LEFT, true);
     }
 }
 

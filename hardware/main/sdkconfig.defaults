@@ -78,7 +78,9 @@ CONFIG_SR_NSN_WEBRTC=y
 CONFIG_INKPANE_POWER_MODE_RESIDENT=y
 CONFIG_INKPANE_VOICE=y
 CONFIG_INKPANE_VOICE_OTA_URL="https://api.tenclass.net/xiaozhi/ota/"
-CONFIG_INKPANE_VOICE_WAKE_WORDS="你好小智"
+# Wake words are MultiNet runtime commands: pinyin syllables, no tones, no Han
+# characters ("da fen qi" = 达芬奇). Chinese input is rejected by MultiNet.
+CONFIG_INKPANE_VOICE_WAKE_WORDS="da fen qi"
 CONFIG_INKPANE_VOICE_WAKE_THRESHOLD=65
 CONFIG_INKPANE_VOICE_VOLUME=60
 CONFIG_INKPANE_VOICE_ALLOW_CONTROL=y

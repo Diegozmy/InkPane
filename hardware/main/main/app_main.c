@@ -843,21 +843,28 @@ static void go_to_sleep(const inkpane_config_t *config, bool rtc_ok, const inkpa
 static bool provisioning_requested(bool cold_boot, const inkpane_config_t *config)
 {
     if (!config->provisioned) {
+        ESP_LOGI(TAG, "provisioning: required (no saved config)");
         return true;
     }
     if (!cold_boot) {
         return false;
     }
+
+    ESP_LOGI(TAG, "provisioning: middle-key GPIO 5 level=%d",
+             inkpane_board_button_held(5));
     if (!inkpane_board_button_held(5)) {
         return false;
     }
+
     /* Hold the middle button while powering on to re-provision. */
     for (int i = 0; i < 20; ++i) {
         vTaskDelay(pdMS_TO_TICKS(100));
         if (!inkpane_board_button_held(5)) {
+            ESP_LOGI(TAG, "provisioning: middle-key released before 2 s (sample %d)", i + 1);
             return false;
         }
     }
+    ESP_LOGI(TAG, "provisioning: middle-key held for 2 s");
     return true;
 }
 
@@ -1054,6 +1061,26 @@ void app_main(void)
 #define RESIDENT_VOICE_RENDER_MS 800
 #define RESIDENT_ERROR_PAGE_MS (15 * 1000)
 #define RESIDENT_ACTIVATION_PAGE_MS (5 * 60 * 1000)
+
+/* Field diagnostics: a low-priority task keeps logging while the main loop is
+ * stuck, so "no serial output" can be told apart from "main task blocked". */
+#define RESIDENT_DIAG_TASK 1
+#define RESIDENT_DIAG_PERIOD_MS (10 * 1000)
+static volatile uint32_t s_main_loop_ticks;
+static volatile int64_t s_main_loop_last_ms;
+
+static void resident_diag_task(void *argument)
+{
+    (void)argument;
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(RESIDENT_DIAG_PERIOD_MS));
+        const int64_t now_ms = esp_timer_get_time() / 1000;
+        ESP_LOGI(TAG, "diag: loop_ticks=%lu stalled=%d ms internal=%u psram=%u", 
+                 (unsigned long)s_main_loop_ticks, (int)(now_ms - s_main_loop_last_ms),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    }
+}
 
 typedef struct {
     bool down;
@@ -1421,6 +1448,7 @@ static void resident_poll_buttons(inkpane_config_t *config)
             button->down = true;
             button->down_ms = now_ms;
             button->long_sent = false;
+            ESP_LOGI(TAG, "button %d down", pin);
         } else if (down && button->down && !button->long_sent && pin == 0 &&
                    now_ms - button->down_ms >= 3000) {
             button->long_sent = true;
@@ -1430,6 +1458,8 @@ static void resident_poll_buttons(inkpane_config_t *config)
         } else if (!down && button->down) {
             button->down = false;
             int64_t held_ms = now_ms - button->down_ms;
+            ESP_LOGI(TAG, "button %d up after %d ms (voice_page=%d error_page=%d)", pin,
+                     (int)held_ms, (int)s_voice_page, (int)s_error_page);
             if (pin == 0) {
                 if (!button->long_sent) {
                     if (s_error_page) {
@@ -1448,6 +1478,10 @@ static void resident_poll_buttons(inkpane_config_t *config)
                 continue;
             }
             if (s_voice_page || s_error_page || held_ms >= 1500) {
+                /* Holds longer than 1.5 s have no action on the side keys; the
+                 * log makes that visible instead of looking like a dead board. */
+                ESP_LOGI(TAG, "button %d ignored (voice_page=%d error_page=%d held=%d ms)", pin,
+                         (int)s_voice_page, (int)s_error_page, (int)held_ms);
                 continue;
             }
             bool handled = handle_zoom_button(pin);
@@ -1636,8 +1670,14 @@ static void resident_main(void)
     }
 
     int64_t last_tick_ms = esp_timer_get_time() / 1000;
+    int64_t last_heartbeat_ms = last_tick_ms;
+#if RESIDENT_DIAG_TASK
+    xTaskCreate(resident_diag_task, "diag", 3072, NULL, 2, NULL);
+#endif
     while (true) {
         int64_t now_ms = esp_timer_get_time() / 1000;
+        ++s_main_loop_ticks;
+        s_main_loop_last_ms = now_ms;
         resident_poll_buttons(&config);
 
         inkpane_voice_event_t event;
@@ -1669,6 +1709,8 @@ static void resident_main(void)
 
         if (show_voice != s_voice_page || show_activation != s_activation_page ||
             show_error != s_error_page) {
+            ESP_LOGI(TAG, "page: voice=%d activation=%d error=%d (state=%d)", (int)show_voice,
+                     (int)show_activation, (int)show_error, (int)snapshot.state);
             s_voice_page = show_voice;
             s_activation_page = show_activation;
             s_error_page = show_error;
@@ -1701,6 +1743,13 @@ static void resident_main(void)
             }
             resident_network_tick(&config);
             resident_battery_check();
+        }
+
+        if (now_ms - last_heartbeat_ms >= 30000) {
+            last_heartbeat_ms = now_ms;
+            ESP_LOGI(TAG, "loop alive: state=%d voice_page=%d error_page=%d internal=%u",
+                     (int)snapshot.state, (int)s_voice_page, (int)s_error_page,
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
         }
 
         vTaskDelay(pdMS_TO_TICKS(RESIDENT_TICK_MS));

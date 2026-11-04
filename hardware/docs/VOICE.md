@@ -8,8 +8,8 @@
 
 | 能力 | 说明 |
 | --- | --- |
-| 常驻唤醒 | 设备保持唤醒，Wi-Fi 与麦克风常开；默认唤醒词「你好小智」 |
-| 自定义唤醒词 | 控制台或配网页填写，1–8 条、每条 2–12 个汉字；由 ESP-SR MultiNet 运行时命令词实现 |
+| 常驻唤醒 | 设备保持唤醒，Wi-Fi 与麦克风常开；默认唤醒词拼音 `da fen qi`（达芬奇） |
+| 自定义唤醒词 | 控制台或配网页填写，1–8 条拼音音节（小写、空格分隔、无声调）；由 ESP-SR MultiNet 运行时命令词实现 |
 | 对话 | 唤醒后自动聆听；BOOT 短按=按住说话/停止/打断；长按 BOOT 3 秒=唤醒词静音 |
 | 屏幕 | 对话中显示状态、你的话和回复；未激活时显示 6 位激活码 |
 | 语音控制 | 新增/取消日程、新增/完成/删除待办、查询今天安排、刷新屏幕、调音量 |
@@ -92,11 +92,15 @@ SQLite（按用户隔离、写接口 20 次/60 秒限流）→ 设备清 ETag，
 
 - 来源优先级：控制台 `voice.wakeWords` → NVS `wake_words` → Kconfig
   `CONFIG_INKPANE_VOICE_WAKE_WORDS`。
-- 格式：1–8 条，每条 trim 后 2–12 个汉字，不含数字/字母/标点/空格，不同词去重。
+- 格式：1–8 条，每条是 **拼音音节**，小写、用空格分隔、不带声调，例如
+  `da fen qi`（对应「达芬奇」）。MultiNet 只认拼音：写汉字会得到
+  `invalid command, please check format` 并导致**唤醒词完全失效**，设备日志里会提示
+  `wake phrase "…" is not MultiNet pinyin`。老固件/NVS 里的汉字唤醒词会在加载时自动
+  换成默认拼音。
 - 生效：待命态 `AudioService::ReloadWakeWords()` 直接重配 MultiNet 命令词，无需重启。
 - 验收：每个词在安静环境与播放音乐/说话时各测 10 次；识别率低时把灵敏度从 65 调到
-  75–85，或换更常见的词。模型词表外的词请在设备日志确认 `reloaded N wake command(s)`
-  与 `Custom wake word detected` 是否出现。
+  75–85，或换更常见的词。启动日志确认 `N wake command(s) active`（N≥1），唤醒时出现
+  `Custom wake word detected`。
 
 ## 6. 构建与烧录
 
@@ -127,7 +131,9 @@ powershell -ExecutionPolicy Bypass -File hardware/tools/build.ps1 -Flash -Port C
 | 「语音助手未激活」+ 6 位码 | 到 xiaozhi.me 输入；确认设备时间正确（TLS 依赖时间） |
 | 「时间未校准，无法校验 TLS 证书」 | 看板服务需先可达以校准 RTC，或允许 SNTP（`ntp.aliyun.com`）出网 |
 | 「语音模型未加载」 | 重新全量 `-Flash`，确认 `model` 分区写入成功 |
-| 唤醒词没反应 | 控制台确认语音已启用、未静音、唤醒词格式正确；看日志 MultiNet 模型名 |
+| 唤醒词没反应 | 控制台确认语音已启用、未静音；**唤醒词必须是拼音**（`da fen qi`，不是汉字）；日志里找 `N wake command(s) active` 与 `Custom wake word detected` |
+| 日志出现 `invalid command, please check format` | 唤醒词写成了汉字；MultiNet 只接受拼音音节 |
+| 按侧键没反应且没有日志 | 侧键长按超过 1.5 秒会被忽略（无动作）；短按才会切视图 |
 | 回答没声音 | 检查喇叭接线、音量；看日志 ES8311/Opus 错误；确认未在 BOOT 打断 |
 | 回答时自己触发唤醒 | 关闭 `CONFIG_INKPANE_VOICE_WAKE_DURING_PLAYBACK`（默认已关） |
 | 「墨窗服务不可达」 | 语音控制调用的 `/api/device/*` 失败；检查局域网与控制台服务 |

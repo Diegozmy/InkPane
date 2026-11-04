@@ -21,6 +21,10 @@ static const char *TAG = "mcp_tools";
 /* Tool table                                                          */
 /* ------------------------------------------------------------------ */
 
+/* Set for the duration of one tools/call, so a successful write can queue a
+ * panel refresh without threading the env through every helper. */
+static const mcp_tools_env_t *s_call_env;
+
 typedef struct {
     const char *name;
     const char *schema;
@@ -643,6 +647,11 @@ static int do_api_call(const char *method, const char *path, const char *body, c
         memcpy(text_out, response, length + 1);
     }
     free(response);
+    /* Every successful mutation repaints the dashboard, so a voice-driven todo
+     * or event change is visible without the model also asking for a refresh. */
+    if (strcmp(method, "GET") != 0 && s_call_env != NULL && s_call_env->on_mutation != NULL) {
+        s_call_env->on_mutation(s_call_env->mutation_ctx);
+    }
     return 0;
 }
 
@@ -977,6 +986,7 @@ int mcp_tools_call(const mcp_tools_env_t *env, const char *name, const json_valu
         snprintf(text_out, text_size, "缺少工具名称");
         return -1;
     }
+    s_call_env = env;
     const tool_def_t *tool = find_tool(name);
     if (tool == NULL) {
         snprintf(text_out, text_size, "未知工具：%s", name);

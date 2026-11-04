@@ -66,8 +66,9 @@ static const char PROV_PAGE[] =
     "<input type=\"checkbox\" name=\"voice_on\" style=\"width:auto\" checked> 启用语音助手</label>"
     "<label>小智 OTA 地址</label>"
     "<input name=\"voice_ota\" value=\"" CONFIG_INKPANE_VOICE_OTA_URL "\">"
-    "<label>唤醒词（逗号分隔，仅中文）</label>"
-    "<input name=\"wake_words\" value=\"" CONFIG_INKPANE_VOICE_WAKE_WORDS "\">"
+    "<label>唤醒词（拼音，逗号分隔）</label>"
+    "<input name=\"wake_words\" value=\"" CONFIG_INKPANE_VOICE_WAKE_WORDS
+    "\" placeholder=\"da fen qi\">"
     "<label>唤醒灵敏度（0-100）</label>"
     "<input name=\"wake_thr\" type=\"number\" min=\"0\" max=\"100\" value=\"65\">"
     "<label>音量（0-100）</label>"
@@ -75,8 +76,8 @@ static const char PROV_PAGE[] =
     "<label style=\"display:flex;gap:8px;align-items:center\">"
     "<input type=\"checkbox\" name=\"voice_ctrl\" style=\"width:auto\" checked> "
     "允许语音修改日程与待办</label>"
-    "<small>语音助手会常驻监听唤醒词；不需要时取消勾选。自定义唤醒词仅支持中文，"
-    "且受设备模型词表限制。</small>"
+    "<small>语音助手会常驻监听唤醒词；不需要时取消勾选。唤醒词必须写拼音，"
+    "例如 da fen qi 对应「达芬奇」（小写、音节用空格分隔、不带声调）；写汉字会被模型判为非法。</small>"
     "<script>fetch('/scan').then(r=>r.json()).then(list=>{const d=document.getElementById('aps');"
     "list.forEach(a=>{const o=document.createElement('option');o.value=a.ssid;d.appendChild(o)})})"
     ".catch(()=>{});</script></main></body></html>";

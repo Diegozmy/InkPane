@@ -24,7 +24,7 @@
 #define CONFIG_INKPANE_VOICE_OTA_URL "https://api.tenclass.net/xiaozhi/ota/"
 #endif
 #ifndef CONFIG_INKPANE_VOICE_WAKE_WORDS
-#define CONFIG_INKPANE_VOICE_WAKE_WORDS "你好小智"
+#define CONFIG_INKPANE_VOICE_WAKE_WORDS "da fen qi"
 #endif
 #ifndef CONFIG_INKPANE_VOICE_WAKE_THRESHOLD
 #define CONFIG_INKPANE_VOICE_WAKE_THRESHOLD 65
@@ -78,8 +78,24 @@ static bool load_bool(nvs_handle_t handle, const char *key, bool fallback)
     return value != 0;
 }
 
-static void generate_uuid(char *out, size_t size)
+/* MultiNet wake words are pinyin syllables ("ni hao xiao zhi"); Han characters
+ * are rejected by the model, so a stored Chinese phrase is replaced instead of
+ * leaving the device unable to wake. */
+static bool wake_words_are_pinyin(const char *text)
 {
+    bool has_letter = false;
+    for (const char *cursor = text; *cursor != '\0'; ++cursor) {
+        const char c = *cursor;
+        if (c >= 'a' && c <= 'z') {
+            has_letter = true;
+        } else if (c != ' ' && c != ',' && c != '\t') {
+            return false;
+        }
+    }
+    return has_letter;
+}
+
+static void generate_uuid(char *out, size_t size){
     uint8_t bytes[16] = {0};
     esp_fill_random(bytes, sizeof(bytes));
     bytes[6] = (uint8_t)((bytes[6] & 0x0F) | 0x40);
@@ -173,6 +189,11 @@ esp_err_t inkpane_config_load(inkpane_config_t *config)
                  CONFIG_INKPANE_VOICE_OTA_URL);
     }
     if (config->voice_wake_words[0] == '\0') {
+        copy_str(config->voice_wake_words, sizeof(config->voice_wake_words),
+                 CONFIG_INKPANE_VOICE_WAKE_WORDS);
+    } else if (!wake_words_are_pinyin(config->voice_wake_words)) {
+        ESP_LOGW(TAG, "wake words \"%s\" are not pinyin, using \"%s\"",
+                 config->voice_wake_words, CONFIG_INKPANE_VOICE_WAKE_WORDS);
         copy_str(config->voice_wake_words, sizeof(config->voice_wake_words),
                  CONFIG_INKPANE_VOICE_WAKE_WORDS);
     }

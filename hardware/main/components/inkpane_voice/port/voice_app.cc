@@ -26,11 +26,14 @@ extern "C" {
 #include "inkpane_time.h"
 }
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <mutex>
 #include <string>
+#include <utility>
+#include <vector>
 
 #define TAG "voice"
 
@@ -699,7 +702,7 @@ static bool copy_config(const inkpane_voice_config_t* config)
         s_wake_ptrs[i] = s_wake_words[i];
     }
     if (s_wake_count == 0) {
-        copy_str(s_wake_words[0], sizeof(s_wake_words[0]), "你好小智");
+        copy_str(s_wake_words[0], sizeof(s_wake_words[0]), "da fen qi");
         s_wake_ptrs[0] = s_wake_words[0];
         s_wake_count = 1;
     }
@@ -793,8 +796,58 @@ static bool ensure_activated()
     return false;
 }
 
+/* Two-note "ready" cue. The board has no UI sounds, so the chime is synthesised
+ * as 24 kHz mono PCM and handed to the audio service, which serialises it with
+ * TTS playback on the same output task. */
+static void build_ready_chime(std::vector<int16_t>& pcm)
+{
+    constexpr int kRate = 24000;       /* ES8311 duplex rate */
+    constexpr float kPi = 3.14159265358979f;
+    constexpr float kAmplitude = 0.22f;
+    constexpr int kFadeSamples = 144;  /* 6 ms, hides the click */
+    constexpr int kGapSamples = 480;   /* 20 ms between notes */
+    struct Note {
+        float hz;
+        int samples;
+    };
+    const Note notes[] = {{660.0f, 2160}, {990.0f, 3360}}; /* 90 ms + 140 ms */
+
+    size_t total = 0;
+    for (const Note& note : notes) {
+        total += note.samples + kGapSamples;
+    }
+    pcm.clear();
+    pcm.reserve(total);
+    for (const Note& note : notes) {
+        for (int i = 0; i < note.samples; ++i) {
+            float envelope = 1.0f;
+            if (i < kFadeSamples) {
+                envelope = static_cast<float>(i) / kFadeSamples;
+            } else if (i > note.samples - kFadeSamples) {
+                envelope = static_cast<float>(note.samples - i) / kFadeSamples;
+            }
+            const float phase = 2.0f * kPi * note.hz * static_cast<float>(i) / kRate;
+            pcm.push_back(static_cast<int16_t>(sinf(phase) * envelope * kAmplitude * 32767.0f));
+        }
+        pcm.insert(pcm.end(), kGapSamples, 0);
+    }
+}
+
+static void play_ready_chime()
+{
+    if (s_audio == nullptr) {
+        return;
+    }
+    std::vector<int16_t> pcm;
+    build_ready_chime(pcm);
+    if (!s_audio->PlayLocalPcm(std::move(pcm))) {
+        ESP_LOGW(TAG, "ready chime dropped (playback queue busy)");
+    }
+}
+
 static bool init_audio()
 {
+    ESP_LOGI(TAG, "audio init: ES8311 codec");
     s_codec = inkpane_voice_board_codec();
     if (s_codec == nullptr) {
         snapshot_set_error("音频编解码器初始化失败（ES8311）");
@@ -815,8 +868,10 @@ static bool init_audio()
     callbacks.on_vad_change = on_vad_change;
     callbacks.on_playback_drained = on_playback_drained;
     s_audio->SetCallbacks(callbacks);
+    ESP_LOGI(TAG, "audio init: starting input/output tasks");
     s_audio->Initialize(s_codec);
     s_audio->Start();
+    ESP_LOGI(TAG, "audio init: enabling wake word detection");
     s_audio->EnableWakeWordDetection(true);
     if (!s_audio->IsWakeWordRunning() || s_audio->GetWakeWords().empty()) {
         snapshot_set_error("唤醒词模型未加载，请执行 idf.py flash 烧录 model 分区");
@@ -824,6 +879,7 @@ static bool init_audio()
         return false;
     }
 
+    ESP_LOGI(TAG, "audio init: starting websocket protocol");
     s_protocol = new WebsocketProtocol();
     s_protocol->SetConfig(s_ws_url, s_ws_token, s_ws_version);
     s_protocol->OnIncomingAudio(on_incoming_audio);
@@ -833,8 +889,10 @@ static bool init_audio()
     s_protocol->OnNetworkError(on_network_error);
     s_protocol->Start();
 
+    ESP_LOGI(TAG, "audio init: MCP server");
     voice_init_mcp();
     mcp_tools_set_device_hooks(voice_status_json, voice_set_volume);
+    ESP_LOGI(TAG, "audio init: done");
     return true;
 }
 
@@ -850,6 +908,8 @@ static void control_task(void* argument)
         if (!s_stop && init_audio()) {
             snapshot_set_state(INKPANE_VOICE_READY);
             post_event(INKPANE_VOICE_EVT_STATE);
+            ESP_LOGI(TAG, "voice stack ready");
+            play_ready_chime();
         }
     } else {
         snapshot_set_state(INKPANE_VOICE_DISABLED);

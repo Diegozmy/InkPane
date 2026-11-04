@@ -3,11 +3,38 @@
 #include "voice_identity.h"
 
 #include <esp_log.h>
+#include <esp_err.h>
 #include <esp_mn_iface.h>
 #include <esp_mn_models.h>
 #include <esp_mn_speech_commands.h>
 
+#include <utility>
+
 #define TAG "CustomWakeWord"
+
+namespace {
+
+/** MultiNet matches pinyin syllables ("da fen qi" = 达芬奇), not Han characters. */
+constexpr const char* kDefaultWakePhrase = "da fen qi";
+
+bool IsPinyinPhrase(const char* text)
+{
+    if (text == nullptr || text[0] == '\0') {
+        return false;
+    }
+    bool has_letter = false;
+    for (const char* cursor = text; *cursor != '\0'; ++cursor) {
+        const char c = *cursor;
+        if (c >= 'a' && c <= 'z') {
+            has_letter = true;
+        } else if (c != ' ') {
+            return false;
+        }
+    }
+    return has_letter;
+}
+
+}  // namespace
 
 CustomWakeWord::CustomWakeWord()
     : wake_word_opus_() {
@@ -38,17 +65,7 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
 
     /* Wake phrases come from the console/provisioning config (runtime
      * MultiNet commands), not from the upstream assets index.json. */
-    int word_count = 0;
-    const char* const* words = inkpane_voice_wake_words(&word_count);
-    threshold_ = inkpane_voice_wake_threshold();
-    for (int i = 0; i < word_count; ++i) {
-        if (words[i] != nullptr && words[i][0] != '\0') {
-            commands_.push_back({words[i], words[i], "wake"});
-        }
-    }
-    if (commands_.empty()) {
-        commands_.push_back({"你好小智", "你好小智", "wake"});
-    }
+    LoadConfiguredCommands();
 
     if (models_list == nullptr) {
         language_ = "cn";
@@ -79,12 +96,16 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
     multinet_model_data_ = multinet_->create(mn_name_, duration_);
     multinet_->set_det_threshold(multinet_model_data_, threshold_);
     input_buffer_.reserve(multinet_->get_samp_chunksize(multinet_model_data_));
-    esp_mn_commands_clear();
-    for (int i = 0; i < commands_.size(); i++) {
-        esp_mn_commands_add(i + 1, commands_[i].command.c_str());
+    if (!ApplyCommands()) {
+        ESP_LOGW(TAG, "no configured wake phrase was accepted; falling back to \"%s\"",
+                 kDefaultWakePhrase);
+        commands_.clear();
+        commands_.push_back({kDefaultWakePhrase, kDefaultWakePhrase, "wake"});
+        if (!ApplyCommands()) {
+            ESP_LOGE(TAG, "wake word unavailable: MultiNet rejected the fallback phrase");
+        }
     }
-    esp_mn_commands_update();
-    
+
     multinet_->print_active_speech_commands(multinet_model_data_);
 #if CONFIG_SEND_WAKE_WORD_DATA
     if (!wake_word_audio_cache_.Initialize(16000 * 2)) {
@@ -109,26 +130,77 @@ void CustomWakeWord::ReloadCommands()
     bool was_running = running_.load();
     running_ = false;
 
+    LoadConfiguredCommands();
+    if (!ApplyCommands()) {
+        ESP_LOGW(TAG, "no configured wake phrase was accepted; keeping \"%s\"",
+                 kDefaultWakePhrase);
+        commands_.clear();
+        commands_.push_back({kDefaultWakePhrase, kDefaultWakePhrase, "wake"});
+        ApplyCommands();
+    }
+    input_buffer_.clear();
+    running_ = was_running;
+}
+
+void CustomWakeWord::LoadConfiguredCommands()
+{
+    commands_.clear();
     int word_count = 0;
     const char* const* words = inkpane_voice_wake_words(&word_count);
     threshold_ = inkpane_voice_wake_threshold();
-    commands_.clear();
     for (int i = 0; i < word_count; ++i) {
-        if (words[i] != nullptr && words[i][0] != '\0') {
-            commands_.push_back({words[i], words[i], "wake"});
+        if (words[i] == nullptr || words[i][0] == '\0') {
+            continue;
+        }
+        if (!IsPinyinPhrase(words[i])) {
+            ESP_LOGE(TAG,
+                     "wake phrase \"%s\" is not MultiNet pinyin; use syllables such as \"%s\"",
+                     words[i], kDefaultWakePhrase);
+            continue;
+        }
+        commands_.push_back({words[i], words[i], "wake"});
+    }
+}
+
+bool CustomWakeWord::ApplyCommands()
+{
+    esp_mn_commands_clear();
+    std::deque<Command> accepted;
+    for (const auto& command : commands_) {
+        /* MultiNet ids must stay 1..N contiguous, so only accepted phrases are
+         * kept; a rejected one would otherwise shift the id -> text mapping. */
+        if (esp_mn_commands_add(static_cast<int>(accepted.size()) + 1,
+                                command.command.c_str()) != ESP_OK) {
+            ESP_LOGE(TAG, "MultiNet rejected \"%s\"; check the pinyin against the model word list",
+                     command.command.c_str());
+            continue;
+        }
+        accepted.push_back(command);
+    }
+    if (accepted.empty()) {
+        return false;
+    }
+    commands_ = std::move(accepted);
+    /* Returns NULL on success, otherwise the phrases MultiNet could not parse.
+     * Command ids are explicit, so a rejected phrase leaves a gap rather than
+     * shifting the id -> text mapping. */
+    esp_mn_error_t* errors = esp_mn_commands_update();
+    if (errors != nullptr) {
+        ESP_LOGE(TAG, "MultiNet could not parse %d of %d wake command(s)",
+                 static_cast<int>(errors->num), static_cast<int>(commands_.size()));
+        for (int i = 0; i < errors->num; ++i) {
+            if (errors->phrases != nullptr && errors->phrases[i] != nullptr &&
+                errors->phrases[i]->string != nullptr) {
+                ESP_LOGE(TAG, "  rejected: %s", errors->phrases[i]->string);
+            }
+        }
+        if (errors->num >= static_cast<int>(commands_.size())) {
+            return false;
         }
     }
-    if (commands_.empty()) {
-        commands_.push_back({"你好小智", "你好小智", "wake"});
-    }
-    esp_mn_commands_clear();
-    for (int i = 0; i < (int)commands_.size(); ++i) {
-        esp_mn_commands_add(i + 1, commands_[i].command.c_str());
-    }
-    esp_mn_commands_update();
-    input_buffer_.clear();
-    running_ = was_running;
-    ESP_LOGI(TAG, "reloaded %d wake command(s)", (int)commands_.size());
+    ESP_LOGI(TAG, "%d wake command(s) active, threshold %.2f", static_cast<int>(commands_.size()),
+             threshold_);
+    return true;
 }
 
 std::vector<std::string> CustomWakeWord::GetWakeWords() const {
@@ -196,7 +268,15 @@ void CustomWakeWord::FeedSamples(const int16_t* data, size_t samples, bool mono)
             for (int i = 0; i < mn_result->num && running_; i++) {
                 ESP_LOGI(TAG, "Custom wake word detected: command_id=%d, string=%s, prob=%f", 
                         mn_result->command_id[i], mn_result->string, mn_result->prob[i]);
-                auto& command = commands_[mn_result->command_id[i] - 1];
+                const int command_id = mn_result->command_id[i];
+                if (command_id <= 0 || command_id > static_cast<int>(commands_.size())) {
+                    /* The model can still hold its built-in fst phrases when the
+                     * custom command list was not applied; never index past it. */
+                    ESP_LOGW(TAG, "MultiNet returned unknown command_id %d (have %d)", command_id,
+                             static_cast<int>(commands_.size()));
+                    continue;
+                }
+                auto& command = commands_[command_id - 1];
                 if (command.action == "wake") {
                     last_detected_wake_word_ = command.text;
                     running_ = false;

@@ -62,12 +62,14 @@ menu "InkPane"
             xiaozhi-esp32-server 时填其 OTA 地址（通常是局域网 http://）。
 
     config INKPANE_VOICE_WAKE_WORDS
-        string "默认唤醒词（逗号分隔，仅中文）"
-        default "你好小智"
+        string "默认唤醒词（逗号分隔，拼音）"
+        default "da fen qi"
         depends on INKPANE_VOICE
         help
             由 MultiNet 运行时命令词实现，可在控制台或配网页修改。
-            仅支持中文汉字、每条 2–12 字、最多 8 条。
+            必须写拼音（小写、音节用空格分隔、不带声调），例如
+            "da fen qi" 对应「达芬奇」；写汉字会被 MultiNet 判为非法命令词。
+            最多 8 条。
 
     config INKPANE_VOICE_WAKE_THRESHOLD
         int "默认唤醒灵敏度（0-100）"
