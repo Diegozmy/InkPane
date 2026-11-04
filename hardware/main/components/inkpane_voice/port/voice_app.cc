@@ -468,7 +468,9 @@ static void on_network_error(const std::string& message)
 /* Protocol lifecycle                                                 */
 /* ------------------------------------------------------------------ */
 
-static bool open_audio_channel()
+/* Opens the WebSocket without touching the voice state: callers decide whether
+ * this is a user-visible connect (start_listening) or a silent pre-open. */
+static bool open_audio_channel(bool quiet)
 {
     if (s_protocol == nullptr) {
         return false;
@@ -476,13 +478,24 @@ static bool open_audio_channel()
     if (s_protocol->IsAudioChannelOpened()) {
         return true;
     }
-    snapshot_set_state(INKPANE_VOICE_CONNECTING);
-    if (!s_protocol->OpenAudioChannel()) {
-        snapshot_set_state(INKPANE_VOICE_READY);
+    if (!s_protocol->OpenAudioChannel(quiet)) {
         return false;
     }
     snapshot_set_ws(true);
     return true;
+}
+
+/* Pre-open the channel while the assistant idles in READY, so the next wake word
+ * only has to send "listen start" instead of a fresh TLS handshake (~1-2 s).
+ * Failures stay quiet: the wake path retries and reports them. */
+static void prewarm_audio_channel()
+{
+    if (s_protocol == nullptr || s_protocol->IsAudioChannelOpened()) {
+        return;
+    }
+    if (open_audio_channel(true)) {
+        ESP_LOGI(TAG, "audio channel pre-opened");
+    }
 }
 
 static void close_audio_channel(bool reenable_wake_word)
@@ -499,8 +512,16 @@ static void close_audio_channel(bool reenable_wake_word)
 
 static void start_listening(ListeningMode mode)
 {
-    if (!open_audio_channel()) {
-        return;
+    const bool channel_open = s_protocol != nullptr && s_protocol->IsAudioChannelOpened();
+    if (!channel_open) {
+        snapshot_set_state(INKPANE_VOICE_CONNECTING);
+        if (!open_audio_channel(false)) {
+            /* Wake capture already started; stop it again so the send queue does
+             * not fill with audio for a channel that never opened. */
+            s_audio->EnableVoiceProcessing(false);
+            snapshot_set_state(INKPANE_VOICE_READY);
+            return;
+        }
     }
     s_listening_mode = mode;
     s_audio->EnableWakeWordDetection(false);
@@ -508,6 +529,10 @@ static void start_listening(ListeningMode mode)
     s_protocol->SendStartListening(mode);
     snapshot_set_state(INKPANE_VOICE_LISTENING);
     s_last_activity_ms = now_ms();
+    /* Frames captured while the handshake ran are still queued; they are sent
+     * now that the server has been told to listen, so the first sentence is not
+     * lost. */
+    post_command(VoiceCmd::SendAudio);
 }
 
 static void start_conversation(bool manual)
@@ -521,6 +546,9 @@ static void start_conversation(bool manual)
         return;
     }
     snapshot_reset_text();
+    /* Capture the microphone from the wake instant: if the channel still has to
+     * connect, those frames wait in the send queue and are flushed afterwards. */
+    s_audio->EnableVoiceProcessing(true);
     start_listening(manual ? kListeningModeManualStop : kListeningModeAutoStop);
 }
 
@@ -542,7 +570,11 @@ static void handle_tts_start()
 
 static void handle_tts_stop()
 {
-    close_audio_channel(true);
+    /* Keep the WebSocket open across turns: the next wake word then skips the
+     * TLS handshake entirely. The server closes the channel when it goes idle,
+     * which arrives as ChannelClosed and returns the assistant to READY. */
+    s_audio->EnableVoiceProcessing(false);
+    s_audio->EnableWakeWordDetection(!s_muted);
     snapshot_set_state(INKPANE_VOICE_READY);
     s_last_activity_ms = now_ms();
 }
@@ -910,6 +942,9 @@ static void control_task(void* argument)
             post_event(INKPANE_VOICE_EVT_STATE);
             ESP_LOGI(TAG, "voice stack ready");
             play_ready_chime();
+            /* Warm the WebSocket before the first wake word so that turn is
+             * as fast as every later one. */
+            prewarm_audio_channel();
         }
     } else {
         snapshot_set_state(INKPANE_VOICE_DISABLED);
@@ -923,7 +958,9 @@ static void control_task(void* argument)
                 start_conversation(false);
                 break;
             case VoiceCmd::SendAudio:
-                if (s_protocol != nullptr) {
+                /* While the channel is still opening the packets stay queued
+                 * (send queue holds ~2.4 s); start_listening flushes them. */
+                if (s_protocol != nullptr && s_protocol->IsAudioChannelOpened()) {
                     while (auto packet = s_audio->PopPacketFromSendQueue()) {
                         if (!s_protocol->SendAudio(std::move(packet))) {
                             while (s_audio->PopPacketFromSendQueue()) {

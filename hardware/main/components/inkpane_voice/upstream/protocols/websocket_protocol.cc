@@ -84,17 +84,21 @@ void WebsocketProtocol::CloseAudioChannel(bool send_goodbye)
     websocket_.reset();
 }
 
-bool WebsocketProtocol::OpenAudioChannel()
+bool WebsocketProtocol::OpenAudioChannel(bool quiet)
 {
     if (url_.empty()) {
-        SetError("语音服务地址为空，请先在控制台完成激活");
+        if (!quiet) {
+            SetError("语音服务地址为空，请先在控制台完成激活");
+        }
         return false;
     }
 
     error_occurred_ = false;
     websocket_ = WebSocket::Create();
     if (websocket_ == nullptr) {
-        SetError("无法创建 WebSocket");
+        if (!quiet) {
+            SetError("无法创建 WebSocket");
+        }
         return false;
     }
 
@@ -172,7 +176,9 @@ bool WebsocketProtocol::OpenAudioChannel()
     ESP_LOGI(TAG, "Connecting to %s (protocol v%d)", url_.c_str(), version_);
     if (!websocket_->Connect(url_.c_str())) {
         ESP_LOGE(TAG, "Failed to connect to websocket server: %s", url_.c_str());
-        SetError("无法连接语音服务", url_);
+        if (!quiet) {
+            SetError("无法连接语音服务", url_);
+        }
         return false;
     }
 
@@ -186,7 +192,9 @@ bool WebsocketProtocol::OpenAudioChannel()
                             pdFALSE, pdMS_TO_TICKS(10000));
     if (!(bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT)) {
         ESP_LOGE(TAG, "Failed to receive server hello");
-        SetError("语音服务未响应");
+        if (!quiet) {
+            SetError("语音服务未响应");
+        }
         return false;
     }
 

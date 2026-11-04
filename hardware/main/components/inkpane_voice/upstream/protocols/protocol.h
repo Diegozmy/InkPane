@@ -57,7 +57,8 @@ public:
     void OnDisconnected(std::function<void()> callback);
 
     virtual bool Start() = 0;
-    virtual bool OpenAudioChannel() = 0;
+    /** quiet: best-effort pre-open, failures stay silent (no error page). */
+    virtual bool OpenAudioChannel(bool quiet = false) = 0;
     virtual void CloseAudioChannel(bool send_goodbye = true) = 0;
     virtual bool IsAudioChannelOpened() const = 0;
     virtual bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) = 0;

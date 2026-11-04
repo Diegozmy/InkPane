@@ -1403,8 +1403,10 @@ static void resident_render_voice(const inkpane_voice_snapshot_t *snapshot, bool
     if (full) {
         err = inkpane_epd_show_full(s_framebuffer);
     } else {
-        /* One partial window covers the status, user and reply bands. */
-        err = inkpane_epd_show_region(s_framebuffer, 0, 0, INKPANE_SCREEN_WIDTH, 432);
+        /* Refresh the whole panel: the voice page uses the full height (reply
+         * text plus footer), so a shorter window would leave the bottom stale. */
+        err = inkpane_epd_show_region(s_framebuffer, 0, 0, INKPANE_SCREEN_WIDTH,
+                                      INKPANE_SCREEN_HEIGHT);
     }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "voice page refresh failed: %s", esp_err_to_name(err));

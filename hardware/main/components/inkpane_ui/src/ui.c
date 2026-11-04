@@ -1311,27 +1311,42 @@ void inkpane_ui_render_voice(uint8_t *framebuffer, const inkpane_voice_view_t *v
         return;
     }
 
-    inkpane_text_draw(&canvas, large, 40, 20, "语音助手", INKPANE_SCREEN_WIDTH - 80,
-                      INKPANE_ALIGN_LEFT, true);
+    /* Header: 32 px title on the left, current state on the right. */
+    inkpane_text_draw(&canvas, large, 32, 14, "语音助手", 300, INKPANE_ALIGN_LEFT, true);
     char state[48];
-    inkpane_ui_voice_copy(state, sizeof(state), view->state_label, 16);
-    inkpane_text_draw(&canvas, medium, 40, 30, state, INKPANE_SCREEN_WIDTH - 80,
+    inkpane_ui_voice_copy(state, sizeof(state), view->state_label, 8);
+    inkpane_text_draw(&canvas, large, INKPANE_SCREEN_WIDTH - 32 - 320, 14, state, 320,
                       INKPANE_ALIGN_RIGHT, true);
-    inkpane_canvas_hline(&canvas, 40, 80, INKPANE_SCREEN_WIDTH - 80, true);
+    int header_bottom = 14 + large->line_height;
+    inkpane_canvas_hline(&canvas, 32, header_bottom + 10, INKPANE_SCREEN_WIDTH - 64, true);
 
+    /* Recognised question: two 24 px lines directly under the header. */
     char user_line[320];
     snprintf(user_line, sizeof(user_line), "你：%s", view->user_text != NULL ? view->user_text : "");
-    draw_wrapped(&canvas, medium, 40, 96, INKPANE_SCREEN_WIDTH - 80, 2, user_line, true);
+    int user_y = header_bottom + 22;
+    draw_wrapped(&canvas, medium, 32, user_y, INKPANE_SCREEN_WIDTH - 64, 2, user_line, true);
 
-    draw_wrapped(&canvas, medium, 40, 180, INKPANE_SCREEN_WIDTH - 80, 7, view->reply_text, true);
+    /* The reply takes the rest of the panel in 32 px and wraps to whatever fits,
+     * so the page fills the screen instead of leaving the lower half blank. */
+    int reply_y = user_y + 2 * medium->line_height + 12;
+    const int footer_h = small->line_height + 14;
+    const int reply_bottom = INKPANE_SCREEN_HEIGHT - footer_h - 12;
+    int reply_lines = (reply_bottom - reply_y) / large->line_height;
+    if (reply_lines < 1) {
+        reply_lines = 1;
+    }
+    inkpane_canvas_hline(&canvas, 32, reply_y - 8, INKPANE_SCREEN_WIDTH - 64, true);
+    draw_wrapped(&canvas, large, 32, reply_y, INKPANE_SCREEN_WIDTH - 64, reply_lines,
+                 view->reply_text, true);
 
-    inkpane_canvas_hline(&canvas, 40, INKPANE_SCREEN_HEIGHT - 44, INKPANE_SCREEN_WIDTH - 80, true);
+    inkpane_canvas_hline(&canvas, 32, INKPANE_SCREEN_HEIGHT - footer_h, INKPANE_SCREEN_WIDTH - 64,
+                         true);
     const char *hint = view->footer_hint != NULL ? view->footer_hint
                                                  : "BOOT 打断 · 长按 BOOT 静音唤醒词";
     char footer[160];
     inkpane_ui_voice_copy(footer, sizeof(footer), hint, 48);
-    inkpane_text_draw(&canvas, small, 40, INKPANE_SCREEN_HEIGHT - small->line_height - 12, footer,
-                      INKPANE_SCREEN_WIDTH - 80, INKPANE_ALIGN_CENTER, true);
+    inkpane_text_draw(&canvas, small, 32, INKPANE_SCREEN_HEIGHT - small->line_height - 8, footer,
+                      INKPANE_SCREEN_WIDTH - 64, INKPANE_ALIGN_CENTER, true);
 }
 
 void inkpane_ui_render_voice_activation(uint8_t *framebuffer, const char *code, const char *message,
