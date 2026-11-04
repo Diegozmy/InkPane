@@ -403,7 +403,7 @@ export interface DeviceVoiceConfig {
   allowControl: boolean;
   /** 小智 OTA / WebSocket 服务地址 */
   otaUrl: string;
-  /** 唤醒词，1–8 个，每个 2–12 个汉字 */
+  /** 唤醒词，1–8 个，每个 2–12 个拼音音节（MultiNet 命令词，如 da fen qi） */
   wakeWords: string[];
   /** 唤醒灵敏度，0–100 */
   wakeThreshold: number;

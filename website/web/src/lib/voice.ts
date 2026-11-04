@@ -5,8 +5,8 @@
  * 避免把明显不合法的输入发给后端再回显 422。
  */
 
-/** 唤醒词只支持中文：2–12 个汉字（受小智模型词表限制）。 */
-export const WAKE_WORD_PATTERN = /^[\u4e00-\u9fa5]{2,12}$/;
+/** 唤醒词是 ESP-SR MultiNet 命令词：2–12 个拼音音节，小写、单空格分隔、无声调。 */
+export const WAKE_WORD_PATTERN = /^[a-z]+(?: [a-z]+){1,11}$/;
 export const WAKE_WORDS_MIN = 1;
 export const WAKE_WORDS_MAX = 8;
 
@@ -17,11 +17,11 @@ export interface ParsedWakeWords {
   invalid: string[];
 }
 
-/** 逗号 / 中文逗号 / 顿号 / 分号 / 换行分隔，逐项 trim 后去重。 */
+/** 逗号 / 中文逗号 / 顿号 / 分号 / 换行分隔，逐项 trim、转小写、压缩空格后去重。 */
 export function parseWakeWords(input: string): ParsedWakeWords {
   const parts = input
     .split(/[,，、;；\n]+/)
-    .map((part) => part.trim())
+    .map((part) => part.trim().toLowerCase().replace(/\s+/g, ' '))
     .filter((part) => part.length > 0);
 
   const words: string[] = [];
@@ -40,7 +40,7 @@ export function parseWakeWords(input: string): ParsedWakeWords {
 export function validateWakeWords(input: string): string | null {
   const { words, invalid } = parseWakeWords(input);
   if (invalid.length > 0) {
-    return `唤醒词「${invalid[0]}」无效，请使用 2–12 个汉字`;
+    return `唤醒词「${invalid[0]}」无效，请使用 2–12 个拼音音节，例如 da fen qi`;
   }
   if (words.length < WAKE_WORDS_MIN) return '请至少填写 1 个唤醒词';
   if (words.length > WAKE_WORDS_MAX) return `最多支持 ${WAKE_WORDS_MAX} 个唤醒词`;

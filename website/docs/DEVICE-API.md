@@ -973,20 +973,21 @@ Content-Type: application/json
 | `enabled` | boolean | `true` | 是否启用语音助手；`false` 时设备端不应启动语音模块 |
 | `allowControl` | boolean | `true` | 是否允许语音助手修改日程与待办；设备端在调用 6.8 写接口前检查 |
 | `otaUrl` | string | `https://api.tenclass.net/xiaozhi/ota/` | 小智 OTA / WebSocket 服务地址；控制台可改 |
-| `wakeWords` | string[] | `["你好小智"]` | 1–8 个唤醒词，每个 2–12 个汉字；服务端已 trim 并去重 |
+| `wakeWords` | string[] | `["da fen qi"]` | 1–8 个唤醒词，每个 2–12 个拼音音节（小写、单空格分隔、无声调）；服务端已 trim 并去重 |
 | `wakeThreshold` | integer | `65` | 唤醒灵敏度 0–100 |
 | `volume` | integer | `60` | 音量 0–100 |
 
 设备屏幕**首次激活**会显示 6 位验证码，到 [xiaozhi.me](https://xiaozhi.me) 输入即可
-绑定小智账号；自定义唤醒词仅支持中文，且受模型词表限制。启用后麦克风常驻监听唤醒词，
-这是隐私上的取舍，控制台已明确提示。
+绑定小智账号；唤醒词由 ESP-SR MultiNet 运行时命令词实现，**只认拼音音节**（如
+`da fen qi`＝「达芬奇」），写汉字会被模型判为非法命令词导致唤醒失效；音节还需在模型
+词表内。启用后麦克风常驻监听唤醒词，这是隐私上的取舍，控制台已明确提示。
 
 ```json
 {
   "enabled": true,
   "allowControl": true,
   "otaUrl": "https://api.tenclass.net/xiaozhi/ota/",
-  "wakeWords": ["你好小智"],
+  "wakeWords": ["da fen qi"],
   "wakeThreshold": 65,
   "volume": 60
 }

@@ -421,8 +421,8 @@ export type DeviceSettingsInput = z.infer<typeof deviceSettingsSchema>;
  * 语音助手设置
  * ------------------------------------------------------------------ */
 
-/** 唤醒词只支持中文：2–12 个汉字（模型词表限制，见 DEVICE-API.md）。 */
-export const VOICE_WAKE_WORD_PATTERN = /^[\u4e00-\u9fa5]{2,12}$/;
+/** 唤醒词是 ESP-SR MultiNet 命令词：2–12 个拼音音节，小写、单空格分隔、无声调。 */
+export const VOICE_WAKE_WORD_PATTERN = /^[a-z]+(?: [a-z]+){1,11}$/;
 
 export const voiceOtaUrlSchema = z
   .string()
@@ -444,7 +444,7 @@ export const voiceOtaUrlSchema = z
 export const wakeWordSchema = z
   .string()
   .trim()
-  .regex(VOICE_WAKE_WORD_PATTERN, '唤醒词必须是 2–12 个汉字');
+  .regex(VOICE_WAKE_WORD_PATTERN, '唤醒词必须是 2–12 个拼音音节，例如 da fen qi');
 
 /** 1–8 条，逐条 trim 后校验并去重；去重后仍保留原顺序。 */
 export const wakeWordsSchema = z

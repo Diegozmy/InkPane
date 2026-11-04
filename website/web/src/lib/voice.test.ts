@@ -9,24 +9,22 @@ import {
 
 describe('parseWakeWords', () => {
   it('支持中英文逗号、顿号、分号与换行分隔', () => {
-    expect(parseWakeWords('你好小智,小墨，阿丽斯、小蓝;小绿\n小白').words).toEqual([
-      '你好小智',
-      '小墨',
-      '阿丽斯',
-      '小蓝',
-      '小绿',
-      '小白',
+    expect(
+      parseWakeWords('da fen qi,ni hao xiao zhi，xiao mo、hei an;li ming\nxiao yu').words,
+    ).toEqual(['da fen qi', 'ni hao xiao zhi', 'xiao mo', 'hei an', 'li ming', 'xiao yu']);
+  });
+
+  it('逐项 trim、转小写、压缩空格并去重，保留首次出现的顺序', () => {
+    expect(parseWakeWords(' Da  Fen Qi ，da fen qi，Ni Hao Xiao Zhi ').words).toEqual([
+      'da fen qi',
+      'ni hao xiao zhi',
     ]);
   });
 
-  it('逐项 trim 并去重，保留首次出现的顺序', () => {
-    expect(parseWakeWords(' 你好小智 ，小墨，你好小智 ').words).toEqual(['你好小智', '小墨']);
-  });
-
   it('把不符合规则的项归入 invalid，不影响合法项', () => {
-    const parsed = parseWakeWords('你好，小墨，hello，你');
-    expect(parsed.words).toEqual(['你好', '小墨']);
-    expect(parsed.invalid).toEqual(['hello', '你']);
+    const parsed = parseWakeWords('da fen qi，ni hao xiao zhi，hello，a');
+    expect(parsed.words).toEqual(['da fen qi', 'ni hao xiao zhi']);
+    expect(parsed.invalid).toEqual(['hello', 'a']);
   });
 
   it('空输入返回空结果', () => {
@@ -36,7 +34,7 @@ describe('parseWakeWords', () => {
 
 describe('validateWakeWords', () => {
   it('通过时返回 null', () => {
-    expect(validateWakeWords('你好小智，小墨')).toBeNull();
+    expect(validateWakeWords('da fen qi，ni hao xiao zhi')).toBeNull();
   });
 
   it('为空或全非法时提示至少填写 1 个', () => {
@@ -44,23 +42,35 @@ describe('validateWakeWords', () => {
   });
 
   it('格式错误时指出第一个非法项', () => {
-    expect(validateWakeWords('hello')).toBe('唤醒词「hello」无效，请使用 2–12 个汉字');
+    expect(validateWakeWords('hello')).toBe(
+      '唤醒词「hello」无效，请使用 2–12 个拼音音节，例如 da fen qi',
+    );
   });
 
   it('超过 8 个时拒绝', () => {
-    const words = ['你好小智', '小墨', '阿丽斯', '小蓝', '小绿', '小白', '小红', '小黑', '小紫'];
+    const words = [
+      'da fen qi',
+      'ni hao',
+      'xiao mo',
+      'xiao lan',
+      'xiao lv',
+      'xiao bai',
+      'xiao hong',
+      'xiao hei',
+      'xiao zi',
+    ];
     expect(validateWakeWords(words.join('，'))).toBe('最多支持 8 个唤醒词');
   });
 
-  it('12 个汉字可用，13 个汉字不可用', () => {
-    expect(validateWakeWords('一二三四五六七八九十一二')).toBeNull();
-    expect(validateWakeWords('一二三四五六七八九十一二三')).toContain('无效');
+  it('12 个音节可用，13 个音节不可用', () => {
+    expect(validateWakeWords('a b c d e f g h i j k l')).toBeNull();
+    expect(validateWakeWords('a b c d e f g h i j k l m')).toContain('无效');
   });
 });
 
 describe('formatWakeWords', () => {
   it('用中文逗号回显', () => {
-    expect(formatWakeWords(['你好小智', '小墨'])).toBe('你好小智，小墨');
+    expect(formatWakeWords(['da fen qi', 'ni hao xiao zhi'])).toBe('da fen qi，ni hao xiao zhi');
     expect(formatWakeWords([])).toBe('');
   });
 });

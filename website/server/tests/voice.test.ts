@@ -1,7 +1,7 @@
 /**
  * 语音助手设置接口测试。
  *
- * 覆盖：默认值、局部更新与持久化、唤醒词 trim/去重与中文限制、
+ * 覆盖：默认值、局部更新与持久化、唤醒词 trim/去重与拼音限制、
  * strict schema 的 422 校验、用户隔离，以及设备载荷 voice 与 ETag。
  */
 
@@ -24,7 +24,7 @@ const DEFAULTS = {
   enabled: true,
   allowControl: true,
   otaUrl: 'https://api.tenclass.net/xiaozhi/ota/',
-  wakeWords: ['你好小智'],
+  wakeWords: ['da fen qi'],
   wakeThreshold: 65,
   volume: 60,
 };
@@ -64,12 +64,12 @@ describe('PUT /api/voice', () => {
   it('局部更新后持久化，未传字段保持原值', async () => {
     const updated = await admin
       .put('/api/voice')
-      .send({ volume: 30, wakeWords: ['小墨', '你好小智'] });
+      .send({ volume: 30, wakeWords: ['xiao mo', 'da fen qi'] });
     expect(updated.status).toBe(200);
     expect(updated.body.data).toEqual({
       ...DEFAULTS,
       volume: 30,
-      wakeWords: ['小墨', '你好小智'],
+      wakeWords: ['xiao mo', 'da fen qi'],
     });
 
     const readBack = await admin.get('/api/voice');
@@ -84,7 +84,7 @@ describe('PUT /api/voice', () => {
     const row = getDatabase()
       .prepare("SELECT value FROM app_settings WHERE key = 'voice.wakeWords'")
       .get() as { value: string };
-    expect(JSON.parse(row.value)).toEqual(['小墨', '你好小智']);
+    expect(JSON.parse(row.value)).toEqual(['xiao mo', 'da fen qi']);
   });
 
   it('布尔与数值字段可单独更新', async () => {
@@ -102,18 +102,21 @@ describe('PUT /api/voice', () => {
   it('唤醒词逐条 trim 并去重', async () => {
     const response = await admin
       .put('/api/voice')
-      .send({ wakeWords: [' 你好小智 ', '你好小智', ' 小墨'] });
+      .send({ wakeWords: [' da fen qi ', 'da fen qi', ' xiao mo'] });
     expect(response.status).toBe(200);
-    expect(response.body.data.wakeWords).toEqual(['你好小智', '小墨']);
+    expect(response.body.data.wakeWords).toEqual(['da fen qi', 'xiao mo']);
   });
 
   it('校验失败返回 422 且不写库', async () => {
     const invalidBodies: Record<string, unknown>[] = [
       { wakeWords: [] },
-      { wakeWords: Array.from({ length: 9 }, () => '唤醒词') },
-      { wakeWords: ['你好', 'hello'] },
-      { wakeWords: ['你'] },
-      { wakeWords: ['这是一个非常非常非常长的唤醒词'] },
+      { wakeWords: Array.from({ length: 9 }, () => 'xiao mo') },
+      { wakeWords: ['da fen qi', 'hello'] },
+      { wakeWords: ['a'] },
+      { wakeWords: ['a b c d e f g h i j k l m'] },
+      { wakeWords: ['Da Fen Qi'] },
+      { wakeWords: ['da  fen qi'] },
+      { wakeWords: ['da fen qi!'] },
       { otaUrl: 'ftp://example.com/ota/' },
       { otaUrl: `https://example.com/${'x'.repeat(200)}` },
       { wakeThreshold: 101 },
@@ -137,12 +140,22 @@ describe('PUT /api/voice', () => {
   it('错误消息为中文', async () => {
     const badWord = await admin.put('/api/voice').send({ wakeWords: ['abc'] });
     expect(badWord.status).toBe(422);
-    expect(badWord.body.error.details[0].message).toContain('汉字');
+    expect(badWord.body.error.details[0].message).toContain('拼音');
 
     const tooMany = await admin
       .put('/api/voice')
       .send({
-        wakeWords: ['你好', '小智', '小墨', '阿丽', '小明', '小红', '小白', '小黑', '小蓝'],
+        wakeWords: [
+          'da fen qi',
+          'ni hao',
+          'xiao mo',
+          'xiao lan',
+          'xiao lv',
+          'xiao bai',
+          'xiao hong',
+          'xiao hei',
+          'xiao zi',
+        ],
       });
     expect(tooMany.status).toBe(422);
     expect(tooMany.body.error.details[0].message).toContain('8');
@@ -174,9 +187,9 @@ describe('用户隔离', () => {
       .set(TOKEN_HEADER, adminDevice.token);
     expect(adminScreen.body.data.voice).toEqual({ ...DEFAULTS, volume: 20, enabled: false });
 
-    await alice.put('/api/voice').send({ wakeWords: ['阿丽斯'] });
-    expect((await alice.get('/api/voice')).body.data.wakeWords).toEqual(['阿丽斯']);
-    expect((await admin.get('/api/voice')).body.data.wakeWords).toEqual(['你好小智']);
+    await alice.put('/api/voice').send({ wakeWords: ['xiao mo'] });
+    expect((await alice.get('/api/voice')).body.data.wakeWords).toEqual(['xiao mo']);
+    expect((await admin.get('/api/voice')).body.data.wakeWords).toEqual(['da fen qi']);
   });
 });
 
@@ -191,7 +204,7 @@ describe('设备载荷与 ETag', () => {
     expect(first.body.data.voice).toEqual(DEFAULTS);
     const etag = first.headers.etag as string;
 
-    await admin.put('/api/voice').send({ wakeWords: ['小墨'] });
+    await admin.put('/api/voice').send({ wakeWords: ['xiao mo'] });
 
     const changed = await request(app)
       .get('/api/device/screen')
@@ -199,7 +212,7 @@ describe('设备载荷与 ETag', () => {
       .set('If-None-Match', etag);
     expect(changed.status).toBe(200);
     expect(changed.headers.etag).not.toBe(etag);
-    expect(changed.body.data.voice.wakeWords).toEqual(['小墨']);
+    expect(changed.body.data.voice.wakeWords).toEqual(['xiao mo']);
 
     const cached = await request(app)
       .get('/api/device/screen')

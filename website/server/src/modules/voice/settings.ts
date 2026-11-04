@@ -12,7 +12,7 @@ import { VOICE_WAKE_WORD_PATTERN, type VoiceUpdateInput } from '../../domain/sch
 import type { VoiceSettings } from '../../domain/types.js';
 
 export const DEFAULT_VOICE_OTA_URL = 'https://api.tenclass.net/xiaozhi/ota/';
-export const DEFAULT_WAKE_WORDS: readonly string[] = ['你好小智'];
+export const DEFAULT_WAKE_WORDS: readonly string[] = ['da fen qi'];
 export const DEFAULT_WAKE_THRESHOLD = 65;
 export const DEFAULT_VOLUME = 60;
 

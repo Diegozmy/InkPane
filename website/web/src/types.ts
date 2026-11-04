@@ -524,7 +524,7 @@ export interface VoiceSettings {
   /** 允许语音助手修改日程与待办；写接口仍要求设备令牌 */
   allowControl: boolean;
   otaUrl: string;
-  /** 1–8 个唤醒词，每个 2–12 个汉字 */
+  /** 1–8 个唤醒词，每个 2–12 个拼音音节（MultiNet 命令词，如 da fen qi） */
   wakeWords: string[];
   /** 唤醒灵敏度 0–100 */
   wakeThreshold: number;

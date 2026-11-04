@@ -611,7 +611,7 @@ export function DevicePage(): ReactElement {
                     <Field
                       label="唤醒词"
                       htmlFor="voice-wake-words"
-                      hint="用逗号分隔，最多 8 个；每个 2–12 个汉字，例如：你好小智，小墨"
+                      hint="用逗号分隔，最多 8 个；每个 2–12 个拼音音节（小写、空格分隔），例如：da fen qi，ni hao xiao zhi"
                       error={wakeWordError}
                     >
                       <Input
