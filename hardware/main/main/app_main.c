@@ -1058,7 +1058,7 @@ void app_main(void)
 #define RESIDENT_TICK_MS 20
 #define RESIDENT_BATTERY_CHECK_MS (60 * 1000)
 #define RESIDENT_WIFI_RETRY_MS (30 * 1000)
-#define RESIDENT_VOICE_RENDER_MS 800
+#define RESIDENT_VOICE_RENDER_MS 1500
 #define RESIDENT_ERROR_PAGE_MS (15 * 1000)
 #define RESIDENT_ACTIVATION_PAGE_MS (5 * 60 * 1000)
 
@@ -1098,6 +1098,7 @@ static bool s_error_dismissed;
 static int64_t s_error_until_ms;
 static int64_t s_activation_until_ms;
 static bool s_voice_dirty;
+static uint32_t s_voice_signature;
 static int64_t s_last_voice_render_ms;
 static int64_t s_last_wifi_attempt_ms = -RESIDENT_WIFI_RETRY_MS;
 static int64_t s_last_battery_check_ms;
@@ -1385,6 +1386,28 @@ static void resident_render_dashboard(void)
     render_overview();
 }
 
+/** FNV-1a over what the voice page shows, so identical frames are not repainted. */
+static uint32_t voice_hash_text(uint32_t hash, const char *text)
+{
+    if (text == NULL) {
+        return hash;
+    }
+    for (const char *cursor = text; *cursor != '\0'; ++cursor) {
+        hash = (hash ^ (uint32_t)(unsigned char)*cursor) * 16777619u;
+    }
+    return hash;
+}
+
+static uint32_t voice_page_signature(const inkpane_voice_snapshot_t *snapshot)
+{
+    uint32_t hash = 2166136261u;
+    hash = (hash ^ (uint32_t)snapshot->state) * 16777619u;
+    hash = voice_hash_text(hash, snapshot->user_text);
+    hash = (hash ^ 0x1Fu) * 16777619u;
+    hash = voice_hash_text(hash, snapshot->reply_text);
+    return hash;
+}
+
 static void resident_render_voice(const inkpane_voice_snapshot_t *snapshot, bool full)
 {
     if (s_framebuffer == NULL) {
@@ -1399,17 +1422,14 @@ static void resident_render_voice(const inkpane_voice_snapshot_t *snapshot, bool
                            : "BOOT 打断 · 语音修改已关闭",
     };
     inkpane_ui_render_voice(s_framebuffer, &view);
-    esp_err_t err;
-    if (full) {
-        err = inkpane_epd_show_full(s_framebuffer);
-    } else {
-        /* Refresh the whole panel: the voice page uses the full height (reply
-         * text plus footer), so a shorter window would leave the bottom stale. */
-        err = inkpane_epd_show_region(s_framebuffer, 0, 0, INKPANE_SCREEN_WIDTH,
-                                      INKPANE_SCREEN_HEIGHT);
-    }
+    /* The partial-refresh window proved unreliable for this page (large windows
+     * came out blank or half updated), so every update is a full refresh. */
+    const int64_t start_ms = esp_timer_get_time() / 1000;
+    esp_err_t err = inkpane_epd_show_full(s_framebuffer);
+    const int elapsed_ms = (int)(esp_timer_get_time() / 1000 - start_ms);
+    ESP_LOGI(TAG, "voice page refresh (full=%d state=%d) %s in %d ms", (int)full,
+             (int)snapshot->state, esp_err_to_name(err), elapsed_ms);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "voice page refresh failed: %s", esp_err_to_name(err));
         s_persist.panel_warm = false;
     }
 }
@@ -1719,6 +1739,7 @@ static void resident_main(void)
             s_voice_dirty = false;
             if (s_voice_page) {
                 resident_render_voice(&snapshot, true);
+                s_voice_signature = voice_page_signature(&snapshot);
                 s_last_voice_render_ms = now_ms;
             } else if (s_activation_page) {
                 s_activation_until_ms = now_ms + RESIDENT_ACTIVATION_PAGE_MS;
@@ -1732,7 +1753,11 @@ static void resident_main(void)
             }
         } else if (s_voice_page && s_voice_dirty &&
                    now_ms - s_last_voice_render_ms >= RESIDENT_VOICE_RENDER_MS) {
-            resident_render_voice(&snapshot, false);
+            const uint32_t signature = voice_page_signature(&snapshot);
+            if (signature != s_voice_signature) {
+                s_voice_signature = signature;
+                resident_render_voice(&snapshot, false);
+            }
             s_last_voice_render_ms = now_ms;
             s_voice_dirty = false;
         }
