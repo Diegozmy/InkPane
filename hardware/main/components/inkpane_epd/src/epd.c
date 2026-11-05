@@ -307,11 +307,12 @@ esp_err_t inkpane_epd_show_region(const uint8_t *framebuffer, int x, int y, int 
     if (err == ESP_OK) {
         err = send_data(0x80);
     }
-    /* SSD1683 window registers: 0x44 takes pixel X start/end, 0x45 takes the Y
-     * pair in the same order as set_full_window(): Y end first, then Y start.
-     * The previous version sent Y start first here, which made every partial
-     * window scan backwards and left the panel unchanged (the clock never
-     * ticked). Keep both paths in the same order. */
+    /* SSD1683 window registers: 0x44 takes X start/end, 0x45 takes Y start/end.
+     * The controller uses the FIRST Y value as the start of the window, so the
+     * order here must be start then end — with the pair reversed the partial
+     * frame landed one rectangle lower than intended (the clock refreshed over
+     * the module below it). set_full_window() can keep its reversed pair: for
+     * the whole panel the controller clamps it back to 0..H-1. */
     const int pixel_x0 = x0;
     const int pixel_x1 = x1 - 8;
     const int pixel_y0 = y;
@@ -323,10 +324,10 @@ esp_err_t inkpane_epd_show_region(const uint8_t *framebuffer, int x, int y, int 
     if (err == ESP_OK) err = send_data(pixel_x1 & 0xFF);
     if (err == ESP_OK) err = send_data((pixel_x1 >> 8) & 0xFF);
     if (err == ESP_OK) err = send_command(0x45);
-    if (err == ESP_OK) err = send_data(pixel_y1 & 0xFF);
-    if (err == ESP_OK) err = send_data((pixel_y1 >> 8) & 0xFF);
     if (err == ESP_OK) err = send_data(pixel_y0 & 0xFF);
     if (err == ESP_OK) err = send_data((pixel_y0 >> 8) & 0xFF);
+    if (err == ESP_OK) err = send_data(pixel_y1 & 0xFF);
+    if (err == ESP_OK) err = send_data((pixel_y1 >> 8) & 0xFF);
     if (err == ESP_OK) err = send_command(0x4E);
     if (err == ESP_OK) err = send_data(pixel_x0 & 0xFF);
     if (err == ESP_OK) err = send_data((pixel_x0 >> 8) & 0xFF);
