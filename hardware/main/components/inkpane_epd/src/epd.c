@@ -25,6 +25,9 @@
 static const char *TAG = "epd";
 static spi_device_handle_t s_spi;
 static bool s_ready;
+/* Set when a partial refresh hardware-reset the controller: the next full
+ * refresh must re-run panel_init() before writing the frame. */
+static bool s_config_stale;
 
 static inline void cs_low(void) { gpio_set_level(EPD_CS, 0); }
 static inline void dc_command(void) { gpio_set_level(EPD_DC, 0); }
@@ -240,6 +243,13 @@ esp_err_t inkpane_epd_show_full(const uint8_t *framebuffer)
     if (!s_ready || framebuffer == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
+    /* A partial refresh hardware-resets the controller (see show_region); the
+     * panel configuration has to be restored before the next full frame or the
+     * image comes out shifted. */
+    if (s_config_stale) {
+        ESP_RETURN_ON_ERROR(panel_init(), TAG, "re-init after partial");
+        s_config_stale = false;
+    }
     /* A previous partial refresh left the RAM window on the clock rectangle;
      * writing the whole framebuffer into it would wrap the data. */
     ESP_RETURN_ON_ERROR(set_full_window(), TAG, "full window");
@@ -291,9 +301,17 @@ esp_err_t inkpane_epd_show_region(const uint8_t *framebuffer, int x, int y, int 
                stride);
     }
 
-    /* No hardware reset here: on a warm deep-sleep wake the panel rail stayed
-     * powered and the controller keeps its RAM/config; resetting would force a
-     * full re-init and wipe the image. */
+    /* Waveshare 3.97 reference driver (EPD_Display_Partial) does a hardware
+     * reset before every partial window. Without it the controller keeps a
+     * stale internal address state and the frame lands below the requested
+     * origin — that is exactly the "clock refreshes over the todo list" bug.
+     * The reset only clears the controller state, the panel keeps its image. */
+    rst_low();
+    vTaskDelay(pdMS_TO_TICKS(2));
+    rst_high();
+    vTaskDelay(pdMS_TO_TICKS(50));
+    s_config_stale = true;
+
     esp_err_t err = ESP_OK;
     if (err == ESP_OK) {
         err = send_command(0x18);
@@ -307,12 +325,9 @@ esp_err_t inkpane_epd_show_region(const uint8_t *framebuffer, int x, int y, int 
     if (err == ESP_OK) {
         err = send_data(0x80);
     }
-    /* SSD1683 window registers: 0x44 takes X start/end, 0x45 takes Y start/end.
-     * The controller uses the FIRST Y value as the start of the window, so the
-     * order here must be start then end — with the pair reversed the partial
-     * frame landed one rectangle lower than intended (the clock refreshed over
-     * the module below it). set_full_window() can keep its reversed pair: for
-     * the whole panel the controller clamps it back to 0..H-1. */
+    /* Window registers copied from the vendor driver: X stays in pixel units
+     * (2 bytes each), X end is the first pixel of the last byte column, and
+     * 0x45 takes Y end first, then Y start. */
     const int pixel_x0 = x0;
     const int pixel_x1 = x1 - 8;
     const int pixel_y0 = y;
@@ -324,10 +339,10 @@ esp_err_t inkpane_epd_show_region(const uint8_t *framebuffer, int x, int y, int 
     if (err == ESP_OK) err = send_data(pixel_x1 & 0xFF);
     if (err == ESP_OK) err = send_data((pixel_x1 >> 8) & 0xFF);
     if (err == ESP_OK) err = send_command(0x45);
-    if (err == ESP_OK) err = send_data(pixel_y0 & 0xFF);
-    if (err == ESP_OK) err = send_data((pixel_y0 >> 8) & 0xFF);
     if (err == ESP_OK) err = send_data(pixel_y1 & 0xFF);
     if (err == ESP_OK) err = send_data((pixel_y1 >> 8) & 0xFF);
+    if (err == ESP_OK) err = send_data(pixel_y0 & 0xFF);
+    if (err == ESP_OK) err = send_data((pixel_y0 >> 8) & 0xFF);
     if (err == ESP_OK) err = send_command(0x4E);
     if (err == ESP_OK) err = send_data(pixel_x0 & 0xFF);
     if (err == ESP_OK) err = send_data((pixel_x0 >> 8) & 0xFF);
@@ -340,19 +355,6 @@ esp_err_t inkpane_epd_show_region(const uint8_t *framebuffer, int x, int y, int 
     if (err == ESP_OK) err = send_data(0xFF);
     if (err == ESP_OK) err = send_command(0x20);
     if (err == ESP_OK) err = wait_busy();
-
-    /* The differential update compares RAM 0x24 (new) against 0x26 ("old",
-     * i.e. what the panel currently shows). Refresh 0x26 with the frame just
-     * drawn so the next partial update diffs against the real display instead
-     * of a stale one (that is what left the clock area frozen/ghosted). */
-    if (err == ESP_OK) err = send_command(0x4E);
-    if (err == ESP_OK) err = send_data(pixel_x0 & 0xFF);
-    if (err == ESP_OK) err = send_data((pixel_x0 >> 8) & 0xFF);
-    if (err == ESP_OK) err = send_command(0x4F);
-    if (err == ESP_OK) err = send_data(pixel_y0 & 0xFF);
-    if (err == ESP_OK) err = send_data((pixel_y0 >> 8) & 0xFF);
-    if (err == ESP_OK) err = send_command(0x26);
-    if (err == ESP_OK) err = send_buffer(packed, packed_size);
 
     heap_caps_free(packed);
     return err;
