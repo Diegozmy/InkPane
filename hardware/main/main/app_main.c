@@ -314,15 +314,21 @@ static void refresh_clock_partial(const inkpane_config_t *config)
     s_clock_status_key = status;
     s_persist.partial_count++;
     inkpane_ui_render_clock(s_framebuffer, rect, &clock, status);
-    esp_err_t err = inkpane_epd_show_region(s_framebuffer, rect->x, rect->y, rect->w, rect->h);
+    /* Full refresh instead of a partial window: on this SSD1683 the partial
+     * window path keeps landing one or more rectangles below the requested
+     * origin (the Y window start is taken from the wrong byte), so a windowed
+     * clock drifted down over the todo module and then off the panel. A full
+     * refresh is ~4 s and flashes, but it always lands where it should. */
+    const int64_t start_ms = esp_timer_get_time() / 1000;
+    esp_err_t err = inkpane_epd_show_full(s_framebuffer);
+    const int elapsed_ms = (int)(esp_timer_get_time() / 1000 - start_ms);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "clock partial refresh failed: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "clock refresh failed: %s", esp_err_to_name(err));
         /* The warm-panel assumption may be wrong (rail glitch, controller
          * reset): force a cold panel init + full refresh on the next wake. */
         s_persist.panel_warm = false;
     } else {
-        ESP_LOGI(TAG, "clock partial refresh %dx%d at (%d,%d)", rect->w, rect->h, rect->x,
-                 rect->y);
+        ESP_LOGI(TAG, "clock refresh (full) %d ms", elapsed_ms);
     }
 }
 
