@@ -145,7 +145,7 @@ hardware/
 │   ├── main/                 # app_main + Kconfig
 │   ├── components/
 │   │   ├── inkpane_board/    # I2C、AXP2101、PCF85063、SHTC3、按键
-│   │   ├── inkpane_epd/      # SSD1683 面板驱动（全刷/局刷/休眠）
+│   │   ├── inkpane_epd/      # SSD1677 面板驱动（全刷/局刷/休眠）
 │   │   ├── inkpane_model/    # JSON/时间/调度/RTC 快照（纯 C，host 可测）
 │   │   ├── inkpane_ui/       # 1-bit 画布、字库、六模块
 │   │   ├── inkpane_net/      # Wi-Fi、HTTP、NVS 配置

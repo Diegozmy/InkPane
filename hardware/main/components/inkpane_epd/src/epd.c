@@ -105,13 +105,11 @@ static void hardware_reset(void)
  * screen" after zooming out of a module). Every full refresh therefore sets
  * the window explicitly.
  *
- * Byte order: 0x44 takes X start then X end. For 0x45 the canonical order is
- * Y start then Y end. This full-panel window deliberately keeps the reversed
- * pair used by the ESP-IDF vendor demo (EPD_Init): because it spans 0..H-1
- * the controller tolerates it, and this order is field-proven for full frames.
- * Do NOT copy it to the partial path — there the first value is taken as the
- * window start, and a reversed pair mirrors the band into the bottom half of
- * the panel (clock over the todo module).
+ * Byte order: 0x44 takes X start then X end. The gate lines are wired
+ * bottom-to-top, so RAM Y is mirrored against the visible image and 0x45 takes
+ * the RAM Y start (high, HEIGHT-1) then the RAM Y end (low, 0). For the full
+ * panel this spans the whole RAM and is correct as-is. The partial path applies
+ * the same mirroring to its sub-window; do not send it visible coordinates.
  */
 static esp_err_t set_full_window(void)
 {
@@ -311,9 +309,9 @@ esp_err_t inkpane_epd_show_region(const uint8_t *framebuffer, int x, int y, int 
 
     /* Waveshare 3.97 reference driver (EPD_Display_Partial) does a hardware
      * reset before every partial window. Without it the controller keeps a
-     * stale internal address state and the frame lands below the requested
-     * origin — that is exactly the "clock refreshes over the todo list" bug.
-     * The reset only clears the controller state, the panel keeps its image. */
+     * stale internal address state, so the band starts at the previous cursor
+     * instead of the requested one. The reset only clears the controller
+     * state; the panel keeps its image. */
     rst_low();
     vTaskDelay(pdMS_TO_TICKS(2));
     rst_high();
@@ -333,19 +331,33 @@ esp_err_t inkpane_epd_show_region(const uint8_t *framebuffer, int x, int y, int 
     if (err == ESP_OK) {
         err = send_data(0x80);
     }
-    /* Window registers: X stays in pixel units (2 bytes each), X end is the
+    /* Window registers: X stays in pixel units (2 bytes each) and X end is the
      * first pixel of the last byte column.
      *
-     * 0x45 must be Y **start then end**. The controller uses the first Y value
-     * as the window start; with end→start the band is mirrored to the bottom
-     * half of the panel (the clock lands over the todo module). The ESP-IDF
-     * vendor demo has this pair reversed; its Arduino driver and the datasheet
-     * both use start→end, and this panel follows those. */
+     * The 800x480 SSD1677 panel has its gate lines wired bottom-to-top, so the
+     * controller's RAM Y is mirrored against the visible image:
+     *
+     *     visible row y  <->  RAM row (HEIGHT - 1 - y)
+     *
+     * Together with data entry mode 0x01 (X increment, Y decrement) the RAM
+     * scan runs downwards from the window's first Y value. A region that must
+     * appear at visible y..y+height-1 therefore has to be programmed as:
+     *
+     *     RAM start = HEIGHT - 1 - y          (visible top row)
+     *     RAM end   = HEIGHT - y - height     (visible bottom row)
+     *
+     * Sending the visible y..y+height-1 values directly makes the scan walk off
+     * RAM row 0, wrap to the bottom and paint the band across the screen edge
+     * (this is the "clock shows up below the todo list" bug). GxEPD2 uses the
+     * same mirroring for these panels (GxEPD2_426_GDEQ0426T82). */
     const int pixel_x0 = x0;
     const int pixel_x1 = x1 - 8;
-    const int pixel_y0 = y;
-    const int pixel_y1 = y + height - 1;
-    ESP_LOGD(TAG, "partial %dx%d at (%d,%d), bytes=%d", width, height, pixel_x0, pixel_y0, stride);
+    const int pixel_y0 = INKPANE_EPD_HEIGHT - 1 - y;
+    const int pixel_y1 = INKPANE_EPD_HEIGHT - y - height;
+    ESP_LOGD(TAG, "partial %dx%d at (%d,%d), ram y %d..%d, bytes=%d", width, height, x, y,
+             pixel_y0, pixel_y1, stride);
+    if (err == ESP_OK) err = send_command(0x11);
+    if (err == ESP_OK) err = send_data(0x01);
     if (err == ESP_OK) err = send_command(0x44);
     if (err == ESP_OK) err = send_data(pixel_x0 & 0xFF);
     if (err == ESP_OK) err = send_data((pixel_x0 >> 8) & 0xFF);
