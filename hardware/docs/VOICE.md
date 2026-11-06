@@ -11,7 +11,7 @@
 | 常驻唤醒 | 设备保持唤醒，Wi-Fi 与麦克风常开；默认唤醒词拼音 `da fen qi`（达芬奇） |
 | 自定义唤醒词 | 控制台或配网页填写，1–8 条拼音音节（小写、空格分隔、无声调）；由 ESP-SR MultiNet 运行时命令词实现 |
 | 对话 | 唤醒后自动聆听；BOOT 短按=按住说话/停止/打断；长按 BOOT 3 秒=唤醒词静音 |
-| 屏幕 | 对话中显示状态、你的话和回复；未激活时显示 6 位激活码 |
+| 屏幕 | 对话中显示状态、你的话和回复；局刷只重画变化的损坏带，重绘节流 700 ms；未激活时显示 6 位激活码 |
 | 语音控制 | 新增/取消日程、新增/完成/删除待办、查询今天安排、刷新屏幕、调音量 |
 | 看板 | 语音不可用时看板照常工作；`refreshMinutes` 到点拉屏、每分钟局刷时钟不变 |
 | 隐私 | 唤醒前后音频不上传、不落盘；没有「常驻录音」文件；不需要时可在控制台关闭语音 |
@@ -40,9 +40,21 @@
 4. **自建服务**：把 OTA 地址改成自建 `xiaozhi-esp32-server` 的 OTA 地址（局域网通常
    是 `http://<主机>:<端口>/xiaozhi/ota/`），重新配网/等待拉屏，激活流程由该服务决定。
 
-> 激活依赖 TLS 证书校验，因此设备必须先有有效时间。固件顺序是：明文 HTTP 拉一次看板
-> 校准 RTC → 失败则 SNTP → 再访问 HTTPS OTA；两者都失败时语音显示「网络未连接/时间未校准」，
-> 看板继续工作并周期重试。
+> 激活依赖 TLS 证书校验，因此设备必须先有有效时间。看板走明文 HTTP，拉一次成功后
+> 用 `localIso`/`Date` 头校准 RTC；语音侧在访问 HTTPS OTA 前会先确认时间（不够新就直接
+> 走 SNTP），两者都失败时语音显示「网络未连接/时间未校准」，看板继续工作并周期重试。
+>
+> 常驻模式的 SNTP 不是一次性的：RTC 未校准时联网后后台就拉起服务，启动日志先有
+> `sntp service started (3 servers)`（`ntp.aliyun.com`、`ntp.tencent.com` 与字面 IP
+> `203.107.6.88` 兜底 DNS），成功后有 `sntp synced: <epoch>`，随后是
+> `rtc calibrated from sntp: ...`。首次等待 + 一次立即重试都失败才会打
+> `sntp sync timed out (will retry hourly in background)`，且每进程只打一次；服务继续按
+> 小时重同步，主循环也每 60 s 在 RTC 未校准前补一次（非阻塞，不卡 UI）。所以开机那次
+> 没同步上也不会永久失败，只是校准要等下一次后台重试。
+>
+> 注意 SNTP 是**兜底**：主循环先跑看板 HTTP 拉取，200 的 `now_local` 会直接校准 RTC；
+> 只有看板路径失败（服务不可达、令牌失效等）时 SNTP 才真正被需要。语音侧在访问 HTTPS
+> OTA 前也会自己确认时间（`ensure_time_ready()`，不够新就同步一次）。
 
 ## 3. 使用
 
@@ -129,7 +141,7 @@ powershell -ExecutionPolicy Bypass -File hardware/tools/build.ps1 -Flash -Port C
 | --- | --- |
 | 屏幕一直「正在连接日程服务」 | 看板服务不可达；先解决 Wi-Fi/服务地址，与语音无关 |
 | 「语音助手未激活」+ 6 位码 | 到 xiaozhi.me 输入；确认设备时间正确（TLS 依赖时间） |
-| 「时间未校准，无法校验 TLS 证书」 | 看板服务需先可达以校准 RTC，或允许 SNTP（`ntp.aliyun.com`）出网 |
+| 「系统时间未校准，无法校验 TLS 证书」 | 先让设备联网；常驻模式会走 SNTP（3 台服务器，含字面 IP 兜底 DNS）并每小时重同步，日志里应出现 `sntp service started (3 servers)` 与 `sntp synced:`。仍失败说明 UDP 123 被防火墙/路由器拦了，或根本不通外网；`sntp sync timed out` 每进程最多出现一次，出现后后台仍在重试，可等一分钟再看 RTC 是否被校准 |
 | 「语音模型未加载」 | 重新全量 `-Flash`，确认 `model` 分区写入成功 |
 | 唤醒词没反应 | 控制台确认语音已启用、未静音；**唤醒词必须是拼音**（`da fen qi`，不是汉字）；日志里找 `N wake command(s) active` 与 `Custom wake word detected` |
 | 日志出现 `invalid command, please check format` | 唤醒词写成了汉字；MultiNet 只接受拼音音节 |
@@ -155,7 +167,11 @@ powershell -ExecutionPolicy Bypass -File hardware/tools/build.ps1 -Flash -Port C
 5. 对话：单轮、多轮、打断、20/60 秒超时、服务端断线恢复。
 6. 语音控制：按第 4 节例子逐项验证；控制台出现数据；回到看板后屏幕更新；
    `allowControl=false` 时写工具不可用。
-7. 屏幕：对话页局刷无明显残影；激活页/错误页/回看板全刷正常；40 次局刷后全刷。
+7. 屏幕：对话页局刷按损坏带更新、无明显残影，窗口不偏移——状态标签变化只闪一条带
+   （约 30 行），回复多一行 1–2 条带；整轮变化（新问题 + 新回答 + 状态）应**回落全刷**
+   （日志 `voice page refresh (full=... state=... outcome=...)`，带区路径另打
+   `voice page partial refresh: N band(s), R rows, M ms`）；连续 40 次带区局刷后下一次
+   强制全刷去残影；激活页/错误页/回看板全刷正常。
 8. 网络：拔网、改错 OTA、MQTT-only、令牌失效、限流 429 的错误提示。
 9. 电源：待命/对话/播放电流；低电 <15% 静音、<5% 关机；USB 供电不关机。
 10. 24 小时稳定性：无内存泄漏/看门狗复位；唤醒词仍可用；看板仍按时刷新。
