@@ -105,10 +105,13 @@ static void hardware_reset(void)
  * screen" after zooming out of a module). Every full refresh therefore sets
  * the window explicitly.
  *
- * Byte order follows the vendor demo (epaper_port.c EPD_Init) and the original
- * panel_init: 0x44 takes X start then X end, 0x45 takes **Y end then Y start**.
- * Sending the Y pair the other way round flips the RAM scan and the panel shows
- * static noise, so do not "fix" the order based on comments elsewhere.
+ * Byte order: 0x44 takes X start then X end. For 0x45 the canonical order is
+ * Y start then Y end. This full-panel window deliberately keeps the reversed
+ * pair used by the ESP-IDF vendor demo (EPD_Init): because it spans 0..H-1
+ * the controller tolerates it, and this order is field-proven for full frames.
+ * Do NOT copy it to the partial path — there the first value is taken as the
+ * window start, and a reversed pair mirrors the band into the bottom half of
+ * the panel (clock over the todo module).
  */
 static esp_err_t set_full_window(void)
 {
@@ -330,9 +333,14 @@ esp_err_t inkpane_epd_show_region(const uint8_t *framebuffer, int x, int y, int 
     if (err == ESP_OK) {
         err = send_data(0x80);
     }
-    /* Window registers copied from the vendor driver: X stays in pixel units
-     * (2 bytes each), X end is the first pixel of the last byte column, and
-     * 0x45 takes Y end first, then Y start. */
+    /* Window registers: X stays in pixel units (2 bytes each), X end is the
+     * first pixel of the last byte column.
+     *
+     * 0x45 must be Y **start then end**. The controller uses the first Y value
+     * as the window start; with end→start the band is mirrored to the bottom
+     * half of the panel (the clock lands over the todo module). The ESP-IDF
+     * vendor demo has this pair reversed; its Arduino driver and the datasheet
+     * both use start→end, and this panel follows those. */
     const int pixel_x0 = x0;
     const int pixel_x1 = x1 - 8;
     const int pixel_y0 = y;
@@ -344,10 +352,10 @@ esp_err_t inkpane_epd_show_region(const uint8_t *framebuffer, int x, int y, int 
     if (err == ESP_OK) err = send_data(pixel_x1 & 0xFF);
     if (err == ESP_OK) err = send_data((pixel_x1 >> 8) & 0xFF);
     if (err == ESP_OK) err = send_command(0x45);
-    if (err == ESP_OK) err = send_data(pixel_y1 & 0xFF);
-    if (err == ESP_OK) err = send_data((pixel_y1 >> 8) & 0xFF);
     if (err == ESP_OK) err = send_data(pixel_y0 & 0xFF);
     if (err == ESP_OK) err = send_data((pixel_y0 >> 8) & 0xFF);
+    if (err == ESP_OK) err = send_data(pixel_y1 & 0xFF);
+    if (err == ESP_OK) err = send_data((pixel_y1 >> 8) & 0xFF);
     if (err == ESP_OK) err = send_command(0x4E);
     if (err == ESP_OK) err = send_data(pixel_x0 & 0xFF);
     if (err == ESP_OK) err = send_data((pixel_x0 >> 8) & 0xFF);
