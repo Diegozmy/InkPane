@@ -4,6 +4,7 @@
 
 #include "inkpane_canvas.h"
 #include "inkpane_font.h"
+#include "inkpane_frame_diff.h"
 #include "inkpane_model.h"
 #include "inkpane_schedule.h"
 #include "inkpane_snapshot.h"
@@ -635,6 +636,180 @@ static void test_snapshot(void)
     free(restored);
 }
 
+/* ---- frame diff ---------------------------------------------------------- */
+
+#define FRAME_DIFF_SENTINEL (-12345)
+
+static void frame_diff_reset_out(inkpane_damage_band_t *out, int count)
+{
+    for (int i = 0; i < count; ++i) {
+        out[i].y = FRAME_DIFF_SENTINEL;
+        out[i].height = FRAME_DIFF_SENTINEL;
+    }
+}
+
+/* A 0 or FULL result must not have written anything: the caller may keep the
+ * previous band list around. */
+static void frame_diff_check_out_untouched(const inkpane_damage_band_t *out, int count)
+{
+    for (int i = 0; i < count; ++i) {
+        CHECK(out[i].y == FRAME_DIFF_SENTINEL && out[i].height == FRAME_DIFF_SENTINEL);
+    }
+}
+
+/* Flip the leftmost pixel (MSB) of `row` so the row differs from the other frame. */
+static void frame_diff_dirty_row(uint8_t *buffer, int stride, int row)
+{
+    buffer[(size_t)row * (size_t)stride] ^= 0x80;
+}
+
+static void test_frame_diff(void)
+{
+    /* Small geometry on the stack: only the row scan itself is under test. */
+    enum { WIDTH = 64, STRIDE = 8, HEIGHT = 24, OUT_MAX = 8, VALID_BANDS = 4 };
+    uint8_t before[STRIDE * HEIGHT];
+    uint8_t after[STRIDE * HEIGHT];
+    inkpane_damage_band_t out[OUT_MAX];
+    int bands;
+
+    memset(before, 0xFF, sizeof(before));
+    memset(after, 0xFF, sizeof(after));
+    frame_diff_reset_out(out, VALID_BANDS);
+
+    /* Identical frames: no damage, no writes. */
+    bands = inkpane_frame_diff_bands(before, after, WIDTH, HEIGHT, STRIDE, 2, OUT_MAX, HEIGHT, out);
+    CHECK(bands == 0);
+    frame_diff_check_out_untouched(out, VALID_BANDS);
+
+    /* One changed pixel in the middle: exactly one single-row band at that y. */
+    frame_diff_dirty_row(after, STRIDE, 7);
+    frame_diff_reset_out(out, VALID_BANDS);
+    bands = inkpane_frame_diff_bands(before, after, WIDTH, HEIGHT, STRIDE, 2, OUT_MAX, HEIGHT, out);
+    CHECK(bands == 1);
+    CHECK(out[0].y == 7 && out[0].height == 1);
+    frame_diff_dirty_row(after, STRIDE, 7); /* restore */
+
+    /* Rows 5 and 7 with one clean row between: gap 1 < merge_gap_rows 3, so the
+     * clean row 6 is absorbed and one band spans 5..7. */
+    frame_diff_dirty_row(after, STRIDE, 5);
+    frame_diff_dirty_row(after, STRIDE, 7);
+    frame_diff_reset_out(out, VALID_BANDS);
+    bands = inkpane_frame_diff_bands(before, after, WIDTH, HEIGHT, STRIDE, 3, OUT_MAX, HEIGHT, out);
+    CHECK(bands == 1);
+    CHECK(out[0].y == 5 && out[0].height == 3);
+    frame_diff_dirty_row(after, STRIDE, 5);
+    frame_diff_dirty_row(after, STRIDE, 7);
+
+    /* Rows 5 and 8 with a gap of 2 clean rows: gap >= merge_gap_rows 2, so two
+     * separate windows are reported instead of one oversized band. */
+    frame_diff_dirty_row(after, STRIDE, 5);
+    frame_diff_dirty_row(after, STRIDE, 8);
+    frame_diff_reset_out(out, VALID_BANDS);
+    bands = inkpane_frame_diff_bands(before, after, WIDTH, HEIGHT, STRIDE, 2, OUT_MAX, HEIGHT, out);
+    CHECK(bands == 2);
+    CHECK(out[0].y == 5 && out[0].height == 1);
+    CHECK(out[1].y == 8 && out[1].height == 1);
+    frame_diff_dirty_row(after, STRIDE, 5);
+    frame_diff_dirty_row(after, STRIDE, 8);
+
+    /* Every row dirty: one band covering the whole frame, over the row budget ->
+     * full refresh. */
+    memset(after, 0x00, sizeof(after));
+    frame_diff_reset_out(out, VALID_BANDS);
+    bands = inkpane_frame_diff_bands(before, after, WIDTH, HEIGHT, STRIDE, 2, OUT_MAX, HEIGHT - 1,
+                                     out);
+    CHECK(bands == INKPANE_FRAME_DIFF_FULL);
+    frame_diff_check_out_untouched(out, VALID_BANDS);
+    memset(after, 0xFF, sizeof(after));
+
+    /* Dirt only at the top and bottom rows: two bands, correctly clipped to the
+     * frame edges. */
+    frame_diff_dirty_row(after, STRIDE, 0);
+    frame_diff_dirty_row(after, STRIDE, HEIGHT - 1);
+    frame_diff_reset_out(out, VALID_BANDS);
+    bands = inkpane_frame_diff_bands(before, after, WIDTH, HEIGHT, STRIDE, 1, OUT_MAX, HEIGHT, out);
+    CHECK(bands == 2);
+    CHECK(out[0].y == 0 && out[0].height == 1);
+    CHECK(out[1].y == HEIGHT - 1 && out[1].height == 1);
+    frame_diff_dirty_row(after, STRIDE, 0);
+    frame_diff_dirty_row(after, STRIDE, HEIGHT - 1);
+
+    /* Width 13: only ceil(13/8) = 2 bytes per row are compared. With a stride
+     * of 3 the third byte is padding, so changing it must not report damage;
+     * a change inside the used bytes still must. */
+    {
+        enum { NARROW_WIDTH = 13, NARROW_STRIDE = 3, NARROW_HEIGHT = 4, NARROW_BYTES = 2 };
+        uint8_t narrow_before[NARROW_STRIDE * NARROW_HEIGHT];
+        uint8_t narrow_after[NARROW_STRIDE * NARROW_HEIGHT];
+
+        memset(narrow_before, 0xFF, sizeof(narrow_before));
+        memset(narrow_after, 0xFF, sizeof(narrow_after));
+
+        frame_diff_reset_out(out, VALID_BANDS);
+        bands = inkpane_frame_diff_bands(narrow_before, narrow_after, NARROW_WIDTH, NARROW_HEIGHT,
+                                         NARROW_STRIDE, 1, OUT_MAX, NARROW_HEIGHT, out);
+        CHECK(bands == 0);
+
+        /* Padding byte of row 1 (byte index NARROW_BYTES) is outside the
+         * picture and must be ignored. */
+        narrow_after[(size_t)1 * NARROW_STRIDE + NARROW_BYTES] ^= 0xFF;
+        bands = inkpane_frame_diff_bands(narrow_before, narrow_after, NARROW_WIDTH, NARROW_HEIGHT,
+                                         NARROW_STRIDE, 1, OUT_MAX, NARROW_HEIGHT, out);
+        CHECK(bands == 0);
+        narrow_after[(size_t)1 * NARROW_STRIDE + NARROW_BYTES] ^= 0xFF;
+
+        /* Bit 0 of the second used byte is pixel 8, inside the 13-pixel width. */
+        narrow_after[(size_t)2 * NARROW_STRIDE + 1] ^= 0x01;
+        frame_diff_reset_out(out, VALID_BANDS);
+        bands = inkpane_frame_diff_bands(narrow_before, narrow_after, NARROW_WIDTH, NARROW_HEIGHT,
+                                         NARROW_STRIDE, 1, OUT_MAX, NARROW_HEIGHT, out);
+        CHECK(bands == 1);
+        CHECK(out[0].y == 2 && out[0].height == 1);
+    }
+
+    /* Invalid arguments always fall back to a full refresh. */
+    frame_diff_reset_out(out, VALID_BANDS);
+    CHECK(inkpane_frame_diff_bands(NULL, after, WIDTH, HEIGHT, STRIDE, 2, OUT_MAX, HEIGHT, out) ==
+          INKPANE_FRAME_DIFF_FULL);
+    CHECK(inkpane_frame_diff_bands(before, NULL, WIDTH, HEIGHT, STRIDE, 2, OUT_MAX, HEIGHT, out) ==
+          INKPANE_FRAME_DIFF_FULL);
+    CHECK(inkpane_frame_diff_bands(before, after, WIDTH, HEIGHT, STRIDE, 2, OUT_MAX, HEIGHT,
+                                   NULL) == INKPANE_FRAME_DIFF_FULL);
+    CHECK(inkpane_frame_diff_bands(before, after, 0, HEIGHT, STRIDE, 2, OUT_MAX, HEIGHT, out) ==
+          INKPANE_FRAME_DIFF_FULL);
+    CHECK(inkpane_frame_diff_bands(before, after, WIDTH, 0, STRIDE, 2, OUT_MAX, HEIGHT, out) ==
+          INKPANE_FRAME_DIFF_FULL);
+    CHECK(inkpane_frame_diff_bands(before, after, WIDTH, HEIGHT, 0, 2, OUT_MAX, HEIGHT, out) ==
+          INKPANE_FRAME_DIFF_FULL);
+    /* stride must cover at least ceil(width / 8) = 8 bytes. */
+    CHECK(inkpane_frame_diff_bands(before, after, WIDTH, HEIGHT, 7, 2, OUT_MAX, HEIGHT, out) ==
+          INKPANE_FRAME_DIFF_FULL);
+    CHECK(inkpane_frame_diff_bands(before, after, WIDTH, HEIGHT, STRIDE, -1, OUT_MAX, HEIGHT,
+                                   out) == INKPANE_FRAME_DIFF_FULL);
+    CHECK(inkpane_frame_diff_bands(before, after, WIDTH, HEIGHT, STRIDE, 2, 0, HEIGHT, out) ==
+          INKPANE_FRAME_DIFF_FULL);
+    CHECK(inkpane_frame_diff_bands(before, after, WIDTH, HEIGHT, STRIDE, 2, OUT_MAX, 0, out) ==
+          INKPANE_FRAME_DIFF_FULL);
+    frame_diff_check_out_untouched(out, VALID_BANDS);
+
+    /* Three separate dirty rows need three windows, one more than max_bands ->
+     * full refresh rather than dropping damage. */
+    frame_diff_dirty_row(after, STRIDE, 0);
+    frame_diff_dirty_row(after, STRIDE, 6);
+    frame_diff_dirty_row(after, STRIDE, 12);
+    frame_diff_reset_out(out, VALID_BANDS);
+    bands = inkpane_frame_diff_bands(before, after, WIDTH, HEIGHT, STRIDE, 1, 2, HEIGHT, out);
+    CHECK(bands == INKPANE_FRAME_DIFF_FULL);
+    frame_diff_check_out_untouched(out, VALID_BANDS);
+
+    /* Same damage fits the band budget when it is raised. */
+    bands = inkpane_frame_diff_bands(before, after, WIDTH, HEIGHT, STRIDE, 1, 3, HEIGHT, out);
+    CHECK(bands == 3);
+    CHECK(out[0].y == 0 && out[0].height == 1);
+    CHECK(out[1].y == 6 && out[1].height == 1);
+    CHECK(out[2].y == 12 && out[2].height == 1);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -659,6 +834,8 @@ int main(int argc, char **argv)
     test_render_zoomed();
     printf("== snapshot ==\n");
     test_snapshot();
+    printf("== frame diff ==\n");
+    test_frame_diff();
 
     if (g_failures == 0) {
         printf("all host tests passed\n");

@@ -13,6 +13,7 @@ endif()
 
 set(MODEL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../main/components/inkpane_model")
 set(UI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../main/components/inkpane_ui")
+set(EPD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../main/components/inkpane_epd")
 
 add_library(inkpane_host_core STATIC
     "${MODEL_DIR}/src/json.c"
@@ -23,11 +24,15 @@ add_library(inkpane_host_core STATIC
     "${UI_DIR}/src/canvas.c"
     "${UI_DIR}/src/font.c"
     "${UI_DIR}/src/ui.c"
+    # ESP-IDF-free geometry helpers of the panel driver (frame_diff has no
+    # hardware dependencies, so the host can diff framebuffers too).
+    "${EPD_DIR}/src/frame_diff.c"
 )
 
 target_include_directories(inkpane_host_core PUBLIC
     "${MODEL_DIR}/include"
     "${UI_DIR}/include"
+    "${EPD_DIR}/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/shim"
 )
 
