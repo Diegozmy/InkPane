@@ -25,6 +25,12 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_FREERTOS_HZ=100
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
 
+# SNTP: the device needs a valid clock before TLS/WSS, so allow more than lwIP's
+# single default server (one DNS miss would otherwise mean a failed sync) and
+# disable the random 0..5 s startup delay that eats the boot-time sync budget.
+CONFIG_LWIP_SNTP_MAX_SERVERS=3
+# CONFIG_LWIP_SNTP_STARTUP_DELAY is not set
+
 # Wi-Fi: modest buffers, power save is disabled in code while awake.
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=8
 CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16

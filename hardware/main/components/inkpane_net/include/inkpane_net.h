@@ -69,8 +69,27 @@ int inkpane_wifi_rssi(void);
 void inkpane_wifi_set_power_save(bool enabled);
 
 /**
- * One-shot SNTP sync (used before TLS when the RTC has no valid time).
- * Returns ESP_OK once the system clock is set; the caller copies it to the RTC.
+ * True once the system clock has been set by SNTP (epoch > 1700000000, i.e.
+ * past 2023-11-14). A freshly booted ESP32 starts at 1970, so this answers
+ * "is it safe to use TLS / show a wall-clock time yet?".
+ */
+bool inkpane_time_valid(void);
+
+/**
+ * NON-BLOCKING, idempotent: bring up the SNTP service and return immediately.
+ * Servers are polled hourly in the background once running, so callers do not
+ * need to sync again after the first success. Returns ESP_ERR_INVALID_STATE
+ * when Wi-Fi is not connected yet (SNTP has no route to the internet).
+ */
+esp_err_t inkpane_time_sync_start(void);
+
+/**
+ * Start SNTP if it is not running yet, then wait up to `timeout_ms` for a
+ * completed sync; retries once with a fresh request on timeout. Returns ESP_OK
+ * on success (including when the clock was already valid), ESP_ERR_TIMEOUT if
+ * both attempts expired, ESP_ERR_INVALID_STATE without Wi-Fi. Safe to call
+ * concurrently from several tasks. The caller converts UTC -> local; this
+ * function only sets the system clock.
  */
 esp_err_t inkpane_wifi_sync_time(int timeout_ms);
 
