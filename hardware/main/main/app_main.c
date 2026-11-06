@@ -17,6 +17,7 @@
 #include "freertos/task.h"
 #include "inkpane_board.h"
 #include "inkpane_epd.h"
+#include "inkpane_frame_diff.h"
 #include "inkpane_model.h"
 #include "inkpane_net.h"
 #include "inkpane_prov.h"
@@ -79,6 +80,14 @@ static uint8_t *s_framebuffer;
 static char *s_json_arena;
 static char *s_http_body;
 static inkpane_screen_t *s_screen;
+/* PSRAM copy of the image the panel is currently showing. A partial refresh
+ * needs to know what changed since the panel was last written, and
+ * s_framebuffer is repainted from scratch for every page, so it cannot answer
+ * that. This shadow is refreshed after every successful full refresh and after
+ * every successful partial region, and is invalidated whenever a panel write
+ * fails (a half-written panel makes the diff unsafe). */
+static uint8_t *s_panel_frame;
+static bool s_panel_frame_valid;
 
 static void nvs_init(void)
 {
@@ -230,15 +239,134 @@ static int retry_delay_seconds(const inkpane_config_t *config)
  * `inkpane_epd_show_full()` re-runs panel_init() when the controller
  * configuration is stale, so a successful call leaves the panel in a
  * known-good state. Only then clear the persisted stale flag; on failure it
- * survives deep sleep and the next full refresh retries the re-init.
+ * survives deep sleep and the next full refresh retries the re-init. The panel
+ * shadow is committed on success so later partial refreshes can diff against
+ * what the panel actually shows.
  */
 static esp_err_t full_refresh(void)
 {
     esp_err_t err = inkpane_epd_show_full(s_framebuffer);
     if (err == ESP_OK) {
         s_persist.panel_needs_init = false;
+        if (s_panel_frame != NULL) {
+            memcpy(s_panel_frame, s_framebuffer, INKPANE_EPD_FB_SIZE);
+            s_panel_frame_valid = true;
+        }
+    } else {
+        /* A half-written panel can no longer be diffed against; force the next
+         * update to repaint everything. */
+        s_panel_frame_valid = false;
     }
     return err;
+}
+
+/*
+ * Damage-band partial refresh budgets.
+ *
+ * The conversation page lays out disjoint text blocks (real metrics: 32 px
+ * font has line_height 42, 24 px has 32, 16 px has 22):
+ *   header (state label)      y 14..56
+ *   "you" text, 2 medium lines y 78..142   (22 clean rows above it)
+ *   reply, up to 6 large lines y 154..406  (4 clean rows above it)
+ *   footer                    y 444..472
+ *
+ * The merge gap sits below the header/user gap (22) so the two blocks stay
+ * separate, and above the user/reply gap (4) so those merge. A typical update
+ * mid-turn is "state label changed + reply text grew" -> 2 bands, ~294 rows,
+ * which stays on the partial path. When all three blocks change in the same
+ * frame (~370 rows) the budget trips and the page is repainted full-screen;
+ * that is once per turn and doubles as the de-ghosting pass.
+ *
+ * Extra clean rows inside a band cost only SPI time, while every extra window
+ * costs a hardware reset, a window burst and a partial update cycle.
+ */
+#define INKPANE_PARTIAL_MAX_BANDS 3
+#define INKPANE_PARTIAL_MAX_ROWS 340
+#define INKPANE_PARTIAL_MERGE_GAP 12
+
+/**
+ * Push a page to the panel using partial refreshes where possible.
+ *
+ * The display already holds `s_panel_frame`; only the horizontal bands that
+ * differ from `s_framebuffer` are repainted. Bands are merged (see
+ * inkpane_frame_diff_bands) because a panel window is byte-aligned and
+ * full-width anyway, so absorbing a few clean rows is cheaper than paying for
+ * an extra reset. Falls back to a full refresh when the shadow is missing or
+ * the damage exceeds the budgets.
+ *
+ * `*outcome` reports what actually ran: nothing was written (no visible
+ * change), bands were written, or the full-refresh fallback was used. The
+ * de-ghosting counter in resident_render_voice() depends on the distinction:
+ * a no-op must not count, while a fallback full repaint clears residue.
+ */
+typedef enum {
+    INKPANE_DAMAGE_NONE = 0,
+    INKPANE_DAMAGE_BANDS,
+    INKPANE_DAMAGE_FULL,
+} inkpane_damage_outcome_t;
+
+static esp_err_t refresh_damage(const char *what, inkpane_damage_outcome_t *outcome)
+{
+    if (outcome != NULL) {
+        *outcome = INKPANE_DAMAGE_NONE;
+    }
+    if (s_framebuffer == NULL || s_panel_frame == NULL || !s_panel_frame_valid) {
+        esp_err_t err = full_refresh();
+        if (outcome != NULL && err == ESP_OK) {
+            *outcome = INKPANE_DAMAGE_FULL;
+        }
+        return err;
+    }
+
+    inkpane_damage_band_t bands[INKPANE_PARTIAL_MAX_BANDS];
+    int count = inkpane_frame_diff_bands(s_panel_frame, s_framebuffer, INKPANE_EPD_WIDTH,
+                                        INKPANE_EPD_HEIGHT, INKPANE_EPD_STRIDE,
+                                        INKPANE_PARTIAL_MERGE_GAP, INKPANE_PARTIAL_MAX_BANDS,
+                                        INKPANE_PARTIAL_MAX_ROWS, bands);
+    if (count == 0) {
+        /* No visible change: no panel write happens, so callers must not treat
+         * this as a partial refresh (it neither adds residue nor clears it). */
+        return ESP_OK;
+    }
+    if (count == INKPANE_FRAME_DIFF_FULL) {
+        esp_err_t err = full_refresh();
+        if (outcome != NULL && err == ESP_OK) {
+            *outcome = INKPANE_DAMAGE_FULL;
+        }
+        return err;
+    }
+
+    const int64_t start_ms = esp_timer_get_time() / 1000;
+    for (int i = 0; i < count; ++i) {
+        esp_err_t err = inkpane_epd_show_region(s_framebuffer, 0, bands[i].y, INKPANE_EPD_WIDTH,
+                                                bands[i].height);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "%s partial refresh failed (band %d/%d): %s", what, i + 1, count,
+                     esp_err_to_name(err));
+            s_persist.panel_needs_init = true;
+            /* A failed window reset may have left the panel config unusable
+             * until panel_init() runs again, and some bands may be showing new
+             * pixels while others are not: the shadow can no longer be trusted,
+             * so the next update repaints everything through full_refresh(). */
+            s_panel_frame_valid = false;
+            s_persist.panel_warm = false;
+            return err;
+        }
+    }
+    /* Every band reached the panel: commit the whole shadow in one go. */
+    memcpy(s_panel_frame, s_framebuffer, INKPANE_EPD_FB_SIZE);
+    s_persist.panel_needs_init = true;
+    s_panel_frame_valid = true;
+    if (outcome != NULL) {
+        *outcome = INKPANE_DAMAGE_BANDS;
+    }
+    const int elapsed_ms = (int)(esp_timer_get_time() / 1000 - start_ms);
+    int rows = 0;
+    for (int i = 0; i < count; ++i) {
+        rows += bands[i].height;
+    }
+    ESP_LOGI(TAG, "%s partial refresh: %d band(s), %d rows, %d ms", what, count, rows, elapsed_ms);
+    return ESP_OK;
 }
 
 /**
@@ -351,7 +479,42 @@ static void refresh_clock_partial(const inkpane_config_t *config)
         /* The warm-panel assumption may be wrong (rail glitch, controller
          * reset): force a cold panel init + full refresh on the next wake. */
         s_persist.panel_warm = false;
+        s_panel_frame_valid = false;
     } else {
+        /* The clock rectangle was the only thing that changed, so carrying it
+         * into the panel shadow keeps the voice-page band diff honest. Without
+         * this the next partial would treat the stale clock pixels as damage.
+         * The rectangle comes from the server payload, so clamp it exactly the
+         * way inkpane_epd_show_region() does before mirroring bytes. */
+        if (s_panel_frame_valid && s_panel_frame != NULL) {
+            int x = rect->x;
+            int w = rect->w;
+            int y = rect->y;
+            int h = rect->h;
+            if (x < 0) {
+                w += x;
+                x = 0;
+            }
+            if (y < 0) {
+                h += y;
+                y = 0;
+            }
+            if (x + w > INKPANE_EPD_WIDTH) {
+                w = INKPANE_EPD_WIDTH - x;
+            }
+            if (y + h > INKPANE_EPD_HEIGHT) {
+                h = INKPANE_EPD_HEIGHT - y;
+            }
+            const int x0 = (x / 8) * 8;
+            const int x1 = ((x + w + 7) / 8) * 8;
+            if (w > 0 && h > 0 && x1 > x0) {
+                for (int row = y; row < y + h; ++row) {
+                    memcpy(s_panel_frame + (size_t)row * INKPANE_EPD_STRIDE + x0 / 8,
+                           s_framebuffer + (size_t)row * INKPANE_EPD_STRIDE + x0 / 8,
+                           (size_t)(x1 - x0) / 8);
+                }
+            }
+        }
         ESP_LOGI(TAG, "clock partial refresh %dx%d at (%d,%d) %d ms", rect->w, rect->h, rect->x,
                  rect->y, elapsed_ms);
     }
@@ -967,12 +1130,16 @@ static void low_power_cycle(void)
     s_json_arena = heap_caps_malloc(JSON_ARENA_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_http_body = heap_caps_malloc(HTTP_BODY_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_screen = heap_caps_malloc(sizeof(inkpane_screen_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (s_framebuffer == NULL || s_json_arena == NULL || s_http_body == NULL || s_screen == NULL) {
+    s_panel_frame = heap_caps_malloc(INKPANE_EPD_FB_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_framebuffer == NULL || s_json_arena == NULL || s_http_body == NULL || s_screen == NULL ||
+        s_panel_frame == NULL) {
         ESP_LOGE(TAG, "PSRAM allocation failed");
         vTaskDelay(pdMS_TO_TICKS(1000));
         esp_restart();
     }
     memset(s_framebuffer, 0xFF, INKPANE_EPD_FB_SIZE);
+    /* The panel image is unknown until the first successful refresh. */
+    s_panel_frame_valid = false;
 
     /* s_screen lives in PSRAM and holds garbage after deep sleep; rebuild it
      * from the RTC zoom snapshot. Without a valid snapshot the screen is left
@@ -1119,7 +1286,18 @@ void app_main(void)
 #define RESIDENT_TICK_MS 20
 #define RESIDENT_BATTERY_CHECK_MS (60 * 1000)
 #define RESIDENT_WIFI_RETRY_MS (30 * 1000)
-#define RESIDENT_VOICE_RENDER_MS 1500
+/* Resident mode retries the SNTP calibration at this interval while the RTC is
+ * still unset. The first attempt happens right after Wi-Fi comes up, so this
+ * only covers "the first request was lost". */
+#define RESIDENT_TIME_SYNC_RETRY_MS (60 * 1000)
+/* The conversation page now updates by damage bands instead of whole-screen
+ * flashes, which costs a few hundred ms instead of several seconds, so the
+ * throttle can be shorter and the text appears closer to real time. */
+#define RESIDENT_VOICE_RENDER_MS 700
+/* Banded partial updates are clean for a while, then leave ghosting. Force a
+ * full refresh of the conversation page every N partial updates, and also
+ * whenever the accumulated damage covers most of the panel. */
+#define RESIDENT_VOICE_FULL_EVERY 40
 #define RESIDENT_ERROR_PAGE_MS (15 * 1000)
 #define RESIDENT_ACTIVATION_PAGE_MS (5 * 60 * 1000)
 /* Keep the finished answer on screen a few seconds before the dashboard returns. */
@@ -1162,11 +1340,15 @@ static int64_t s_error_until_ms;
 static int64_t s_activation_until_ms;
 static bool s_voice_dirty;
 static uint32_t s_voice_signature;
+/* Partial refreshes issued on the current conversation page, for the periodic
+ * de-ghosting full repaint. */
+static int s_voice_partial_updates;
 static bool s_voice_in_turn;
 static int64_t s_voice_linger_until_ms;
 static int64_t s_last_voice_render_ms;
 static int64_t s_last_wifi_attempt_ms = -RESIDENT_WIFI_RETRY_MS;
 static int64_t s_last_battery_check_ms;
+static int64_t s_last_time_sync_ms = -RESIDENT_TIME_SYNC_RETRY_MS;
 static bool s_last_network_up;
 static char s_wake_words[INKPANE_VOICE_MAX_WAKE_WORDS][INKPANE_VOICE_WAKE_WORD_LEN];
 static char s_device_mac[18];
@@ -1487,13 +1669,45 @@ static void resident_render_voice(const inkpane_voice_snapshot_t *snapshot, bool
                            : "BOOT 打断 · 语音修改已关闭",
     };
     inkpane_ui_render_voice(s_framebuffer, &view);
-    /* The partial-refresh window proved unreliable for this page (large windows
-     * came out blank or half updated), so every update is a full refresh. */
+
+    /* De-ghosting: once enough banded updates have accumulated, repaint the
+     * whole page. This is decided before rendering so the decision and the log
+     * line agree with what actually ran. */
+    if (!full && s_voice_partial_updates >= RESIDENT_VOICE_FULL_EVERY) {
+        full = true;
+    }
+
+    /* Partial refresh only where the page actually changed. The conversation
+     * page used to redraw full-screen on every update because the old
+     * whole-panel region refresh was unreliable; the fixed window/mirroring
+     * driver plus the damage-band diff make banded updates safe, and they do
+     * not flash the panel every time a state label or a reply line arrives. */
     const int64_t start_ms = esp_timer_get_time() / 1000;
-    esp_err_t err = full_refresh();
+    esp_err_t err;
+    inkpane_damage_outcome_t outcome = INKPANE_DAMAGE_NONE;
+    if (full) {
+        /* Page entry or the periodic de-ghosting repaint: the previous screen
+         * could be the dashboard, so a full refresh is the only safe starting
+         * point for the band diff and for clearing residue. */
+        s_voice_partial_updates = 0;
+        err = full_refresh();
+        outcome = err == ESP_OK ? INKPANE_DAMAGE_FULL : INKPANE_DAMAGE_NONE;
+    } else {
+        err = refresh_damage("voice page", &outcome);
+    }
+    /* Only banded updates accumulate ghosting; a no-op changes nothing, and any
+     * full repaint (explicit or the diff's own fallback) clears the residue
+     * this counter tracks. */
+    if (err == ESP_OK) {
+        if (outcome == INKPANE_DAMAGE_BANDS) {
+            s_voice_partial_updates++;
+        } else if (outcome == INKPANE_DAMAGE_FULL) {
+            s_voice_partial_updates = 0;
+        }
+    }
     const int elapsed_ms = (int)(esp_timer_get_time() / 1000 - start_ms);
-    ESP_LOGI(TAG, "voice page refresh (full=%d state=%d) %s in %d ms", (int)full,
-             (int)snapshot->state, esp_err_to_name(err), elapsed_ms);
+    ESP_LOGI(TAG, "voice page refresh (full=%d state=%d outcome=%d) %s in %d ms", (int)full,
+             (int)snapshot->state, (int)outcome, esp_err_to_name(err), elapsed_ms);
     if (err != ESP_OK) {
         s_persist.panel_warm = false;
     }
@@ -1580,18 +1794,87 @@ static void resident_poll_buttons(inkpane_config_t *config)
     (void)config;
 }
 
-static void resident_sync_time_to_rtc(const inkpane_config_t *config)
+/**
+ * Convert the system clock (UTC, set by SNTP) into the RTC (local time).
+ *
+ * Returns true when the RTC was updated this call.
+ */
+static bool resident_store_system_time_in_rtc(const inkpane_config_t *config)
 {
-    if (inkpane_wifi_sync_time(5000) != ESP_OK) {
-        return;
-    }
     time_t now = time(NULL);
+    if (now <= 0) {
+        return false;
+    }
     inkpane_datetime_t dt;
     int64_t local = (int64_t)now + (int64_t)config->utc_offset_minutes * 60;
     inkpane_datetime_from_local_epoch(local, &dt);
-    if (inkpane_board_time_set(&dt) == ESP_OK) {
-        ESP_LOGI(TAG, "rtc calibrated from sntp: %04d-%02d-%02d %02d:%02d", dt.year, dt.month,
-                 dt.day, dt.hour, dt.minute);
+    if (inkpane_board_time_set(&dt) != ESP_OK) {
+        return false;
+    }
+    ESP_LOGI(TAG, "rtc calibrated from sntp: %04d-%02d-%02d %02d:%02d", dt.year, dt.month, dt.day,
+             dt.hour, dt.minute);
+    inkpane_voice_notify_time_ready();
+    return true;
+}
+
+/**
+ * Blocking, best-effort SNTP calibration used once per boot.
+ *
+ * Resident mode never reboots on a timer, so a missing time sync is permanent
+ * rather than "fixed on the next wake": the voice assistant cannot validate
+ * TLS without it. This waits a short while for SNTP; a failure is retried
+ * asynchronously from resident_time_tick().
+ */
+static bool resident_sync_time_to_rtc(const inkpane_config_t *config)
+{
+    if (inkpane_wifi_sync_time(5000) != ESP_OK) {
+        return false;
+    }
+    return resident_store_system_time_in_rtc(config);
+}
+
+/* Resident mode retries the SNTP calibration at this interval while the RTC is
+ * still unset. The first attempt happens right after Wi-Fi comes up, so this
+ * only covers "the first request was lost". */
+#define RESIDENT_TIME_SYNC_RETRY_MS (60 * 1000)
+
+/**
+ * Keep the RTC calibrated without blocking the 20 ms UI loop.
+ *
+ * The SNTP service runs in the background once started: this only kicks it
+ * (non-blocking) and picks up the result on a later tick. Doing the blocking
+ * wait here would stop button polling and voice events for up to 5 seconds
+ * per attempt, which is far worse than the clock simply showing its RTC time
+ * for another second.
+ */
+static void resident_time_tick(inkpane_config_t *config)
+{
+    if (!inkpane_wifi_connected()) {
+        return;
+    }
+    inkpane_datetime_t dt = {0};
+    if (read_clock(&dt)) {
+        return;
+    }
+    /* The RTC is unset. If SNTP already set the system clock in the
+     * background, mirror it into the RTC; otherwise (throttled) ask for a sync
+     * and look again on a later tick. */
+    if (inkpane_time_valid()) {
+        if (resident_store_system_time_in_rtc(config)) {
+            /* A real time is now available, so the dashboard/clock module can
+             * be repainted without waiting for a 200. */
+            s_screen_dirty = true;
+        }
+        return;
+    }
+    const int64_t now_ms = esp_timer_get_time() / 1000;
+    if (now_ms - s_last_time_sync_ms < RESIDENT_TIME_SYNC_RETRY_MS) {
+        return;
+    }
+    s_last_time_sync_ms = now_ms;
+    esp_err_t err = inkpane_time_sync_start();
+    if (err != ESP_OK) {
+        ESP_LOGD(TAG, "sntp start deferred: %s", esp_err_to_name(err));
     }
 }
 
@@ -1695,12 +1978,15 @@ static void resident_main(void)
     s_json_arena = heap_caps_malloc(JSON_ARENA_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_http_body = heap_caps_malloc(HTTP_BODY_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_screen = heap_caps_malloc(sizeof(inkpane_screen_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (s_framebuffer == NULL || s_json_arena == NULL || s_http_body == NULL || s_screen == NULL) {
+    s_panel_frame = heap_caps_malloc(INKPANE_EPD_FB_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_framebuffer == NULL || s_json_arena == NULL || s_http_body == NULL || s_screen == NULL ||
+        s_panel_frame == NULL) {
         ESP_LOGE(TAG, "PSRAM allocation failed");
         vTaskDelay(pdMS_TO_TICKS(1000));
         esp_restart();
     }
     memset(s_framebuffer, 0xFF, INKPANE_EPD_FB_SIZE);
+    s_panel_frame_valid = false;
     inkpane_screen_reset(s_screen);
 
     if (inkpane_ui_init(NULL, 0) != ESP_OK) {
@@ -1715,6 +2001,8 @@ static void resident_main(void)
     if (epd != ESP_OK) {
         ESP_LOGE(TAG, "epd init failed: %s", esp_err_to_name(epd));
         s_persist.panel_warm = false;
+        /* Force the driver to re-run panel_init() before the next full frame. */
+        inkpane_epd_mark_config_stale();
     } else {
         s_persist.panel_warm = true;
     }
@@ -1739,6 +2027,10 @@ static void resident_main(void)
                                "长按中键重新配网");
     } else {
         resident_network_tick(&config);
+        /* Start the background SNTP service right away (non-blocking). The
+         * dashboard is already rendered by the tick above, and a slow NTP
+         * server must not hold up the first voice start below. */
+        resident_time_tick(&config);
     }
 
     inkpane_voice_config_t voice_config;
@@ -1748,6 +2040,11 @@ static void resident_main(void)
         voice_err = inkpane_voice_init(&voice_config);
     }
     if (voice_err == ESP_OK) {
+        /* One blocking attempt before the voice task starts: the OTA TLS
+         * handshake needs a plausible clock, and waiting here is fine because
+         * the UI loop has not started yet. If it fails, resident_time_tick()
+         * keeps retrying in the background and the voice task's own SNTP path
+         * takes over, so this is an optimisation, not a hard requirement. */
         resident_sync_time_to_rtc(&config);
         if (inkpane_voice_start() != ESP_OK) {
             ESP_LOGW(TAG, "voice start failed; dashboard continues");
@@ -1841,6 +2138,7 @@ static void resident_main(void)
                 refresh_clock_partial(&config);
             }
             resident_network_tick(&config);
+            resident_time_tick(&config);
             resident_battery_check();
         }
 
