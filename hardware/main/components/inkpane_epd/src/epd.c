@@ -264,6 +264,11 @@ esp_err_t inkpane_epd_show_full(const uint8_t *framebuffer)
     return wait_busy();
 }
 
+void inkpane_epd_mark_config_stale(void)
+{
+    s_config_stale = true;
+}
+
 esp_err_t inkpane_epd_show_region(const uint8_t *framebuffer, int x, int y, int width, int height)
 {
     if (!s_ready || framebuffer == NULL || width <= 0 || height <= 0) {

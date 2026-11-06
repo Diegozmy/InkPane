@@ -55,6 +55,11 @@ typedef struct {
     /* ALDO3 stayed powered across the last deep sleep, so the panel controller
      * was never reset and can partial-refresh on the next wake. */
     bool panel_warm;
+    /* A partial refresh reset the controller and left it only partially
+     * configured. The driver's static stale flag is lost across deep sleep, so
+     * mirror it in RTC RAM and re-arm the driver on the next warm init. Cleared
+     * once a full refresh succeeds. */
+    bool panel_needs_init;
     /* Signature of the failure page currently on screen, so repeated failures
      * do not trigger a full-screen flash every retry. */
     uint32_t notice_signature;
@@ -220,6 +225,23 @@ static int retry_delay_seconds(const inkpane_config_t *config)
 }
 
 /**
+ * Push the full framebuffer to the panel.
+ *
+ * `inkpane_epd_show_full()` re-runs panel_init() when the controller
+ * configuration is stale, so a successful call leaves the panel in a
+ * known-good state. Only then clear the persisted stale flag; on failure it
+ * survives deep sleep and the next full refresh retries the re-init.
+ */
+static esp_err_t full_refresh(void)
+{
+    esp_err_t err = inkpane_epd_show_full(s_framebuffer);
+    if (err == ESP_OK) {
+        s_persist.panel_needs_init = false;
+    }
+    return err;
+}
+
+/**
  * The panel has no trustworthy content yet (cold boot or RTC still unset), so
  * paint an actionable full-screen page instead of leaving only a "waiting for
  * time sync" clock module. Repeated identical failures skip the repaint: a
@@ -269,7 +291,7 @@ static void show_failure_notice(const inkpane_config_t *config)
     }
 
     inkpane_ui_render_notice(s_framebuffer, title, line1, line2, line3, line4);
-    if (inkpane_epd_show_full(s_framebuffer) == ESP_OK) {
+    if (full_refresh() == ESP_OK) {
         s_persist.notice_shown = true;
         s_persist.notice_signature = signature;
     } else {
@@ -317,6 +339,12 @@ static void refresh_clock_partial(const inkpane_config_t *config)
     /* Partial window following the vendor driver (reset + window + 0xFF). */
     const int64_t start_ms = esp_timer_get_time() / 1000;
     esp_err_t err = inkpane_epd_show_region(s_framebuffer, rect->x, rect->y, rect->w, rect->h);
+    /* show_region() hardware-resets the controller before every partial
+     * window, so its register configuration is only known-good for partial
+     * updates until panel_init() runs again. The driver tracks that in RAM, but
+     * a deep sleep loses it while the panel rail stays powered: persist the
+     * flag so the next full refresh re-inits the controller. */
+    s_persist.panel_needs_init = true;
     const int elapsed_ms = (int)(esp_timer_get_time() / 1000 - start_ms);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "clock partial refresh failed: %s", esp_err_to_name(err));
@@ -440,7 +468,7 @@ static void fetch_and_render(inkpane_config_t *config, bool force_full, int64_t 
             err = render_zoomed_module(zoom_view);
         } else {
             inkpane_ui_render_full(s_framebuffer, s_screen);
-            err = inkpane_epd_show_full(s_framebuffer);
+            err = full_refresh();
         }
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "display refresh failed: %s", esp_err_to_name(err));
@@ -603,7 +631,7 @@ static esp_err_t render_zoomed_module(int zoomed_module)
     default:
         return ESP_ERR_INVALID_ARG;
     }
-    return inkpane_epd_show_full(s_framebuffer);
+    return full_refresh();
 }
 
 /**
@@ -617,7 +645,7 @@ static esp_err_t render_overview(void)
         return ESP_ERR_INVALID_STATE;
     }
     inkpane_ui_render_full(s_framebuffer, s_screen);
-    return inkpane_epd_show_full(s_framebuffer);
+    return full_refresh();
 }
 
 /** Bitmask of enabled+present modules, for logs and diagnostics. */
@@ -966,8 +994,20 @@ static void low_power_cycle(void)
     if (epd != ESP_OK) {
         ESP_LOGE(TAG, "epd init failed: %s", esp_err_to_name(epd));
         s_persist.panel_warm = false;
-    } else {
+        /* Force a re-init attempt before the next full frame. */
+        s_persist.panel_needs_init = true;
+    } else if (warm_boot) {
         s_persist.panel_warm = true;
+        if (s_persist.panel_needs_init) {
+            /* A partial refresh in an earlier boot reset the controller, but
+             * the driver's stale flag did not survive deep sleep. Re-arm it so
+             * the next full refresh runs panel_init() before writing. */
+            inkpane_epd_mark_config_stale();
+        }
+    } else {
+        /* Cold init reset and configured the controller from scratch. */
+        s_persist.panel_warm = true;
+        s_persist.panel_needs_init = false;
     }
 
     if (provisioning_requested(cold_boot, &config)) {
@@ -975,7 +1015,7 @@ static void low_power_cycle(void)
         inkpane_prov_ap_ssid(ssid, sizeof(ssid));
         if (s_framebuffer != NULL) {
             inkpane_ui_render_setup(s_framebuffer, ssid, "http://192.168.4.1");
-            inkpane_epd_show_full(s_framebuffer);
+            full_refresh();
         }
         inkpane_prov_run(ssid);
     }
@@ -1390,7 +1430,7 @@ static void resident_render_notice(const char *title, const char *line1, const c
         return;
     }
     inkpane_ui_render_notice(s_framebuffer, title, line1, line2, line3, NULL);
-    if (inkpane_epd_show_full(s_framebuffer) != ESP_OK) {
+    if (full_refresh() != ESP_OK) {
         s_persist.panel_warm = false;
     }
 }
@@ -1450,7 +1490,7 @@ static void resident_render_voice(const inkpane_voice_snapshot_t *snapshot, bool
     /* The partial-refresh window proved unreliable for this page (large windows
      * came out blank or half updated), so every update is a full refresh. */
     const int64_t start_ms = esp_timer_get_time() / 1000;
-    esp_err_t err = inkpane_epd_show_full(s_framebuffer);
+    esp_err_t err = full_refresh();
     const int elapsed_ms = (int)(esp_timer_get_time() / 1000 - start_ms);
     ESP_LOGI(TAG, "voice page refresh (full=%d state=%d) %s in %d ms", (int)full,
              (int)snapshot->state, esp_err_to_name(err), elapsed_ms);
@@ -1466,7 +1506,7 @@ static void resident_render_activation(const inkpane_voice_snapshot_t *snapshot)
     }
     inkpane_ui_render_voice_activation(s_framebuffer, snapshot->activation_code,
                                        snapshot->activation_message, "xiaozhi.me");
-    if (inkpane_epd_show_full(s_framebuffer) != ESP_OK) {
+    if (full_refresh() != ESP_OK) {
         s_persist.panel_warm = false;
     }
 }
@@ -1479,7 +1519,7 @@ static void resident_render_voice_error(const inkpane_voice_snapshot_t *snapshot
     const char *reason = snapshot->error[0] != '\0' ? snapshot->error : "语音服务暂时不可用";
     inkpane_ui_render_voice_error(s_framebuffer, "语音助手不可用", reason,
                                   "看板功能不受影响 · BOOT 返回");
-    if (inkpane_epd_show_full(s_framebuffer) != ESP_OK) {
+    if (full_refresh() != ESP_OK) {
         s_persist.panel_warm = false;
     }
 }
@@ -1684,7 +1724,7 @@ static void resident_main(void)
         inkpane_prov_ap_ssid(ssid, sizeof(ssid));
         if (s_framebuffer != NULL) {
             inkpane_ui_render_setup(s_framebuffer, ssid, "http://192.168.4.1");
-            inkpane_epd_show_full(s_framebuffer);
+            full_refresh();
         }
         inkpane_prov_run(ssid);
     }
