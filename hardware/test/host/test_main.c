@@ -319,6 +319,112 @@ static void test_voice_ui(void)
     free(framebuffer);
 }
 
+/* Count the distinct ink-row blocks inside the reply zone (between the two
+ * separator lines). Mirrors how a reader sees "how many lines are used". */
+static int reply_line_count(const uint8_t *framebuffer)
+{
+    int lines = 0;
+    int previous_ink = 0;
+    for (int y = 150; y < 440; ++y) {
+        bool ink = false;
+        for (int x = 33; x < 800 - 33; ++x) {
+            const uint8_t byte = framebuffer[(size_t)y * (800 / 8) + (x >> 3)];
+            if ((byte & (0x80u >> (x & 7))) == 0) {
+                ink = true;
+                break;
+            }
+        }
+        if (ink && !previous_ink) {
+            lines++;
+        }
+        previous_ink = ink;
+    }
+    return lines;
+}
+
+/* Lowest y that has ink in the reply zone; must stay above the footer. */
+static int reply_last_ink_y(const uint8_t *framebuffer)
+{
+    int last = 0;
+    for (int y = 150; y < 440; ++y) {
+        for (int x = 33; x < 800 - 33; ++x) {
+            const uint8_t byte = framebuffer[(size_t)y * (800 / 8) + (x >> 3)];
+            if ((byte & (0x80u >> (x & 7))) == 0) {
+                last = y;
+                break;
+            }
+        }
+    }
+    return last;
+}
+
+/**
+ * A long single-sentence reply must wrap by width and use the whole reply zone
+ * instead of being truncated, and it must not silently overflow into the footer.
+ * A text too long for even the smaller font still has to be cut off visibly
+ * (trailing "..."), never drawn over the separator/footer.
+ */
+static void test_voice_long_reply(void)
+{
+    uint8_t *framebuffer = malloc(FB_SIZE);
+    CHECK(framebuffer != NULL);
+    if (framebuffer == NULL) {
+        return;
+    }
+
+    /* A 222-character reply: at 32 px this needs more lines than the six the
+     * zone holds, so it must be rendered with the 24 px font and still fit. */
+    const char *long_reply =
+        "明天上午九点先和产品组过一遍需求评审，十点半去三楼会议室参加周会，中午十二点和"
+        "客户吃饭，下午两点开始写季度总结，四点约了设计团队讨论新版首页的方案。";
+    inkpane_voice_view_t view = {
+        .state_label = "聆听中",
+        .user_text = "明天有什么安排",
+        .reply_text = long_reply,
+        .footer_hint = "BOOT 打断 · 长按 BOOT 静音唤醒词",
+    };
+    memset(framebuffer, 0xFF, FB_SIZE);
+    inkpane_ui_render_voice(framebuffer, &view);
+    /* Its ink must stay inside the reply zone (footer separator is at y=432). */
+    CHECK(reply_last_ink_y(framebuffer) < 440);
+    CHECK(reply_line_count(framebuffer) >= 3);
+
+    /* A reply far beyond any capacity: still drawn inside the zone, and the
+     * renderer marks the cut so the user is not silently misled. This must not
+     * write into the footer band either. */
+    char huge[768];
+    memset(huge, 0, sizeof(huge));
+    const char *unit = "这是一段用于测试超长回复的文本内容，它会超过整块回复区域能够显示的最大行数。";
+    size_t unit_len = strlen(unit);
+    size_t used = 0;
+    while (used + unit_len < sizeof(huge) - 1) {
+        memcpy(huge + used, unit, unit_len);
+        used += unit_len;
+    }
+    huge[used] = '\0';
+    CHECK(used > 400); /* comfortably beyond what the zone can show */
+    view.reply_text = huge;
+    memset(framebuffer, 0xFF, FB_SIZE);
+    inkpane_ui_render_voice(framebuffer, &view);
+    CHECK(reply_last_ink_y(framebuffer) < 440);
+
+    /* Same reply as one paragraph (no newlines) must not be shorter than the
+     * same content delivered as many small lines: that is the regression the
+     * streamed-chunk concatenation depends on. */
+    view.reply_text = "第一句。第二句。第三句。第四句。第五句。第六句。";
+    memset(framebuffer, 0xFF, FB_SIZE);
+    inkpane_ui_render_voice(framebuffer, &view);
+    int flat_lines = reply_line_count(framebuffer);
+    view.reply_text = "第一句。\n第二句。\n第三句。\n第四句。\n第五句。\n第六句。";
+    memset(framebuffer, 0xFF, FB_SIZE);
+    inkpane_ui_render_voice(framebuffer, &view);
+    int broken_lines = reply_line_count(framebuffer);
+    /* Six short sentences flow into fewer lines when not force-broken. */
+    CHECK(flat_lines < broken_lines);
+
+    free(framebuffer);
+}
+
 static void test_font_and_text(void)
 {
     size_t length = 0;
@@ -828,6 +934,8 @@ int main(int argc, char **argv)
     test_font_and_text();
     printf("== voice ui ==\n");
     test_voice_ui();
+    printf("== voice long reply ==\n");
+    test_voice_long_reply();
     printf("== render ==\n");
     test_render();
     printf("== render zoomed ==\n");

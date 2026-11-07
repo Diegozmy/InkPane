@@ -239,6 +239,22 @@ static void snapshot_set_user(const char* text)
     post_event(INKPANE_VOICE_EVT_TEXT);
 }
 
+/**
+ * Append one chunk of the assistant's reply.
+ *
+ * The xiaozhi server delivers the answer as a sequence of `sentence_start`
+ * chunks, and those chunks are *fragments of continuous prose*, not finished
+ * lines: a single spoken sentence often arrives as "这句" + "话的意思是" +
+ * "\"历经磨难\"" + ... . The previous version inserted a '\n' after every
+ * chunk, which turned one sentence into one line per fragment: the six reply
+ * lines were eaten up by a handful of fragments, leaving blank gaps between
+ * them, and a longer answer got truncated after a few fragments.
+ *
+ * Chunk boundaries are therefore not line breaks. The text is concatenated
+ * directly and the renderer wraps it by pixel width, so a long single sentence
+ * flow-fills the whole reply area. Only a newline that the server itself puts
+ * inside a chunk is preserved (it is a real paragraph break then).
+ */
 static void snapshot_append_reply(const char* text)
 {
     std::lock_guard<std::mutex> lock(s_lock);
@@ -253,9 +269,23 @@ static void snapshot_append_reply(const char* text)
         memmove(s_snapshot.reply_text, s_snapshot.reply_text + drop, used - drop + 1);
         used = strlen(s_snapshot.reply_text);
     }
-    if (used > 0) {
-        s_snapshot.reply_text[used++] = '\n';
-        s_snapshot.reply_text[used] = '\0';
+    /* Continuation fragments must not gain a space of their own; but a chunk
+     * that legitimately starts with a space (ASCII prose split mid-phrase) does
+     * need one when the buffer does not already end in whitespace. */
+    while (*text == ' ') {
+        if (used == 0 || s_snapshot.reply_text[used - 1] == ' ' ||
+            s_snapshot.reply_text[used - 1] == '\n') {
+            ++text;
+        } else {
+            break;
+        }
+    }
+    /* A chunk-leading newline would create the blank gap this fixes. */
+    while (*text == '\n' || *text == '\r') {
+        ++text;
+    }
+    if (*text == '\0') {
+        return;
     }
     copy_str(s_snapshot.reply_text + used, capacity - used, text);
     post_event(INKPANE_VOICE_EVT_TEXT);

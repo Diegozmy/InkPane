@@ -1146,6 +1146,61 @@ void inkpane_ui_render_notice(uint8_t *framebuffer, const char *title, const cha
 /* ------------------------------------------------------------------ */
 
 /**
+ * Count how many lines `text` occupies when laid out like draw_wrapped() would
+ * lay it out inside `width` (word-wrapped, honouring explicit newlines).
+ *
+ * Stops counting as soon as the accumulated height exceeds `max_height`, so the
+ * caller can use it as a "does this font fit?" test without walking the whole
+ * string. Empty lines from consecutive newlines do count, because
+ * draw_wrapped() reserves a line for them.
+ */
+static int wrapped_line_count(const inkpane_font_t *font, int width, int max_height,
+                              const char *text)
+{
+    if (font == NULL || text == NULL || width <= 0) {
+        return 0;
+    }
+    int lines = 0;
+    const char *cursor = text;
+    while (*cursor != '\0') {
+        /* draw_wrapped() strips leading spaces on every line. */
+        while (*cursor == ' ') {
+            ++cursor;
+        }
+        if (*cursor == '\0') {
+            break;
+        }
+        lines++;
+        if ((int64_t)lines * font->line_height > max_height) {
+            return lines; /* already over budget; the caller only needs "too many" */
+        }
+        if (*cursor == '\n') {
+            ++cursor;
+            continue;
+        }
+        int used = 0;
+        const char *line_start = cursor;
+        while (*cursor != '\0' && *cursor != '\n') {
+            const char *glyph_start = cursor;
+            uint32_t codepoint = utf8_next(&cursor);
+            int advance = glyph_advance(font, codepoint);
+            if (used + advance > width && cursor != line_start) {
+                /* The same glyph starts the next line. */
+                cursor = glyph_start;
+                break;
+            }
+            used += advance;
+        }
+        if (cursor == line_start) {
+            /* A single glyph wider than the line: draw_wrapped() advances one
+             * glyph so the loop cannot stall; do the same. */
+            utf8_next(&cursor);
+        }
+    }
+    return lines;
+}
+
+/**
  * Draw `text` word-wrapped inside `width`, using up to `max_lines` lines.
  * Breaks whenever the next glyph would overflow; explicit '\n' also breaks.
  * When text remains after the last line an ASCII "..." is appended so the
@@ -1326,18 +1381,41 @@ void inkpane_ui_render_voice(uint8_t *framebuffer, const inkpane_voice_view_t *v
     int user_y = header_bottom + 22;
     draw_wrapped(&canvas, medium, 32, user_y, INKPANE_SCREEN_WIDTH - 64, 2, user_line, true);
 
-    /* The reply takes the rest of the panel in 32 px and wraps to whatever fits,
-     * so the page fills the screen instead of leaving the lower half blank. */
+    /* The reply fills the rest of the panel. A long single sentence must not be
+     * cut off after a few 32 px lines, so pick the largest font of the two that
+     * actually fits the whole text: 32 px first, then 24 px. The e-paper page
+     * cannot scroll, and truncating a spoken answer is much worse than showing
+     * it slightly smaller. */
     int reply_y = user_y + 2 * medium->line_height + 12;
     const int footer_h = small->line_height + 14;
     const int reply_bottom = INKPANE_SCREEN_HEIGHT - footer_h - 12;
-    int reply_lines = (reply_bottom - reply_y) / large->line_height;
+    const int reply_width = INKPANE_SCREEN_WIDTH - 64;
+    const int reply_height = reply_bottom - reply_y;
+    if (reply_height <= 0) {
+        return;
+    }
+
+    const inkpane_font_t *reply_font = large;
+    int reply_lines = reply_height / large->line_height;
     if (reply_lines < 1) {
         reply_lines = 1;
     }
+    if (view->reply_text != NULL && view->reply_text[0] != '\0') {
+        /* Count wrapped lines the same way draw_wrapped() lays them out. */
+        int needed = wrapped_line_count(large, reply_width, reply_height, view->reply_text);
+        if (needed > reply_lines) {
+            int medium_lines = reply_height / medium->line_height;
+            int medium_needed =
+                wrapped_line_count(medium, reply_width, reply_height, view->reply_text);
+            if (medium_lines >= medium_needed && medium_lines >= 1) {
+                reply_font = medium;
+                reply_lines = medium_lines;
+            }
+        }
+    }
     inkpane_canvas_hline(&canvas, 32, reply_y - 8, INKPANE_SCREEN_WIDTH - 64, true);
-    draw_wrapped(&canvas, large, 32, reply_y, INKPANE_SCREEN_WIDTH - 64, reply_lines,
-                 view->reply_text, true);
+    draw_wrapped(&canvas, reply_font, 32, reply_y, reply_width, reply_lines, view->reply_text,
+                 true);
 
     inkpane_canvas_hline(&canvas, 32, INKPANE_SCREEN_HEIGHT - footer_h, INKPANE_SCREEN_WIDTH - 64,
                          true);
