@@ -80,7 +80,12 @@ typedef enum {
     INKPANE_VOICE_EVT_ERROR,
     /** A MCP tool changed InkPane data: drop the ETag and refresh the screen. */
     INKPANE_VOICE_EVT_REFRESH,
+    /** A MCP tool asked for a display view change; see `zoom_module` below. */
+    INKPANE_VOICE_EVT_ZOOM,
 } inkpane_voice_event_type_t;
+
+/** `zoom_module` value meaning "go back to the overview". */
+#define INKPANE_VOICE_ZOOM_OVERVIEW (-1)
 
 typedef struct {
     inkpane_voice_event_type_t type;
@@ -88,6 +93,12 @@ typedef struct {
     char ws_token[INKPANE_VOICE_WS_TOKEN_LEN];
     int ws_version;
     bool activated;
+    /**
+     * Target view for INKPANE_VOICE_EVT_ZOOM: an inkpane_module_id_t
+     * (0..INKPANE_MODULE_COUNT-1) or INKPANE_VOICE_ZOOM_OVERVIEW. The voice
+     * component does not include the UI/model headers, so this stays an int.
+     */
+    int zoom_module;
 } inkpane_voice_event_t;
 
 /** Initialize audio/AFE/protocol resources. Returns NOT_SUPPORTED when off. */

@@ -112,6 +112,18 @@ static const tool_def_t kTools[] = {
         true,
     },
     {
+        "self.inkpane.screen.zoom",
+        "{\"name\":\"self.inkpane.screen.zoom\","
+        "\"description\":\"切换墨水屏的显示视图：放大某一个模块（时钟/日历/天气/日程/课程/待办），"
+        "或返回总览。用户说“放大时钟”“看看日程”“放回总览”“退出放大”时调用。\","
+        "\"inputSchema\":{\"type\":\"object\",\"properties\":{"
+        "\"module\":{\"type\":\"string\","
+        "\"enum\":[\"clock\",\"calendar\",\"weather\",\"schedule\",\"courses\",\"todos\",\"overview\"],"
+        "\"description\":\"要放大的模块；overview 表示返回总览\"}},"
+        "\"required\":[\"module\"]}}",
+        true,
+    },
+    {
         "self.inkpane.volume.set",
         "{\"name\":\"self.inkpane.volume.set\","
         "\"description\":\"设置扬声器音量，0 为静音，100 为最大。\","
@@ -907,6 +919,69 @@ static int tool_screen_refresh(const mcp_tools_env_t *env, char *text, size_t te
     return 0;
 }
 
+/* Display module names as the model writes them, in inkpane_module_id_t order
+ * (clock=0, calendar=1, weather=2, schedule=3, courses=4, todos=5). Keeping
+ * the order identical to the enum means no lookup table is needed on the device
+ * side: the index *is* the module id. */
+static const char *const kZoomModuleNames[] = {
+    "clock", "calendar", "weather", "schedule", "courses", "todos",
+};
+
+/** "overview" sentinel: the port layer passes -1 to env->on_zoom. */
+#define MCP_ZOOM_OVERVIEW (-1)
+
+static int tool_screen_zoom(const mcp_tools_env_t *env, const json_value_t *args, char *text,
+                            size_t text_size)
+{
+    char err[192];
+    char module[16];
+    err[0] = '\0';
+    if (get_string_arg(args, "module", true, NULL, 15, module, sizeof(module), err,
+                       sizeof(err)) != 0) {
+        snprintf(text, text_size, "%s", err);
+        return -1;
+    }
+
+    int target = MCP_ZOOM_OVERVIEW;
+    if (strcmp(module, "overview") != 0) {
+        const size_t count = sizeof(kZoomModuleNames) / sizeof(kZoomModuleNames[0]);
+        bool found = false;
+        for (size_t i = 0; i < count; ++i) {
+            if (strcmp(module, kZoomModuleNames[i]) == 0) {
+                target = (int)i;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            snprintf(text, text_size,
+                     "参数 module 必须是 clock/calendar/weather/schedule/courses/todos/overview "
+                     "之一");
+            return -1;
+        }
+    }
+
+    if (env == NULL || env->on_zoom == NULL) {
+        snprintf(text, text_size, "设备显示控制不可用");
+        return -1;
+    }
+    if (env->on_zoom(env->zoom_ctx, target) != 0) {
+        if (target == MCP_ZOOM_OVERVIEW) {
+            snprintf(text, text_size, "返回总览失败：当前看板不可用");
+        } else {
+            snprintf(text, text_size, "无法放大该模块：控制台未启用该模块");
+        }
+        return -1;
+    }
+
+    if (target == MCP_ZOOM_OVERVIEW) {
+        snprintf(text, text_size, "已返回看板总览");
+    } else {
+        snprintf(text, text_size, "已放大显示%s", kZoomModuleNames[target]);
+    }
+    return 0;
+}
+
 static int tool_volume_set(const json_value_t *args, char *text, size_t text_size)
 {
     char err[192];
@@ -1021,6 +1096,9 @@ int mcp_tools_call(const mcp_tools_env_t *env, const char *name, const json_valu
     }
     if (strcmp(name, "self.inkpane.screen.refresh") == 0) {
         return tool_screen_refresh(env, text_out, text_size);
+    }
+    if (strcmp(name, "self.inkpane.screen.zoom") == 0) {
+        return tool_screen_zoom(env, arguments, text_out, text_size);
     }
     if (strcmp(name, "self.inkpane.volume.set") == 0) {
         return tool_volume_set(arguments, text_out, text_size);

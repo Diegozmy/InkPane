@@ -16,10 +16,12 @@
  *   self.inkpane.todo.complete    PATCH /api/device/todos/{id} {"done":true}
  *   self.inkpane.todo.delete      DELETE /api/device/todos/{id}
  *   self.inkpane.screen.refresh   triggers env->on_mutation
+ *   self.inkpane.screen.zoom      triggers env->on_zoom (module / overview)
  *   self.inkpane.volume.set       sets the speaker volume (0-100)
  *
  * When allow_control is false only context.get and device.status are exposed
- * (read-only assistant); the server rejects the mutation tools as unknown.
+ * (read-only assistant); the server rejects the mutation and display tools as
+ * unknown.
  */
 
 #include <stdbool.h>

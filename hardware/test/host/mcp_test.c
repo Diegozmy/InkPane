@@ -274,14 +274,14 @@ static void test_tools_list(void)
 
     const json_value_t *tools = list_tools(server);
     CHECK(tools != NULL);
-    CHECK(json_array_size(tools) == 9);
+    CHECK(json_array_size(tools) == 10);
 
     static const char *const kExpected[] = {
         "self.inkpane.context.get",      "self.inkpane.device.status",
         "self.inkpane.event.create",     "self.inkpane.event.cancel",
         "self.inkpane.todo.create",      "self.inkpane.todo.complete",
         "self.inkpane.todo.delete",      "self.inkpane.screen.refresh",
-        "self.inkpane.volume.set",
+        "self.inkpane.screen.zoom",      "self.inkpane.volume.set",
     };
     for (size_t i = 0; i < sizeof(kExpected) / sizeof(kExpected[0]); ++i) {
         const json_value_t *tool = find_tool_entry(tools, kExpected[i]);
@@ -636,6 +636,111 @@ static void test_screen_refresh(void)
     mcp_server_destroy(server);
 }
 
+/* Records what the zoom hook asked for; -1 means "overview". */
+static int g_zoom_target;
+static int g_zoom_calls;
+/* When non-zero the hook reports failure, to exercise the error paths. */
+static int g_zoom_reject;
+
+static int zoom_hook(void *ctx, int module)
+{
+    (void)ctx;
+    ++g_zoom_calls;
+    if (g_zoom_reject) {
+        return -1;
+    }
+    g_zoom_target = module;
+    return 0;
+}
+
+static mcp_tools_env_t make_zoom_env(void)
+{
+    mcp_tools_env_t env = make_env(true);
+    env.on_zoom = zoom_hook;
+    return env;
+}
+
+static void test_screen_zoom(void)
+{
+    printf("== tools/call screen.zoom ==\n");
+    mcp_tools_env_t env = make_zoom_env();
+    mcp_server_t *server = mcp_server_create(capture_send, NULL, &env);
+    CHECK(server != NULL);
+    if (server == NULL) {
+        return;
+    }
+
+    /* Each module name must map to its inkpane_module_id_t index. */
+    static const char *const kNames[] = {"clock",     "calendar", "weather",
+                                        "schedule", "courses",  "todos"};
+    for (size_t i = 0; i < sizeof(kNames) / sizeof(kNames[0]); ++i) {
+        char args[96];
+        snprintf(args, sizeof(args), "{\"module\":\"%s\"}", kNames[i]);
+        g_zoom_calls = 0;
+        g_zoom_target = -99;
+        call_tool(server, "self.inkpane.screen.zoom", args);
+        const json_value_t *root = parse_json(&g_parse_a, g_sent);
+        CHECK(root != NULL);
+        if (root == NULL) {
+            continue;
+        }
+        CHECK(!result_is_error(root));
+        CHECK(g_zoom_calls == 1);
+        CHECK(g_zoom_target == (int)i);
+        CHECK_CONTAINS(result_tool_text(root), "已放大");
+    }
+
+    /* "overview" must reach the hook as -1. */
+    g_zoom_calls = 0;
+    g_zoom_target = -99;
+    call_tool(server, "self.inkpane.screen.zoom", "{\"module\":\"overview\"}");
+    const json_value_t *root = parse_json(&g_parse_a, g_sent);
+    CHECK(root != NULL);
+    if (root != NULL) {
+        CHECK(!result_is_error(root));
+        CHECK_CONTAINS(result_tool_text(root), "总览");
+    }
+    CHECK(g_zoom_calls == 1);
+    CHECK(g_zoom_target == -1);
+
+    /* Unknown module name: rejected, hook not called. */
+    g_zoom_calls = 0;
+    call_tool(server, "self.inkpane.screen.zoom", "{\"module\":\"battery\"}");
+    root = parse_json(&g_parse_a, g_sent);
+    CHECK(root != NULL);
+    if (root != NULL) {
+        CHECK(result_is_error(root));
+        CHECK_CONTAINS(result_tool_text(root), "module");
+    }
+    CHECK(g_zoom_calls == 0);
+
+    /* Missing argument. */
+    g_zoom_calls = 0;
+    call_tool(server, "self.inkpane.screen.zoom", NULL);
+    root = parse_json(&g_parse_a, g_sent);
+    CHECK(root != NULL);
+    if (root != NULL) {
+        CHECK(result_is_error(root));
+        CHECK_CONTAINS(result_tool_text(root), "module");
+    }
+    CHECK(g_zoom_calls == 0);
+
+    /* The device refuses (module not enabled): the model gets an error. */
+    g_zoom_reject = 1;
+    g_zoom_calls = 0;
+    call_tool(server, "self.inkpane.screen.zoom", "{\"module\":\"clock\"}");
+    root = parse_json(&g_parse_a, g_sent);
+    CHECK(root != NULL);
+    if (root != NULL) {
+        CHECK(result_is_error(root));
+        CHECK_CONTAINS(result_tool_text(root), "无法放大");
+    }
+    CHECK(g_zoom_calls == 1);
+    g_zoom_reject = 0;
+
+    mcp_server_destroy(server);
+}
+
 static void test_device_status(void)
 {
     printf("== tools/call device.status ==\n");
@@ -822,6 +927,7 @@ int main(void)
     test_event_cancel();
     test_todo_tools();
     test_screen_refresh();
+    test_screen_zoom();
     test_device_status();
     test_volume();
     test_protocol_errors();

@@ -373,6 +373,25 @@ static void voice_mcp_mutation(void* context)
     post_event(INKPANE_VOICE_EVT_REFRESH);
 }
 
+/* self.inkpane.screen.zoom: hand the view change to app_main, which owns the
+ * panel and the zoomed_module state. The request has to go through the event
+ * queue rather than touch the framebuffer from the audio task. */
+static int voice_mcp_zoom(void* context, int module)
+{
+    (void)context;
+    if (s_event_queue == nullptr) {
+        return -1;
+    }
+    inkpane_voice_event_t event;
+    memset(&event, 0, sizeof(event));
+    event.type = INKPANE_VOICE_EVT_ZOOM;
+    event.zoom_module = module;
+    if (xQueueSend(s_event_queue, &event, 0) != pdTRUE) {
+        return -1;
+    }
+    return 0;
+}
+
 static void voice_init_mcp()
 {
     memset(&s_mcp_env, 0, sizeof(s_mcp_env));
@@ -380,6 +399,7 @@ static void voice_init_mcp()
     s_mcp_env.get_local_time = voice_mcp_time;
     s_mcp_env.timezone = s_timezone;
     s_mcp_env.on_mutation = voice_mcp_mutation;
+    s_mcp_env.on_zoom = voice_mcp_zoom;
     s_mcp = mcp_server_create(voice_mcp_send, nullptr, &s_mcp_env);
 }
 

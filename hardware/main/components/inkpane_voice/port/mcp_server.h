@@ -45,6 +45,17 @@ typedef struct mcp_tools_env {
      */
     void (*on_mutation)(void *ctx);
     void *mutation_ctx;
+    /**
+     * Called by self.inkpane.screen.zoom to change the displayed view.
+     *
+     * `module` is an inkpane_module_id_t (0..INKPANE_MODULE_COUNT-1) to zoom
+     * into that module, or -1 to return to the overview. The port layer does
+     * not include the model headers, so this stays an int. Return 0 when the
+     * device accepted the request, -1 when it cannot (e.g. the module is not
+     * enabled by the current layout).
+     */
+    int (*on_zoom)(void *ctx, int module);
+    void *zoom_ctx;
 } mcp_tools_env_t;
 
 /**

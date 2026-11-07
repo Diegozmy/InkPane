@@ -927,6 +927,8 @@ static int zoom_enabled_mask(void)
  *   GPIO 5 = toggle between the overview and the first enabled module's zoom
  *             view.
  */
+static bool zoom_apply_view(int next_view);
+
 static bool handle_zoom_button(int pressed_gpio)
 {
     if (pressed_gpio < 0 || s_screen == NULL) {
@@ -995,6 +997,18 @@ static bool handle_zoom_button(int pressed_gpio)
         return true;
     }
 
+    return zoom_apply_view(next_view);
+}
+
+/**
+ * Switch the displayed view to `next_view` (-1 = overview) and repaint it.
+ *
+ * Shared by the button ring handler and the voice-assistant zoom tool so the
+ * two paths cannot drift apart (fast waveform, content-key resetting, failure
+ * handling all live here). Returns true when the panel accepted the new view.
+ */
+static bool zoom_apply_view(int next_view)
+{
     s_persist.zoomed_module = next_view;
     /* A new page (or a different module) must repaint unconditionally on the
      * next tick check: the digits on the previous view are not what this view
@@ -1410,6 +1424,10 @@ void app_main(void)
 #define RESIDENT_ACTIVATION_PAGE_MS (5 * 60 * 1000)
 /* Keep the finished answer on screen a few seconds before the dashboard returns. */
 #define RESIDENT_VOICE_LINGER_MS (6 * 1000)
+/* Shorter pause when the turn was a view-change request: the requested page is
+ * the useful thing to show, so only leave the answer up long enough to finish
+ * the spoken reply. */
+#define RESIDENT_VOICE_ZOOM_LINGER_MS (1500)
 
 /* Field diagnostics: a low-priority task keeps logging while the main loop is
  * stuck, so "no serial output" can be told apart from "main task blocked". */
@@ -1448,6 +1466,10 @@ static int64_t s_error_until_ms;
 static int64_t s_activation_until_ms;
 static bool s_voice_dirty;
 static uint32_t s_voice_signature;
+/* Pending view change requested by the `self.inkpane.screen.zoom` tool. Handled
+ * on the main loop (which owns the panel), not on the voice task. */
+static bool s_voice_zoom_pending;
+static int s_voice_zoom_request = INKPANE_VOICE_ZOOM_OVERVIEW;
 /* Partial refreshes issued on the current conversation page, for the periodic
  * de-ghosting full repaint. */
 /* Partial refreshes issued on the current conversation page, for the periodic
@@ -1684,6 +1706,41 @@ static void resident_apply_server_voice(inkpane_config_t *config)
 }
 
 /** Ask the panel for a fresh dashboard after a voice-driven mutation. */
+/**
+ * Apply a view request coming from the voice assistant's
+ * `self.inkpane.screen.zoom` tool.
+ *
+ * Returns true when the panel switched. The target must be an enabled module
+ * of the current layout: the voice model cannot know which modules the console
+ * enabled, so it gets a clear failure instead of a blank page.
+ */
+static bool resident_apply_voice_zoom(int module_id)
+{
+    if (s_screen == NULL || !s_dashboard_ready) {
+        return false;
+    }
+    if (module_id == INKPANE_VOICE_ZOOM_OVERVIEW) {
+        /* Already on the overview: nothing to repaint. Report success so the
+         * model does not retry. */
+        if (s_persist.zoomed_module < 0) {
+            return true;
+        }
+        return zoom_apply_view(-1);
+    }
+    if (module_id < 0 || module_id >= INKPANE_MODULE_COUNT) {
+        return false;
+    }
+    const inkpane_rect_t *module = &s_screen->modules[module_id];
+    if (!module->enabled || !module->present) {
+        return false;
+    }
+    /* Same page already on screen: skip the flash, report success. */
+    if (s_persist.zoomed_module == module_id) {
+        return true;
+    }
+    return zoom_apply_view(module_id);
+}
+
 static void resident_handle_voice_event(const inkpane_voice_event_t *event,
                                         inkpane_config_t *config)
 {
@@ -1706,6 +1763,15 @@ static void resident_handle_voice_event(const inkpane_voice_event_t *event,
         clear_saved_etag(config);
         s_screen_dirty = true;
         ESP_LOGI(TAG, "voice mutation -> screen refresh queued");
+        break;
+    case INKPANE_VOICE_EVT_ZOOM:
+        /* The assistant asked to zoom a module or return to the overview.
+         * Deferred to the main loop: the panel write must not run on the
+         * voice task, and leaving the conversation page is also the main
+         * loop's decision. */
+        s_voice_zoom_request = event->zoom_module;
+        s_voice_zoom_pending = true;
+        ESP_LOGI(TAG, "voice zoom requested: module %d", event->zoom_module);
         break;
     case INKPANE_VOICE_EVT_ERROR:
         s_error_until_ms = esp_timer_get_time() / 1000 + RESIDENT_ERROR_PAGE_MS;
@@ -2283,9 +2349,15 @@ static void resident_main(void)
         if (!want_error) {
             s_error_dismissed = false;
         }
-        /* Keep the finished turn on screen long enough to read the answer. */
+        /* Keep the finished turn on screen long enough to read the answer.
+         * When the turn ended because the user asked for a view change, the
+         * requested page is the more useful thing to show: shorten the linger
+         * to just enough to finish the spoken answer instead of the full
+         * reading pause (which would make the request feel sluggish). */
         if (!want_voice && s_voice_in_turn) {
-            s_voice_linger_until_ms = now_ms + RESIDENT_VOICE_LINGER_MS;
+            s_voice_linger_until_ms =
+                now_ms + (s_voice_zoom_pending ? RESIDENT_VOICE_ZOOM_LINGER_MS
+                                               : RESIDENT_VOICE_LINGER_MS);
         }
         s_voice_in_turn = want_voice;
         const bool linger_voice = !want_voice && !want_error && !want_activation &&
@@ -2334,6 +2406,18 @@ static void resident_main(void)
             }
             s_last_voice_render_ms = now_ms;
             s_voice_dirty = false;
+        }
+
+        /* The dashboard may already be on screen when a zoom request arrives
+         * (e.g. the assistant answered and the page returned first), so apply
+         * pending requests every iteration rather than only on page changes. */
+        if (s_voice_zoom_pending && !s_voice_page && !s_activation_page && !s_error_page &&
+            s_dashboard_ready) {
+            s_voice_zoom_pending = false;
+            if (!resident_apply_voice_zoom(s_voice_zoom_request)) {
+                ESP_LOGW(TAG, "voice zoom target %d unavailable; keeping current view",
+                         s_voice_zoom_request);
+            }
         }
 
         if (now_ms - last_tick_ms >= 1000) {
