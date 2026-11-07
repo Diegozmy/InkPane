@@ -25,6 +25,23 @@ esp_err_t inkpane_epd_init(bool warm);
 esp_err_t inkpane_epd_show_full(const uint8_t *framebuffer);
 
 /**
+ * Full refresh using the vendor's fast update profile.
+ *
+ * Same frame path as inkpane_epd_show_full(), but programs the controller with
+ * the 0x1A fast temperature/voltage register and drives the 0xD7 update
+ * sequence instead of 0xF7. The vendor reference driver labels this path
+ * "Fast(1.5s)" versus roughly 3-4 s for the normal waveform.
+ *
+ * The trade-off is less pixel settling time, so repeated fast refreshes leave
+ * more residual image. Use it for interactive page transitions (voice
+ * conversation updates, zoom switches) and fall back to
+ * inkpane_epd_show_full() for the periodic de-ghosting repaint. The driver
+ * re-runs panel_init() automatically when the profile changes, so alternating
+ * between the two is safe.
+ */
+esp_err_t inkpane_epd_show_full_fast(const uint8_t *framebuffer);
+
+/**
  * Partial refresh of one screen region. The region is copied out of the
  * framebuffer (x is aligned down/up to byte boundaries) before transfer.
  *

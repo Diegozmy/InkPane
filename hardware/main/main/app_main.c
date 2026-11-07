@@ -262,9 +262,10 @@ static int retry_delay_seconds(const inkpane_config_t *config)
  * shadow is committed on success so later partial refreshes can diff against
  * what the panel actually shows.
  */
-static esp_err_t full_refresh(void)
+static esp_err_t full_refresh_impl(bool fast)
 {
-    esp_err_t err = inkpane_epd_show_full(s_framebuffer);
+    esp_err_t err = fast ? inkpane_epd_show_full_fast(s_framebuffer)
+                         : inkpane_epd_show_full(s_framebuffer);
     if (err == ESP_OK) {
         s_persist.panel_needs_init = false;
         if (s_panel_frame != NULL) {
@@ -277,6 +278,27 @@ static esp_err_t full_refresh(void)
         s_panel_frame_valid = false;
     }
     return err;
+}
+
+/**
+ * Normal-waveform full refresh: the "quality" repaint used for boot, failure
+ * pages, periodic de-ghosting and anything where residual image matters.
+ */
+static esp_err_t full_refresh(void)
+{
+    return full_refresh_impl(false);
+}
+
+/**
+ * Fast-waveform full refresh (~1.5 s instead of ~3-4 s on this panel).
+ *
+ * Used for interactive page transitions where the user is waiting: voice
+ * conversation page entry and zoom view switches. Residual image accumulates
+ * faster, so the periodic de-ghosting pass uses the normal path instead.
+ */
+static esp_err_t full_refresh_fast(void)
+{
+    return full_refresh_impl(true);
 }
 
 /*
@@ -612,8 +634,14 @@ static bool connect_wifi(const inkpane_config_t *config)
 }
 
 /* Rendering entry points, defined after the fetch path that uses them. */
-static esp_err_t render_zoomed_module(int zoomed_module);
-static esp_err_t render_overview(void);
+/**
+ * Render the full-screen zoomed view for `zoomed_module` into the framebuffer.
+ * `fast` selects the vendor's fast waveform (~1.5 s) for interactive view
+ * switches; the network paths use the normal waveform so residual image does
+ * not build up on every payload update.
+ */
+static esp_err_t render_zoomed_module(int zoomed_module, bool fast);
+static esp_err_t render_overview(bool fast);
 
 static void fetch_and_render(inkpane_config_t *config, bool force_full, int64_t now_epoch,
                              bool rtc_ok, const inkpane_datetime_t *dt, bool paint_notice)
@@ -653,7 +681,7 @@ static void fetch_and_render(inkpane_config_t *config, bool force_full, int64_t 
         }
         esp_err_t err;
         if (zoom_view >= 0) {
-            err = render_zoomed_module(zoom_view);
+            err = render_zoomed_module(zoom_view, false);
         } else {
             inkpane_ui_render_full(s_framebuffer, s_screen);
             err = full_refresh();
@@ -717,7 +745,7 @@ static void fetch_and_render(inkpane_config_t *config, bool force_full, int64_t 
              * to be repainted: the clock digits may have moved on since the page
              * was drawn. render_zoomed_module() repaints that module from the
              * cached screen, which for the clock reads the RTC again. */
-            esp_err_t err = render_zoomed_module(s_persist.zoomed_module);
+            esp_err_t err = render_zoomed_module(s_persist.zoomed_module, false);
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "zoomed repaint on 304 failed: %s", esp_err_to_name(err));
                 s_persist.panel_warm = false;
@@ -790,7 +818,7 @@ static int detect_pressed_button(void)
  * fresh from the RTC. `zoomed_module` must be 0..INKPANE_MODULE_COUNT-1.
  * Returns the panel refresh result so callers can react to a failure.
  */
-static esp_err_t render_zoomed_module(int zoomed_module)
+static esp_err_t render_zoomed_module(int zoomed_module, bool fast)
 {
     if (s_framebuffer == NULL || s_screen == NULL) {
         return ESP_ERR_INVALID_STATE;
@@ -849,7 +877,7 @@ static esp_err_t render_zoomed_module(int zoomed_module)
         s_zoom_clock_day_key = zoom_clock_day_of(painted);
         s_zoom_clock_status_key = status_flags();
     }
-    return full_refresh();
+    return fast ? full_refresh_fast() : full_refresh();
 }
 
 /**
@@ -857,13 +885,13 @@ static esp_err_t render_zoomed_module(int zoomed_module)
  * payload rebuilt from the RTC snapshot. Used when zooming back out of a
  * full-screen module view. Returns the panel refresh result.
  */
-static esp_err_t render_overview(void)
+static esp_err_t render_overview(bool fast)
 {
     if (s_framebuffer == NULL || s_screen == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
     inkpane_ui_render_full(s_framebuffer, s_screen);
-    return full_refresh();
+    return fast ? full_refresh_fast() : full_refresh();
 }
 
 /** Bitmask of enabled+present modules, for logs and diagnostics. */
@@ -975,7 +1003,7 @@ static bool handle_zoom_button(int pressed_gpio)
     s_zoom_clock_day_key = -1;
     s_zoom_clock_status_key = 0;
     esp_err_t rendered =
-        next_view < 0 ? render_overview() : render_zoomed_module(next_view);
+        next_view < 0 ? render_overview(true) : render_zoomed_module(next_view, true);
     if (rendered != ESP_OK) {
         /* A failed full refresh usually means the controller lost state; force
          * the regular network path so the next attempt repaints the panel. */
@@ -1326,7 +1354,7 @@ static void low_power_cycle(void)
             } else if (s_persist.zoomed_module >= 0) {
                 /* Offline while zoomed: keep the zoomed page alive locally,
                  * same as the overview's clock tick. */
-                esp_err_t err = render_zoomed_module(s_persist.zoomed_module);
+                esp_err_t err = render_zoomed_module(s_persist.zoomed_module, false);
                 if (err != ESP_OK) {
                     ESP_LOGW(TAG, "zoomed repaint while offline failed: %s",
                              esp_err_to_name(err));
@@ -1707,12 +1735,14 @@ static void resident_render_dashboard(void)
         return;
     }
     if (s_persist.zoomed_module >= 0) {
-        if (render_zoomed_module(s_persist.zoomed_module) == ESP_OK) {
+        if (render_zoomed_module(s_persist.zoomed_module, true) == ESP_OK) {
             return;
         }
         s_persist.panel_warm = false;
     }
-    render_overview();
+    /* Back to the overview after a conversation or a zoom switch: interactive,
+     * so use the fast waveform. */
+    render_overview(true);
 }
 
 /**
@@ -1792,7 +1822,9 @@ static bool resident_zoom_tick(void)
             }
         }
     } else {
-        err = full_refresh();
+        /* Date or status changed on the zoomed clock page: repaint it while the
+         * user is looking at it, so use the fast waveform. */
+        err = full_refresh_fast();
     }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "zoomed clock refresh failed: %s", esp_err_to_name(err));
@@ -1842,9 +1874,10 @@ static void resident_render_voice(const inkpane_voice_snapshot_t *snapshot, bool
     inkpane_ui_render_voice(s_framebuffer, &view);
 
     /* De-ghosting: once enough banded updates have accumulated, repaint the
-     * whole page. This is decided before rendering so the decision and the log
-     * line agree with what actually ran. */
-    if (!full && s_voice_partial_updates >= RESIDENT_VOICE_FULL_EVERY) {
+     * whole page with the normal waveform, which settles the pixels properly
+     * and clears the residue the banded updates leave behind. */
+    const bool deghost = !full && s_voice_partial_updates >= RESIDENT_VOICE_FULL_EVERY;
+    if (deghost) {
         full = true;
     }
 
@@ -1857,11 +1890,10 @@ static void resident_render_voice(const inkpane_voice_snapshot_t *snapshot, bool
     esp_err_t err;
     inkpane_damage_outcome_t outcome = INKPANE_DAMAGE_NONE;
     if (full) {
-        /* Page entry or the periodic de-ghosting repaint: the previous screen
-         * could be the dashboard, so a full refresh is the only safe starting
-         * point for the band diff and for clearing residue. */
+        /* Page entry (fast: the user is waiting for the page to appear) or the
+         * periodic de-ghosting repaint (normal: quality matters there). */
         s_voice_partial_updates = 0;
-        err = full_refresh();
+        err = deghost ? full_refresh() : full_refresh_fast();
         outcome = err == ESP_OK ? INKPANE_DAMAGE_FULL : INKPANE_DAMAGE_NONE;
     } else {
         err = refresh_damage("voice page", &outcome);
@@ -1891,7 +1923,8 @@ static void resident_render_activation(const inkpane_voice_snapshot_t *snapshot)
     }
     inkpane_ui_render_voice_activation(s_framebuffer, snapshot->activation_code,
                                        snapshot->activation_message, "xiaozhi.me");
-    if (full_refresh() != ESP_OK) {
+    /* The user is waiting for this page to appear: fast waveform. */
+    if (full_refresh_fast() != ESP_OK) {
         s_persist.panel_warm = false;
     }
 }
@@ -1904,7 +1937,8 @@ static void resident_render_voice_error(const inkpane_voice_snapshot_t *snapshot
     const char *reason = snapshot->error[0] != '\0' ? snapshot->error : "语音服务暂时不可用";
     inkpane_ui_render_voice_error(s_framebuffer, "语音助手不可用", reason,
                                   "看板功能不受影响 · BOOT 返回");
-    if (full_refresh() != ESP_OK) {
+    /* A failure page should show up promptly rather than flash for seconds. */
+    if (full_refresh_fast() != ESP_OK) {
         s_persist.panel_warm = false;
     }
 }

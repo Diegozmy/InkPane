@@ -9,6 +9,7 @@
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "inkpane_board.h"
@@ -28,6 +29,10 @@ static bool s_ready;
 /* Set when a partial refresh hardware-reset the controller: the next full
  * refresh must re-run panel_init() before writing the frame. */
 static bool s_config_stale;
+/* Which refresh profile panel_init() last programmed (0x1A fast vs normal), so
+ * switching profile re-inits instead of sending a waveform the registers do not
+ * match. */
+static bool s_fast_profile;
 
 static inline void cs_low(void) { gpio_set_level(EPD_CS, 0); }
 static inline void dc_command(void) { gpio_set_level(EPD_DC, 0); }
@@ -50,11 +55,29 @@ static esp_err_t wait_busy(void)
     return ESP_OK;
 }
 
+/**
+ * Bytes pushed per SPI transaction.
+ *
+ * The framebuffer lives in PSRAM and is sent twice per full refresh (0x24 +
+ * 0x26), so a whole frame is 96 KB of bus traffic. The previous 4 KB chunking
+ * produced 24 transactions, and every transaction pays a fixed driver/DMA
+ * setup cost plus a MOSI gap; at 20 MHz the payload itself is only ~5 ms per
+ * frame half.
+ *
+ * 32 KB is the largest chunk that still lets the SPI driver set up a bounce
+ * buffer in internal RAM without competing with the rest of the firmware for
+ * tens of kilobytes (esp_driver_spi copies the PSRAM source into a DMA-capable
+ * buffer when the size exceeds what it can transfer in place). It cuts the
+ * transaction count from 24 to 6 while staying well inside ESP32-S3 internal
+ * RAM, unlike a 96 KB max_transfer_sz that would have to be allocated up
+ * front.
+ */
+#define EPD_SPI_CHUNK 32768
+
 static esp_err_t spi_write(const uint8_t *data, size_t len)
 {
-    const size_t chunk = 4096;
-    for (size_t offset = 0; offset < len; offset += chunk) {
-        size_t part = (len - offset) > chunk ? chunk : (len - offset);
+    for (size_t offset = 0; offset < len; offset += EPD_SPI_CHUNK) {
+        size_t part = (len - offset) > EPD_SPI_CHUNK ? EPD_SPI_CHUNK : (len - offset);
         spi_transaction_t transaction = {
             .length = part * 8,
             .tx_buffer = data + offset,
@@ -134,7 +157,18 @@ static esp_err_t set_full_window(void)
     return ESP_OK;
 }
 
-static esp_err_t panel_init(void)
+/**
+ * Program the controller for a refresh.
+ *
+ * `fast` selects the vendor's "fast" temperature/voltage profile
+ * (0x1A = 0x6A). Combined with the 0xD7 update sequence instead of 0xF7 it
+ * cuts a full-screen update from roughly 3-4 s to about 1.5 s, at the cost of
+ * a slightly shorter pixel settling time (more residual image if used
+ * repeatedly). The controller keeps this setting in a register, so the caller
+ * of a fast refresh has to re-run panel_init() in normal mode before a
+ * "quality" full refresh.
+ */
+static esp_err_t panel_init(bool fast)
 {
     ESP_RETURN_ON_ERROR(send_command(0x12), TAG, "swreset");
     ESP_RETURN_ON_ERROR(wait_busy(), TAG, "reset busy");
@@ -161,6 +195,13 @@ static esp_err_t panel_init(void)
     ESP_RETURN_ON_ERROR(send_data(0x01), TAG, "entry mode value");
 
     ESP_RETURN_ON_ERROR(set_full_window(), TAG, "full window");
+
+    /* Vendor EPD_Init_Fast(): the 0x1A register selects the faster update
+     * profile. The vendor comment next to it reads "Fast(1.5s)". */
+    if (fast) {
+        ESP_RETURN_ON_ERROR(send_command(0x1A), TAG, "fast temp");
+        ESP_RETURN_ON_ERROR(send_data(0x6A), TAG, "fast temp value");
+    }
 
     return wait_busy();
 }
@@ -199,7 +240,7 @@ static esp_err_t spi_init(void)
         .sclk_io_num = EPD_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = 8192,
+        .max_transfer_sz = 2 * EPD_SPI_CHUNK,
     };
     ESP_RETURN_ON_ERROR(spi_bus_initialize(EPD_SPI_HOST, &bus, SPI_DMA_CH_AUTO), TAG, "spi bus");
 
@@ -235,21 +276,38 @@ esp_err_t inkpane_epd_init(bool warm)
 
     hardware_reset();
     ESP_RETURN_ON_ERROR(wait_busy(), TAG, "reset");
-    ESP_RETURN_ON_ERROR(panel_init(), TAG, "panel init");
+    /* A cold init is the boot-time "quality" configuration; callers that want
+     * the fast profile select it explicitly per full refresh. */
+    ESP_RETURN_ON_ERROR(panel_init(false), TAG, "panel init");
+    s_fast_profile = false;
     return ESP_OK;
 }
 
-esp_err_t inkpane_epd_show_full(const uint8_t *framebuffer)
+/** Update sequence byte: 0xF7 = normal waveform, 0xD7 = vendor "fast". */
+#define EPD_UPDATE_NORMAL 0xF7
+#define EPD_UPDATE_FAST 0xD7
+
+/**
+ * Push one full frame to the panel.
+ *
+ * `fast` picks the vendor's fast profile: panel_init(fast) + the 0xD7 update
+ * sequence instead of 0xF7. The vendor reference driver labels that path
+ * "Fast(1.5s)" against roughly 3-4 s for the normal waveform.
+ */
+static esp_err_t show_full_impl(const uint8_t *framebuffer, bool fast)
 {
     if (!s_ready || framebuffer == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
+    const int64_t start_ms = esp_timer_get_time() / 1000;
     /* A partial refresh hardware-resets the controller (see show_region); the
      * panel configuration has to be restored before the next full frame or the
-     * image comes out shifted. */
-    if (s_config_stale) {
-        ESP_RETURN_ON_ERROR(panel_init(), TAG, "re-init after partial");
+     * image comes out shifted. Re-init in whichever mode this frame needs, so
+     * the 0x1A fast profile and the waveform agree. */
+    if (s_config_stale || fast != s_fast_profile) {
+        ESP_RETURN_ON_ERROR(panel_init(fast), TAG, "re-init for full frame");
         s_config_stale = false;
+        s_fast_profile = fast;
     }
     /* A previous partial refresh left the RAM window on the clock rectangle;
      * writing the whole framebuffer into it would wrap the data. */
@@ -259,10 +317,30 @@ esp_err_t inkpane_epd_show_full(const uint8_t *framebuffer)
     ESP_RETURN_ON_ERROR(send_command(0x26), TAG, "write old ram");
     ESP_RETURN_ON_ERROR(send_buffer(framebuffer, INKPANE_EPD_FB_SIZE), TAG, "old ram data");
 
+    const int64_t transfer_ms = esp_timer_get_time() / 1000;
     ESP_RETURN_ON_ERROR(send_command(0x22), TAG, "display update");
-    ESP_RETURN_ON_ERROR(send_data(0xF7), TAG, "update sequence");
+    ESP_RETURN_ON_ERROR(send_data(fast ? EPD_UPDATE_FAST : EPD_UPDATE_NORMAL), TAG,
+                        "update sequence");
     ESP_RETURN_ON_ERROR(send_command(0x20), TAG, "activate");
-    return wait_busy();
+    esp_err_t err = wait_busy();
+    const int64_t end_ms = esp_timer_get_time() / 1000;
+    /* Split the two halves: the SPI push is CPU/bus bound, the waveform wait is
+     * the panel settling. Knowing which dominates decides whether more work
+     * should go into the bus path or into the update profile. */
+    ESP_LOGI(TAG, "full refresh (%s): %d ms total (%d ms transfer, %d ms waveform)",
+             fast ? "fast" : "normal", (int)(end_ms - start_ms), (int)(transfer_ms - start_ms),
+             (int)(end_ms - transfer_ms));
+    return err;
+}
+
+esp_err_t inkpane_epd_show_full(const uint8_t *framebuffer)
+{
+    return show_full_impl(framebuffer, false);
+}
+
+esp_err_t inkpane_epd_show_full_fast(const uint8_t *framebuffer)
+{
+    return show_full_impl(framebuffer, true);
 }
 
 void inkpane_epd_mark_config_stale(void)
@@ -316,6 +394,9 @@ esp_err_t inkpane_epd_show_region(const uint8_t *framebuffer, int x, int y, int 
     vTaskDelay(pdMS_TO_TICKS(2));
     rst_high();
     vTaskDelay(pdMS_TO_TICKS(50));
+    /* The reset cleared the 0x1A profile and all window registers; the next
+     * full refresh must re-run panel_init() regardless of which profile it
+     * wants. */
     s_config_stale = true;
 
     esp_err_t err = ESP_OK;
