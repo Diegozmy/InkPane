@@ -57,7 +57,7 @@ function normalizeOrigin(value: string): string | null {
   }
 }
 
-function isAllowedOrigin(req: Request, origin: string): boolean {
+export function isAllowedOrigin(req: Request, origin: string): boolean {
   const normalized = normalizeOrigin(origin);
   if (!normalized) return false;
   const allowed = new Set(

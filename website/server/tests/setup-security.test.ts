@@ -109,6 +109,26 @@ describe('Origin 校验范围', () => {
     expect(allowed.status).toBe(201);
   });
 
+  it('局域网地址的同源请求（Origin 与 Host 一致）允许，并返回对应的 CORS 头', async () => {
+    const lanHost = '192.168.1.20:5173';
+    const origin = `http://${lanHost}`;
+
+    const preflight = await request(app)
+      .options('/api/auth/login')
+      .set('Host', lanHost)
+      .set('Origin', origin)
+      .set('Access-Control-Request-Method', 'POST');
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers['access-control-allow-origin']).toBe(origin);
+
+    const allowed = await request(app)
+      .post('/api/setup')
+      .set('Host', lanHost)
+      .set('Origin', origin)
+      .send({ ...VALID_SETUP, code: TEST_SETUP_CODE });
+    expect(allowed.status).toBe(201);
+  });
+
   it('登录写请求同样校验 Origin，无 Origin 放行', async () => {
     await request(app)
       .post('/api/setup')

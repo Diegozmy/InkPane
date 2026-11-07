@@ -12,7 +12,7 @@ import {
   requestContext,
   securityHeaders,
 } from './http/middleware.js';
-import { csrfGuard, requireAuth } from './http/auth.js';
+import { csrfGuard, isAllowedOrigin, requireAuth } from './http/auth.js';
 import { createAuthRouter, createSetupRouter } from './modules/auth/routes.js';
 import { createUsersRouter } from './modules/users/routes.js';
 import { createCategoriesRouter } from './modules/categories.js';
@@ -41,15 +41,6 @@ export function createApp(): Express {
   app.disable('x-powered-by');
 
   const corsOptions: CorsOptions = {
-    origin(origin, callback) {
-      // 无 Origin 的请求（同源页面、curl、服务端调用）一律放行
-      if (!origin) return callback(null, true);
-      if (config.corsOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-      logger.warn('CORS 拒绝来源', { origin });
-      return callback(null, false);
-    },
     credentials: true,
     methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-Id', 'X-Device-Token'],
@@ -79,7 +70,20 @@ export function createApp(): Express {
     }),
   );
   app.use(securityHeaders);
-  app.use(cors(corsOptions));
+  // 每个请求单独判断：CORS_ORIGIN 白名单之外，也允许 Origin 与 Host 一致的同源请求。
+  // dev:lan 下手机/平板通过 Vite 代理访问时，Origin 是局域网地址而白名单只有 localhost，
+  // 若只查白名单会误报「CORS 拒绝来源」；同源请求回显 Origin 无害，也便于排查。
+  app.use(
+    cors((req, callback) => {
+      const origin = req.header('origin');
+      if (!origin || isAllowedOrigin(req, origin)) {
+        callback(null, { ...corsOptions, origin: true });
+        return;
+      }
+      logger.warn('CORS 拒绝来源', { origin });
+      callback(null, { ...corsOptions, origin: false });
+    }),
+  );
   // requestId 必须在 body parser 之前，否则 JSON 解析错误没有 requestId。
   app.use(requestContext);
   app.use(express.json({ limit: config.bodyLimit }));
