@@ -74,7 +74,8 @@
 ## 4. 语音控制（MCP）
 
 设备向小智注册以下工具；`屏幕与设备 → 语音助手 → 允许语音修改日程与待办` 关闭时只保留
-只读工具。
+只读工具（`context.get` 与 `device.status`）——写日程/待办、刷新屏幕、切换放大视图和调音量
+都算控制类，一并隐藏。
 
 | 工具 | 例子 |
 | --- | --- |
@@ -85,8 +86,16 @@
 | `self.inkpane.todo.complete` | 「把交报告那个待办标记完成」 |
 | `self.inkpane.todo.delete` | 「删掉买牛奶这个待办」（需要确认） |
 | `self.inkpane.screen.refresh` | 「刷新一下屏幕」 |
+| `self.inkpane.screen.zoom` | 「放大时钟」「看看今天日程」「返回总览」 |
 | `self.inkpane.device.status` | 「你还有多少电？」 |
 | `self.inkpane.volume.set` | 「音量调到 40」 |
+
+`screen.zoom` 的 `module` 取 `clock / calendar / weather / schedule / courses / todos`
+之一，或 `overview` 表示返回总览。它只接受当前 layout 已启用的模块：控制台关掉的模块
+会回一条「无法放大该模块」的中文错误，而不是把页面切到空白。请求由 app_main 在主循环
+里执行（面板与 `zoomed_module` 状态归它管），不会在语音线程里碰 framebuffer。放大后
+滚轮 4/6/5 仍然可用；若这一轮是视图切换请求，对话页的停留时间会从 6 s 缩短到 1.5 s，
+避免说完还要等好几秒才切页。
 
 实现路径：小智服务下发 `type=mcp` 的 JSON-RPC 请求 → 设备 `mcp_server` 校验参数 →
 `mcp_tools` 调用 `X-Device-Token` 的 `/api/device/events|todos|context` → Node 服务写
