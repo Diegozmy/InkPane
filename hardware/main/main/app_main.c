@@ -89,6 +89,25 @@ static inkpane_screen_t *s_screen;
 static uint8_t *s_panel_frame;
 static bool s_panel_frame_valid;
 
+/* Last content keys painted on the zoomed clock page, so the minute tick only
+ * repaints when the digits (or the day/status line) actually changed. Declared
+ * here because the zoom helpers below the module renderers need them too. */
+static int s_zoom_clock_minute_key = -1;
+static int s_zoom_clock_day_key = -1;
+static unsigned s_zoom_clock_status_key;
+
+/** Minute key (HH*100+MM) of `clock`, or -1 when it is invalid. */
+static int zoom_clock_minute_of(const inkpane_clock_t *clock)
+{
+    return (clock != NULL && clock->valid) ? (clock->hour * 100 + clock->minute) : -1;
+}
+
+/** Date key (MM*100+DD) of `clock`, or -1 when it is invalid. */
+static int zoom_clock_day_of(const inkpane_clock_t *clock)
+{
+    return (clock != NULL && clock->valid) ? (clock->month * 100 + clock->day) : -1;
+}
+
 static void nvs_init(void)
 {
     esp_err_t err = nvs_flash_init();
@@ -284,6 +303,10 @@ static esp_err_t full_refresh(void)
 #define INKPANE_PARTIAL_MAX_ROWS 340
 #define INKPANE_PARTIAL_MERGE_GAP 12
 
+/* The damage-band path only serves the resident conversation page; LOW_POWER
+ * has no page that updates in place, so keep it out of that build. */
+#if !CONFIG_INKPANE_POWER_MODE_LOW_POWER
+
 /**
  * Push a page to the panel using partial refreshes where possible.
  *
@@ -368,6 +391,8 @@ static esp_err_t refresh_damage(const char *what, inkpane_damage_outcome_t *outc
     ESP_LOGI(TAG, "%s partial refresh: %d band(s), %d rows, %d ms", what, count, rows, elapsed_ms);
     return ESP_OK;
 }
+
+#endif /* !CONFIG_INKPANE_POWER_MODE_LOW_POWER */
 
 /**
  * The panel has no trustworthy content yet (cold boot or RTC still unset), so
@@ -687,7 +712,19 @@ static void fetch_and_render(inkpane_config_t *config, bool force_full, int64_t 
         }
         s_persist.next_net_epoch = base + (int64_t)config->refresh_minutes * 60;
         apply_battery_stretch(base);
-        refresh_clock_partial(config);
+        if (s_persist.zoomed_module >= 0) {
+            /* A 304 means the payload is unchanged, but a zoomed page still has
+             * to be repainted: the clock digits may have moved on since the page
+             * was drawn. render_zoomed_module() repaints that module from the
+             * cached screen, which for the clock reads the RTC again. */
+            esp_err_t err = render_zoomed_module(s_persist.zoomed_module);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "zoomed repaint on 304 failed: %s", esp_err_to_name(err));
+                s_persist.panel_warm = false;
+            }
+        } else {
+            refresh_clock_partial(config);
+        }
         if (!inkpane_snapshot_valid(&s_snapshot)) {
             /* The ETag survived (e.g. firmware update) but the RTC snapshot
              * did not: drop it so the next cycle gets a full 200 payload and
@@ -793,6 +830,24 @@ static esp_err_t render_zoomed_module(int zoomed_module)
         break;
     default:
         return ESP_ERR_INVALID_ARG;
+    }
+    /* Record which clock content is now on the panel so the per-second zoom
+     * tick does not immediately repaint the same frame. Only meaningful for the
+     * clock page, the other modules are static until a new payload arrives. */
+    if (zoomed_module == INKPANE_MODULE_CLOCK) {
+        const inkpane_clock_t *painted = NULL;
+        inkpane_clock_t from_rtc;
+        inkpane_datetime_t dt;
+        if (read_clock(&dt)) {
+            clock_from_datetime(&dt, &from_rtc);
+            painted = &from_rtc;
+        } else if (screen->now_valid) {
+            clock_from_datetime(&screen->now_local, &from_rtc);
+            painted = &from_rtc;
+        }
+        s_zoom_clock_minute_key = zoom_clock_minute_of(painted);
+        s_zoom_clock_day_key = zoom_clock_day_of(painted);
+        s_zoom_clock_status_key = status_flags();
     }
     return full_refresh();
 }
@@ -913,6 +968,12 @@ static bool handle_zoom_button(int pressed_gpio)
     }
 
     s_persist.zoomed_module = next_view;
+    /* A new page (or a different module) must repaint unconditionally on the
+     * next tick check: the digits on the previous view are not what this view
+     * shows, so forget the last painted content keys. */
+    s_zoom_clock_minute_key = -1;
+    s_zoom_clock_day_key = -1;
+    s_zoom_clock_status_key = 0;
     esp_err_t rendered =
         next_view < 0 ? render_overview() : render_zoomed_module(next_view);
     if (rendered != ESP_OK) {
@@ -920,6 +981,16 @@ static bool handle_zoom_button(int pressed_gpio)
          * the regular network path so the next attempt repaints the panel. */
         s_persist.panel_warm = false;
         return false;
+    }
+    /* The frame just painted this content; record it so the second tick does
+     * not immediately repaint the same digits. */
+    if (s_persist.zoomed_module == INKPANE_MODULE_CLOCK) {
+        inkpane_datetime_t dt;
+        if (read_clock(&dt)) {
+            s_zoom_clock_minute_key = dt.hour * 100 + dt.minute;
+            s_zoom_clock_day_key = dt.month * 100 + dt.day;
+        }
+        s_zoom_clock_status_key = status_flags();
     }
     return true;
 }
@@ -1252,7 +1323,16 @@ static void low_power_cycle(void)
                      backoff);
             if (paint_notice) {
                 show_failure_notice(&config);
-            } else if (s_persist.zoomed_module < 0) {
+            } else if (s_persist.zoomed_module >= 0) {
+                /* Offline while zoomed: keep the zoomed page alive locally,
+                 * same as the overview's clock tick. */
+                esp_err_t err = render_zoomed_module(s_persist.zoomed_module);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "zoomed repaint while offline failed: %s",
+                             esp_err_to_name(err));
+                    s_persist.panel_warm = false;
+                }
+            } else {
                 refresh_clock_partial(&config);
             }
         }
@@ -1340,6 +1420,8 @@ static int64_t s_error_until_ms;
 static int64_t s_activation_until_ms;
 static bool s_voice_dirty;
 static uint32_t s_voice_signature;
+/* Partial refreshes issued on the current conversation page, for the periodic
+ * de-ghosting full repaint. */
 /* Partial refreshes issued on the current conversation page, for the periodic
  * de-ghosting full repaint. */
 static int s_voice_partial_updates;
@@ -1631,6 +1713,95 @@ static void resident_render_dashboard(void)
         s_persist.panel_warm = false;
     }
     render_overview();
+}
+
+/**
+ * Repaint the zoomed view in place when its content can change on its own.
+ *
+ * The overview tick deliberately skips partial refreshes while zoomed (there is
+ * no mini clock rectangle on screen), and resident mode never reboots, so
+ * without this a zoomed page froze: it only repainted when the user left and
+ * re-entered the module. That is exactly the "放大后画面不更新，取消放大再放大
+ * 才更新" report.
+ *
+ * Only the clock genuinely changes by itself (every minute). The other modules
+ * are redrawn from the cached payload and change only when a new payload
+ * arrives, which fetch_and_render() already renders; repainting them here would
+ * flash the panel every second for nothing.
+ *
+ * Returns true when it issued a panel refresh.
+ */
+static bool resident_zoom_tick(void)
+{
+    if (s_persist.zoomed_module < 0 || s_framebuffer == NULL || s_screen == NULL) {
+        return false;
+    }
+    /* Only the clock module changes without a payload update. */
+    if (s_persist.zoomed_module != INKPANE_MODULE_CLOCK) {
+        return false;
+    }
+
+    inkpane_clock_t clock;
+    inkpane_datetime_t dt;
+    const bool valid = read_clock(&dt);
+    if (valid) {
+        clock_from_datetime(&dt, &clock);
+    } else if (s_screen->now_valid) {
+        clock_from_datetime(&s_screen->now_local, &clock);
+    } else {
+        memset(&clock, 0, sizeof(clock));
+    }
+
+    const unsigned status = status_flags();
+    /* Minute key drives the digit band; the date part and the status line
+     * decide whether the whole page has to be redrawn. Splitting them keeps a
+     * normal minute tick down to one narrow band instead of an 800x480 flash. */
+    const int minute_key = zoom_clock_minute_of(valid ? &clock : NULL);
+    const int day_key = zoom_clock_day_of(valid ? &clock : NULL);
+
+    if (minute_key == s_zoom_clock_minute_key && day_key == s_zoom_clock_day_key &&
+        status == s_zoom_clock_status_key) {
+        return false; /* Nothing visible changed. */
+    }
+
+    const bool minute_only = minute_key != s_zoom_clock_minute_key &&
+                             day_key == s_zoom_clock_day_key &&
+                             status == s_zoom_clock_status_key;
+    s_zoom_clock_minute_key = minute_key;
+    s_zoom_clock_day_key = day_key;
+    s_zoom_clock_status_key = status;
+
+    inkpane_ui_render_clock_full(s_framebuffer, &clock, status);
+
+    esp_err_t err;
+    if (minute_only) {
+        /* Only the digits changed: repaint the band that holds them instead of
+         * flashing the whole page once a minute. Geometry comes from
+         * inkpane_ui_render_clock_full(): 64 px digits start at y=84 and the
+         * line height is 84, so a band around y=76..180 covers them with margin
+         * (the day/status text below is untouched by a minute tick). */
+        const int digits_y = 76;
+        const int digits_h = 104;
+        err = inkpane_epd_show_region(s_framebuffer, 0, digits_y, INKPANE_EPD_WIDTH, digits_h);
+        if (err == ESP_OK) {
+            s_persist.panel_needs_init = true;
+            if (s_panel_frame_valid && s_panel_frame != NULL) {
+                memcpy(s_panel_frame + (size_t)digits_y * INKPANE_EPD_STRIDE,
+                       s_framebuffer + (size_t)digits_y * INKPANE_EPD_STRIDE,
+                       (size_t)digits_h * INKPANE_EPD_STRIDE);
+            }
+        }
+    } else {
+        err = full_refresh();
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "zoomed clock refresh failed: %s", esp_err_to_name(err));
+        s_persist.panel_warm = false;
+        s_panel_frame_valid = false;
+        return false;
+    }
+    ESP_LOGI(TAG, "zoomed clock refresh (%s)", minute_only ? "digits band" : "full");
+    return true;
 }
 
 /** FNV-1a over what the voice page shows, so identical frames are not repainted. */
@@ -2133,9 +2304,15 @@ static void resident_main(void)
 
         if (now_ms - last_tick_ms >= 1000) {
             last_tick_ms = now_ms;
-            if (!s_voice_page && !s_activation_page && !s_error_page && s_dashboard_ready &&
-                s_persist.zoomed_module < 0) {
-                refresh_clock_partial(&config);
+            if (!s_voice_page && !s_activation_page && !s_error_page && s_dashboard_ready) {
+                if (s_persist.zoomed_module < 0) {
+                    refresh_clock_partial(&config);
+                } else {
+                    /* Zoomed into a single module: the overview tick above is
+                     * a no-op there, so the zoomed page needs its own update
+                     * path or it freezes until the user re-enters the module. */
+                    resident_zoom_tick();
+                }
             }
             resident_network_tick(&config);
             resident_time_tick(&config);
