@@ -83,6 +83,20 @@ npm run build
 npm start            # 后端同时托管 web/dist，访问 http://127.0.0.1:4000
 ```
 
+#### Docker + OpenResty（推荐）
+
+仓库提供了 `Dockerfile`、`docker-compose.yml` 和 OpenResty 反向代理示例：
+
+```bash
+cd website
+cp server/.env.docker.example server/.env.docker
+# 修改 PUBLIC_ORIGIN / CORS_ORIGIN / COOKIE_SECURE 等
+docker compose up -d --build
+```
+
+容器只绑定宿主机 `127.0.0.1:4000`，由 OpenResty 负责 HTTPS 和公网入口。
+完整步骤见 [Docker 部署与 OpenResty 公网访问](docs/DEPLOY-DOCKER.md)。
+
 ---
 
 ## 功能

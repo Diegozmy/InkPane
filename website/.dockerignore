@@ -1,0 +1,26 @@
+.git
+.gitignore
+node_modules
+**/node_modules
+
+# 构建产物由 Docker 内部生成
+web/dist
+server/dist
+
+# 运行时数据与本地配置不进入镜像
+data
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db
+.env
+.env.*
+!.env.example
+!.env.docker.example
+
+# 文档、日志、测试覆盖率
+docs
+coverage
+*.log
+npm-debug.log*
