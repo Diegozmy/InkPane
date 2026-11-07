@@ -269,11 +269,31 @@ RTC RAM：下一次热启动时调用 `inkpane_epd_mark_config_stale()` 重新�
 - 局部刷新前把矩形按 8 px 对齐后打包，只发送该区域；与厂商驱动一致，局刷发送前会
   硬件复位控制器（面板图像保留、不黑闪），但会清掉寄存器配置，所以下一次全刷必须先
   重新 `panel_init`（`show_region()` 把窗口按 RAM 镜像发送：`0x45` 写
-  `HEIGHT-1-y .. HEIGHT-y-height`）。全刷写 0x24 + 0x26 后 `0x22=0xF7`，且写 RAM 前
-  用 `set_full_window()` 恢复整屏窗口与光标。
+  `HEIGHT-1-y .. HEIGHT-y-height`）。全刷写 0x24 + 0x26 后 `0x22=0xF7`（快速档用
+  `0xD7`，见「全刷提速」），且写 RAM 前用 `set_full_window()` 恢复整屏窗口与光标。
 - 常驻模式的对话页不用矩形局刷，而是「损坏带」局刷：整宽的水平带（`frame_diff` 计算，
   见第 0 节「对话页的损坏带局刷」），每带一次 `show_region()`。
 - 非 warm（冷启动）时强制全刷：只有全刷才会把控制器 RAM 与 framebuffer 对齐。
+
+### 全刷提速（Fast 波形与 SPI 分块）
+
+整页刷新是用户能直接感知的等待，所以做了两件事：
+
+- **Fast 波形**：厂商参考驱动的 `EPD_Init_Fast()` / `Display_Fast_Base()` 会写
+  `0x1A=0x6A`（快速温度/电压档）并用 `0x22=0xD7` 波形，源码注释标注 **Fast(1.5s)**；
+  普通档用 `0x22=0xF7`，约 3–4 s。`inkpane_epd_show_full_fast()` 走前者，
+  `inkpane_epd_show_full()` 走后者。控制器把 `0x1A` 留在寄存器里，所以驱动在 profile
+  变化（或局刷后 stale）时自动重跑 `panel_init()`，两种波形可以安全交替。
+  Fast 的代价是像素沉降时间变短、残影更明显，因此**只用在用户正在等的交互切换**：
+  对话页进入、激活页、错误页、放大/返回总览；周期性的去残影整刷、网络刷新后的整刷、
+  冷启动与配网页仍走普通波形。
+- **SPI 分块**：framebuffer 在 PSRAM，一次全刷要发两遍（0x24 + 0x26），共 96 KB。
+  原实现每 4 KB 一个事务 → 24 次，每次都有固定的驱动/DMA 建立开销和 MOSI 间隙。
+  现在按 `EPD_SPI_CHUNK`（32 KB）分块 → 6 次；没有再往上加到 96 KB，是因为
+  `max_transfer_sz` 越大越需要内部 RAM 中转缓冲，而这块板子的内部 RAM 还要留给
+  Wi-Fi 与语音。`max_transfer_sz` 设为 `2 * EPD_SPI_CHUNK`。
+- 日志 `full refresh (fast|normal): X ms total (Y ms transfer, Z ms waveform)` 把
+  总线耗时与面板沉降分开，便于判断下一步该优化哪一侧。
 
 重新生成字库：
 
