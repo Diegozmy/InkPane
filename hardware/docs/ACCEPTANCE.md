@@ -40,6 +40,7 @@
 | 25 | 在对话页连续制造多次带区局刷 | 累计 40 次带区局刷后的下一次对话页更新强制全刷去残影（`s_voice_partial_updates >= RESIDENT_VOICE_FULL_EVERY`）；画面不残留灰底/叠影 |
 | 26 | 冷启动（拔掉 RTC 备用电池，使 OS 位为 1）后联网，语音已启用 | 串口依次出现 `sntp service started (3 servers)`、`sntp synced: <epoch>`、`rtc calibrated from sntp: ...`；时钟从「等待校时」恢复走时。旧的 `sntp sync timed out` 警告**最多出现一次**，且只会在首次等待与一次立即重试都失败后出现。（若看板 200 先校准了 RTC、且语音未启用，SNTP 可能不启动，属正常的省电路径） |
 | 27 | 让 UDP 123 出网被拦（只放行 TCP） | 应看到一次 `sntp sync timed out (will retry hourly in background)`，之后后台按小时重试；主循环每 60 s 在 RTC 未校准前补一次且不卡 UI；恢复出网后 RTC 应在数分钟内被校准（lwIP 的重试退避可能到 150 s 量级） |
+| 28 | 说一句会让助手回答很长的提问（如「详细说一下明天的安排」） | 回复整段连续排版、按屏宽自动换行，一句里不会出现莫名其妙的分行或空行；字数多到 32 px 放不下时整体降到 24 px，仍能完整显示（六行放满即止）；只有实在超长时末尾才出现 `…`，内容不会被画到页脚分隔线以下或压住页脚 |
 
 ## 需要记录的数据
 
