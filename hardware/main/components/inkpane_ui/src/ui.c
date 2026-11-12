@@ -1141,6 +1141,71 @@ void inkpane_ui_render_notice(uint8_t *framebuffer, const char *title, const cha
                       true);
 }
 
+void inkpane_ui_render_shutdown(uint8_t *framebuffer, int battery_percent, bool charging,
+                                const char *reason)
+{
+    if (framebuffer == NULL) {
+        return;
+    }
+    inkpane_canvas_t canvas;
+    inkpane_canvas_init(&canvas, framebuffer, INKPANE_SCREEN_WIDTH, INKPANE_SCREEN_HEIGHT, 0, 0);
+    inkpane_canvas_clear(&canvas, true);
+
+    const inkpane_font_t *large = inkpane_font_large();
+    const inkpane_font_t *medium = inkpane_font_medium();
+    const inkpane_font_t *small = inkpane_font_small();
+    if (large == NULL || medium == NULL || small == NULL) {
+        return;
+    }
+
+    inkpane_text_draw(&canvas, large, 40, 64, "正在关机", INKPANE_SCREEN_WIDTH - 80,
+                      INKPANE_ALIGN_CENTER, true);
+    inkpane_canvas_hline(&canvas, 40, 128, INKPANE_SCREEN_WIDTH - 80, true);
+
+    /* Battery gauge: a 140x64 outline with a terminal nub, filled from the
+     * left in proportion to the remaining charge. */
+    const int gauge_x = INKPANE_SCREEN_WIDTH / 2 - 76;
+    const int gauge_y = 158;
+    const int gauge_w = 140;
+    const int gauge_h = 64;
+    inkpane_canvas_frame(&canvas, gauge_x, gauge_y, gauge_w, gauge_h, true);
+    inkpane_canvas_fill(&canvas, gauge_x + gauge_w, gauge_y + gauge_h / 2 - 12, 8, 24, true);
+    if (battery_percent >= 0) {
+        int percent = battery_percent > 100 ? 100 : battery_percent;
+        const int inner_w = gauge_w - 12;
+        const int fill_w = inner_w * percent / 100;
+        if (fill_w > 0) {
+            inkpane_canvas_fill(&canvas, gauge_x + 6, gauge_y + 6, fill_w, gauge_h - 12, true);
+        }
+    }
+
+    char battery_line[64];
+    if (battery_percent >= 0) {
+        snprintf(battery_line, sizeof(battery_line), "剩余电量 %d%%", battery_percent);
+    } else {
+        snprintf(battery_line, sizeof(battery_line), "电量未知");
+    }
+    inkpane_text_draw(&canvas, medium, 40, 244, battery_line, INKPANE_SCREEN_WIDTH - 80,
+                      INKPANE_ALIGN_CENTER, true);
+
+    const char *hint = charging ? "已连接 USB 电源" : "请连接 USB 充电";
+    if (battery_percent >= 0 && !charging && battery_percent < 20) {
+        hint = "电量偏低，请连接 USB 充电";
+    }
+    inkpane_text_draw(&canvas, small, 40, 294, hint, INKPANE_SCREEN_WIDTH - 80,
+                      INKPANE_ALIGN_CENTER, true);
+
+    inkpane_text_draw(&canvas, medium, 40, 330,
+                      reason != NULL && reason[0] != '\0' ? reason : "长按 PWR 关机",
+                      INKPANE_SCREEN_WIDTH - 80, INKPANE_ALIGN_CENTER, true);
+    inkpane_text_draw(&canvas, small, 40, 386, "屏幕即将关闭，请稍候", INKPANE_SCREEN_WIDTH - 80,
+                      INKPANE_ALIGN_CENTER, true);
+
+    inkpane_text_draw(&canvas, small, 40, INKPANE_SCREEN_HEIGHT - small->line_height - 16,
+                      "InkPane 墨窗 · 设备端", INKPANE_SCREEN_WIDTH - 80, INKPANE_ALIGN_CENTER,
+                      true);
+}
+
 /* ------------------------------------------------------------------ */
 /* Voice assistant pages                                              */
 /* ------------------------------------------------------------------ */

@@ -50,9 +50,16 @@ extern "C" {
  * latency independent of the server's (slower) VAD timeout. */
 #define VOICE_END_OF_SPEECH_MS 800
 /* Continuous conversation: after a reply, reopen the microphone once the
- * speaker has drained and listen for a follow-up without another wake word. */
+ * speaker has drained and listen for a follow-up without another wake word.
+ * The delay starts when playback actually drains, not when the server sends
+ * `tts stop`: the local queue can still hold seconds of audio, and reopening
+ * the mic resets the decoder (cutting the reply off mid-sentence). */
 #define VOICE_FOLLOWUP_DELAY_MS 900
 #define VOICE_FOLLOWUP_TIMEOUT_MS 7000
+/* Safety net: if the output queue never reports drained, do not leave the
+ * microphone disabled forever. Local buffering is capped at ~1.2 s, so this is
+ * far beyond any normal reply tail. */
+#define VOICE_DRAIN_TIMEOUT_MS 6000
 /* The control loop wakes this often so queued microphone audio is never far
  * behind, even when the command queue is busy. */
 #define VOICE_LOOP_TICK_MS 20
@@ -110,9 +117,18 @@ static std::atomic<int64_t> s_vad_silence_ms{0};
 /* First reply packet of a turn; guards a single SPEAKING transition even when
  * the server's tts start message is missing. */
 static std::atomic<bool> s_reply_audio_seen{false};
+/* The server finished sending the reply, but the local speaker may still hold
+ * buffered audio. The turn stays in SPEAKING until it drains (or the safety
+ * timeout below fires) so the page never shows 待命 just before the follow-up
+ * window reopens the microphone. */
+static std::atomic<bool> s_reply_drain_pending{false};
 /* Continuous conversation bookkeeping. */
 static std::atomic<int64_t> s_followup_at_ms{0};
 static std::atomic<bool> s_followup_active{false};
+/* Wake word to re-arm after the speaker drains (used when a turn ends while
+ * reply audio is still queued). */
+static std::atomic<bool> s_wake_pending{false};
+static std::atomic<int64_t> s_drain_since_ms{0};
 
 /* Borrowed config strings copied so the caller may reuse its struct. */
 static bool s_enabled;
@@ -651,11 +667,24 @@ static void close_audio_channel(bool reenable_wake_word)
     s_vad_heard_speech.store(false);
     s_vad_silence_ms.store(0);
     s_vad_speaking.store(false);
+    s_reply_drain_pending.store(false);
     s_followup_at_ms.store(0);
     s_followup_active.store(false);
+    s_wake_pending.store(false);
+    s_drain_since_ms.store(0);
     if (s_audio != nullptr) {
         s_audio->EnableVoiceProcessing(false);
-        s_audio->EnableWakeWordDetection(reenable_wake_word && !s_muted);
+        const bool arm_wake_word = reenable_wake_word && !s_muted;
+        if (arm_wake_word && !s_audio->IsPlaybackIdle()) {
+            /* The reply may still be draining (e.g. ChannelClosed right after
+             * tts stop). Keep the microphone quiet so the speaker tail cannot
+             * self-trigger, and arm the wake word from control_tick. */
+            s_audio->EnableWakeWordDetection(false);
+            s_drain_since_ms.store(now_ms());
+            s_wake_pending.store(true);
+        } else {
+            s_audio->EnableWakeWordDetection(arm_wake_word);
+        }
     }
     snapshot_set_ws(false);
 }
@@ -670,6 +699,9 @@ static void start_listening(ListeningMode mode)
              * not fill with audio for a channel that never opened. */
             s_audio->EnableVoiceProcessing(false);
             snapshot_set_state(INKPANE_VOICE_READY);
+            /* A failed follow-up open must not leave the device deaf: the wake
+             * word was turned off while the previous turn played. */
+            s_audio->EnableWakeWordDetection(!s_muted);
             return;
         }
     }
@@ -678,6 +710,9 @@ static void start_listening(ListeningMode mode)
     s_vad_heard_speech.store(false);
     s_vad_silence_ms.store(0);
     s_reply_audio_seen.store(false);
+    s_reply_drain_pending.store(false);
+    s_wake_pending.store(false);
+    s_drain_since_ms.store(0);
     s_audio->EnableWakeWordDetection(false);
     s_audio->EnableVoiceProcessing(true);
     s_protocol->SendStartListening(mode);
@@ -700,8 +735,11 @@ static void start_conversation(bool manual)
         return;
     }
     snapshot_reset_text();
+    s_reply_drain_pending.store(false);
     s_followup_at_ms.store(0);
     s_followup_active.store(false);
+    s_wake_pending.store(false);
+    s_drain_since_ms.store(0);
     /* Capture the microphone from the wake instant: if the channel still has to
      * connect, those frames wait in the send queue and are flushed afterwards. */
     s_audio->EnableVoiceProcessing(true);
@@ -717,6 +755,10 @@ static void handle_tts_start()
     snapshot_set_state(INKPANE_VOICE_SPEAKING);
     s_vad_heard_speech.store(false);
     s_vad_silence_ms.store(0);
+    s_reply_drain_pending.store(false);
+    s_followup_at_ms.store(0);
+    s_wake_pending.store(false);
+    s_drain_since_ms.store(0);
     s_audio->EnableVoiceProcessing(false);
 #if CONFIG_INKPANE_VOICE_WAKE_DURING_PLAYBACK
     s_audio->EnableWakeWordDetection(!s_muted);
@@ -726,22 +768,52 @@ static void handle_tts_start()
     s_last_activity_ms = now_ms();
 }
 
+/* The reply has fully played (or the server finished sending with no audio).
+ * Either reopen the microphone for a follow-up question or hand control back to
+ * the wake word. */
+static void conclude_reply()
+{
+    s_reply_drain_pending.store(false);
+    s_drain_since_ms.store(0);
+    if (s_enabled && !s_muted && s_audio != nullptr) {
+        /* Continuous conversation: keep SPEAKING through the short settle
+         * delay, then control_tick reopens the microphone. Staying in SPEAKING
+         * makes the page go 正在回答 -> 聆听中; flipping to READY first would
+         * flash 待命 right before the follow-up window starts listening, which
+         * looks like the device listens on its own after going idle. */
+        s_followup_at_ms.store(now_ms() + VOICE_FOLLOWUP_DELAY_MS);
+        return;
+    }
+    if (s_audio != nullptr) {
+        s_audio->EnableWakeWordDetection(!s_muted);
+    }
+    snapshot_set_state(INKPANE_VOICE_READY);
+}
+
 static void handle_tts_stop()
 {
     /* Keep the WebSocket open across turns: the next wake word then skips the
      * TLS handshake entirely. The server closes the channel when it goes idle,
      * which arrives as ChannelClosed and returns the assistant to READY. */
     s_audio->EnableVoiceProcessing(false);
-    s_audio->EnableWakeWordDetection(!s_muted);
+    /* Do not re-arm the wake word yet. `tts stop` only means the server has
+     * finished sending; the local playback queue can still hold seconds of
+     * audio, and listening to the speaker tail would self-trigger. The wake
+     * word (or the follow-up) is enabled once the output has drained. */
+    s_audio->EnableWakeWordDetection(false);
     s_vad_heard_speech.store(false);
     s_vad_silence_ms.store(0);
     s_reply_audio_seen.store(false);
-    snapshot_set_state(INKPANE_VOICE_READY);
+    s_followup_active.store(false);
+    s_followup_at_ms.store(0);
     s_last_activity_ms = now_ms();
-    if (s_enabled && !s_muted) {
-        /* Continuous conversation: reopen the microphone once the speaker has
-         * drained and wait for a follow-up question. */
-        s_followup_at_ms.store(now_ms() + VOICE_FOLLOWUP_DELAY_MS);
+    /* Stay in SPEAKING until the local speaker is actually quiet: the server's
+     * `tts stop` can arrive while seconds of audio are still queued. */
+    if (s_audio->IsPlaybackIdle()) {
+        conclude_reply();
+    } else {
+        s_reply_drain_pending.store(true);
+        s_drain_since_ms.store(now_ms());
     }
 }
 
@@ -789,8 +861,22 @@ static void handle_button_long()
     if (s_audio != nullptr) {
         if (s_muted) {
             s_audio->EnableWakeWordDetection(false);
+            /* Any pending reply drain / follow-up stays in place so
+             * control_tick can still take the turn back to READY; it just
+             * will not reopen the microphone while muted. */
+            if (snapshot_state() == INKPANE_VOICE_READY) {
+                s_wake_pending.store(false);
+                s_drain_since_ms.store(0);
+            }
         } else if (snapshot_state() == INKPANE_VOICE_READY) {
-            s_audio->EnableWakeWordDetection(true);
+            /* The reply may still be playing; let the drain path re-arm the
+             * wake word once the output is quiet. */
+            if (s_audio->IsPlaybackIdle()) {
+                s_audio->EnableWakeWordDetection(true);
+            } else {
+                s_drain_since_ms.store(now_ms());
+                s_wake_pending.store(true);
+            }
         }
     }
 }
@@ -839,12 +925,57 @@ static void control_tick()
 {
     int64_t current = now_ms();
     inkpane_voice_state_t state = snapshot_state();
+    /* The server finished sending the reply, but the speaker may still hold
+     * buffered audio. Only end the turn / reopen the microphone once the output
+     * has drained: EnableVoiceProcessing(true) resets the decoder, which would
+     * truncate the rest of the reply, and the speaker tail would look like a
+     * wake word or user speech. */
+    if (s_reply_drain_pending.load() && s_audio != nullptr) {
+        if (s_audio->IsPlaybackIdle()) {
+            conclude_reply();
+            return;
+        }
+        if (s_drain_since_ms.load() != 0 &&
+            current - s_drain_since_ms.load() >= VOICE_DRAIN_TIMEOUT_MS) {
+            ESP_LOGW(TAG, "playback drain timeout, ending the turn");
+            s_reply_drain_pending.store(false);
+            s_followup_at_ms.store(0);
+            s_drain_since_ms.store(0);
+            snapshot_set_state(INKPANE_VOICE_READY);
+            s_audio->EnableWakeWordDetection(!s_muted);
+            return;
+        }
+    }
+    /* A channel close can also arrive while reply audio is still queued; re-arm
+     * the wake word only once the speaker is quiet. */
+    if (s_wake_pending.load() && state == INKPANE_VOICE_READY && s_audio != nullptr &&
+        s_audio->IsPlaybackIdle()) {
+        s_wake_pending.store(false);
+        s_drain_since_ms.store(0);
+        s_audio->EnableWakeWordDetection(!s_muted);
+        return;
+    }
+    if (s_wake_pending.load() && state == INKPANE_VOICE_READY && s_drain_since_ms.load() != 0 &&
+        current - s_drain_since_ms.load() >= VOICE_DRAIN_TIMEOUT_MS) {
+        ESP_LOGW(TAG, "playback drain timeout, re-arming wake word");
+        s_wake_pending.store(false);
+        s_drain_since_ms.store(0);
+        s_audio->EnableWakeWordDetection(!s_muted);
+        return;
+    }
     /* Continuous conversation: reopen the microphone shortly after a reply,
      * then leave the conversation when nobody follows up. */
     const int64_t followup_at = s_followup_at_ms.load();
     if (followup_at != 0 && current >= followup_at) {
         s_followup_at_ms.store(0);
-        if (state == INKPANE_VOICE_READY) {
+        if (state == INKPANE_VOICE_READY || state == INKPANE_VOICE_SPEAKING) {
+            if (!s_enabled || s_muted) {
+                if (s_audio != nullptr) {
+                    s_audio->EnableWakeWordDetection(!s_muted);
+                }
+                snapshot_set_state(INKPANE_VOICE_READY);
+                return;
+            }
             ESP_LOGI(TAG, "continuous conversation: listening for a follow-up");
             s_followup_active.store(true);
             start_listening(kListeningModeAutoStop);

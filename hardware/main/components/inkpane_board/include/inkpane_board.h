@@ -35,6 +35,12 @@ bool inkpane_board_vbus_present(void);
 /** EPD power rail (AXP2101 ALDO3). */
 void inkpane_board_epd_power(bool on);
 
+/**
+ * True when the PWR side key (AXP2101 PWRON) has been held long enough to
+ * trigger the long-press IRQ. The flag is acknowledged on read.
+ */
+bool inkpane_board_power_key_long_pressed(void);
+
 /** Cut power via AXP2101 (does not return). */
 void inkpane_board_power_off(void);
 

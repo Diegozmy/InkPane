@@ -61,6 +61,7 @@
 | 操作 | 行为 |
 | --- | --- |
 | 说唤醒词 | 开始一轮对话（自动聆听，服务端判断说话结束） |
+| 回答结束（连续对话） | 回复排空前一直显示「正在回答」；喇叭真正播完后自动开麦等追问，状态直接切「聆听中」；7 秒无人说话回待命。播放/排空期间不监听唤醒词，避免回声自触发 |
 | BOOT 短按（待命） | 按住说话（手动模式，再按停止） |
 | BOOT 短按（聆听/回答） | 停止聆听 / 打断回答 |
 | BOOT 长按 3 秒 | 切换唤醒词静音（屏幕时钟状态显示「语音静音」） |
@@ -154,7 +155,9 @@ powershell -ExecutionPolicy Bypass -File hardware/tools/build.ps1 -Flash -Port C
 | 「语音模型未加载」 | 重新全量 `-Flash`，确认 `model` 分区写入成功 |
 | 唤醒词没反应 | 控制台确认语音已启用、未静音；**唤醒词必须是拼音**（`da fen qi`，不是汉字）；日志里找 `N wake command(s) active` 与 `Custom wake word detected` |
 | 日志出现 `invalid command, please check format` | 唤醒词写成了汉字；MultiNet 只接受拼音音节 |
-| 按侧键没反应且没有日志 | 侧键长按超过 1.5 秒会被忽略（无动作）；短按才会切视图 |
+| 按滚轮侧键没反应且没有日志 | 滚轮键长按超过 1.5 秒会被忽略（无动作）；短按才会切视图。PWR 电源键不同：长按约 2 秒进入关机页 |
+| 回答被截断 / 突然进入「聆听中」 | 旧逻辑在 `tts stop` 后 900 ms 就重开麦，`EnableVoiceProcessing(true)` 会 `ResetDecoder()` 清掉尚未播完的回复。现在等 `AudioService::IsPlaybackIdle()` 排空后才开麦；若仍出现，抓 `voice` 日志核对状态切换与 `continuous conversation: listening for a follow-up` 的时间点 |
+| 回答完先显示「待命」又变「聆听中」 | `tts stop` 只代表服务端发完，本地喇叭可能还有几秒缓冲。旧逻辑此时就切「待命」，等排空后又自动开麦追问，看起来像自己开始听。现在排空前保持「正在回答」，播完直接进「聆听中」，只有追问窗口结束才回「待命」 |
 | 回答没声音 | 检查喇叭接线、音量；看日志 ES8311/Opus 错误；确认未在 BOOT 打断 |
 | 回答时自己触发唤醒 | 关闭 `CONFIG_INKPANE_VOICE_WAKE_DURING_PLAYBACK`（默认已关） |
 | 「墨窗服务不可达」 | 语音控制调用的 `/api/device/*` 失败；检查局域网与控制台服务 |
@@ -182,5 +185,8 @@ powershell -ExecutionPolicy Bypass -File hardware/tools/build.ps1 -Flash -Port C
    `voice page partial refresh: N band(s), R rows, M ms`）；连续 40 次带区局刷后下一次
    强制全刷去残影；激活页/错误页/回看板全刷正常。
 8. 网络：拔网、改错 OTA、MQTT-only、令牌失效、限流 429 的错误提示。
-9. 电源：待命/对话/播放电流；低电 <15% 静音、<5% 关机；USB 供电不关机。
+9. 电源：待命/对话/播放电流；低电 <15% 静音、<5% 关机；USB 供电不关机；长按 PWR
+   先显示含电量的关机页再断电。
 10. 24 小时稳定性：无内存泄漏/看门狗复位；唤醒词仍可用；看板仍按时刷新。
+11. 连续对话：回答完整播完后才进入「聆听中」；不追问 7 秒回待命，追问可直接继续；
+    长回答不会被中途截断。

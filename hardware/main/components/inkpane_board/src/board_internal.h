@@ -31,6 +31,7 @@ bool axp2101_battery_connected(void);
 int axp2101_battery_percent(void);
 int axp2101_battery_millivolt(void);
 bool axp2101_vbus_present(void);
+bool axp2101_power_key_long_pressed(void);
 void axp2101_power_off(void);
 void axp2101_set_epd_power(bool on);
 

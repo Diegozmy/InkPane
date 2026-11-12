@@ -161,6 +161,11 @@ void inkpane_board_epd_power(bool on)
     axp2101_set_epd_power(on);
 }
 
+bool inkpane_board_power_key_long_pressed(void)
+{
+    return axp2101_power_key_long_pressed();
+}
+
 void inkpane_board_power_off(void)
 {
     ESP_LOGW(TAG, "power off");

@@ -69,6 +69,14 @@ void inkpane_ui_render_setup(uint8_t *framebuffer, const char *ap_ssid, const ch
 void inkpane_ui_render_notice(uint8_t *framebuffer, const char *title, const char *line1,
                               const char *line2, const char *line3, const char *line4);
 
+/**
+ * Full-screen shutdown page. Draws a battery gauge plus the remaining charge
+ * percentage so the last thing on screen before power is cut is useful.
+ * `battery_percent` < 0 means "unknown"; `reason` may be NULL.
+ */
+void inkpane_ui_render_shutdown(uint8_t *framebuffer, int battery_percent, bool charging,
+                                const char *reason);
+
 /* Text helpers (exposed for host tests). */
 int inkpane_text_width(const inkpane_font_t *font, const char *text);
 int inkpane_text_draw(inkpane_canvas_t *canvas, const inkpane_font_t *font, int x, int y,

@@ -24,6 +24,17 @@ static const char *TAG = "axp2101";
 #define REG_LDO_VOL2 0x94
 #define REG_BAT_PERCENT 0xA4
 
+/* Power-key (PWRON) interrupt and timing registers. */
+#define REG_IRQ_OFF_ON_LEVEL_CTRL 0x27
+#define REG_IRQ_EN2 0x41
+#define REG_IRQ_STATUS2 0x49
+#define PKEY_LONG_PRESS_IRQ 0x04
+/* IRQLEVEL 2 s, OFFLEVEL 10 s: the long-press IRQ fires early enough to paint a
+ * shutdown page, while the PMU's own cutoff stays late enough to cover a hung
+ * firmware. */
+#define IRQ_LEVEL_2S (2 << 4)
+#define OFF_LEVEL_10S (3 << 2)
+
 static esp_err_t update_bits(uint8_t reg, uint8_t mask, uint8_t value)
 {
     uint8_t current = 0;
@@ -72,6 +83,18 @@ esp_err_t axp2101_init(void)
     /* Battery detection + voltage measurement. */
     ESP_RETURN_ON_ERROR(update_bits(REG_BAT_DET_CTRL, 0x01, 0x01), TAG, "bat det");
     ESP_RETURN_ON_ERROR(update_bits(REG_ADC_CHANNEL_CTRL, 0x01, 0x01), TAG, "adc");
+
+    /* Let the application show a shutdown page before power is cut: raise the
+     * PWRON long-press IRQ at 2 s, but keep the PMU's automatic cutoff at 10 s
+     * as a fallback for a hung firmware. */
+    ESP_RETURN_ON_ERROR(update_bits(REG_IRQ_EN2, PKEY_LONG_PRESS_IRQ, PKEY_LONG_PRESS_IRQ),
+                        TAG, "pkey irq");
+    ESP_RETURN_ON_ERROR(update_bits(REG_IRQ_OFF_ON_LEVEL_CTRL,
+                                    IRQ_LEVEL_2S | OFF_LEVEL_10S,
+                                    IRQ_LEVEL_2S | OFF_LEVEL_10S),
+                        TAG, "pkey timing");
+    /* Status registers are RW1C: clear flags latched while the device booted. */
+    ESP_RETURN_ON_ERROR(i2c_write_u8(g_i2c_axp, REG_IRQ_STATUS2, 0xFF), TAG, "irq clear");
 
     vTaskDelay(pdMS_TO_TICKS(20));
     ESP_LOGI(TAG, "power rails ready");
@@ -137,6 +160,21 @@ bool axp2101_vbus_present(void)
         return false;
     }
     return (status2 & 0x08) == 0 && (status1 & 0x20) != 0;
+}
+
+bool axp2101_power_key_long_pressed(void)
+{
+    uint8_t status = 0;
+    if (i2c_read_u8(g_i2c_axp, REG_IRQ_STATUS2, &status) != ESP_OK) {
+        return false;
+    }
+    if ((status & PKEY_LONG_PRESS_IRQ) == 0) {
+        return false;
+    }
+    /* IRQ status bits are RW1C: acknowledge everything observed so the next
+     * call does not report the same press twice. */
+    i2c_write_u8(g_i2c_axp, REG_IRQ_STATUS2, status);
+    return true;
 }
 
 void axp2101_power_off(void)

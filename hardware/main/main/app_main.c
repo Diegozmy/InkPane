@@ -1407,6 +1407,7 @@ void app_main(void)
 
 #define RESIDENT_TICK_MS 20
 #define RESIDENT_BATTERY_CHECK_MS (60 * 1000)
+#define RESIDENT_POWER_KEY_POLL_MS 200
 #define RESIDENT_WIFI_RETRY_MS (30 * 1000)
 /* Resident mode retries the SNTP calibration at this interval while the RTC is
  * still unset. The first attempt happens right after Wi-Fi comes up, so this
@@ -1480,6 +1481,7 @@ static int64_t s_voice_linger_until_ms;
 static int64_t s_last_voice_render_ms;
 static int64_t s_last_wifi_attempt_ms = -RESIDENT_WIFI_RETRY_MS;
 static int64_t s_last_battery_check_ms;
+static int64_t s_last_power_key_check_ms;
 static int64_t s_last_time_sync_ms = -RESIDENT_TIME_SYNC_RETRY_MS;
 static bool s_last_network_up;
 static char s_wake_words[INKPANE_VOICE_MAX_WAKE_WORDS][INKPANE_VOICE_WAKE_WORD_LEN];
@@ -1791,6 +1793,53 @@ static void resident_render_notice(const char *title, const char *line1, const c
     if (full_refresh() != ESP_OK) {
         s_persist.panel_warm = false;
     }
+}
+
+static void resident_render_shutdown(const char *reason, int battery, bool charging)
+{
+    if (s_framebuffer == NULL) {
+        return;
+    }
+    inkpane_ui_render_shutdown(s_framebuffer, battery, charging, reason);
+    if (full_refresh() != ESP_OK) {
+        s_persist.panel_warm = false;
+    }
+}
+
+/**
+ * Final page before cutting power. It must be the last thing the panel shows,
+ * so draw with the normal waveform (no ghosting) and then give the user a
+ * moment to read the battery level before the PMU turns off.
+ */
+static void resident_power_off_with_page(const char *reason)
+{
+    const int battery = inkpane_board_battery_percent();
+    const bool charging = inkpane_board_vbus_present();
+    ESP_LOGW(TAG, "power off (%s): battery=%d charging=%d", reason != NULL ? reason : "requested",
+             battery, (int)charging);
+    /* Stop the wake-word engine so no audio leaks out while the panel draws. */
+    inkpane_voice_set_muted(true);
+    resident_render_shutdown(reason, battery, charging);
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    inkpane_board_power_off();
+}
+
+/**
+ * PWR side key: the AXP2101 raises its long-press IRQ before the PMU's own
+ * cutoff, so the firmware still gets to paint a shutdown page. Polling is
+ * enough because the IRQ status latches until it is acknowledged.
+ */
+static void resident_power_key_tick(void)
+{
+    const int64_t now_ms = esp_timer_get_time() / 1000;
+    if (now_ms - s_last_power_key_check_ms < RESIDENT_POWER_KEY_POLL_MS) {
+        return;
+    }
+    s_last_power_key_check_ms = now_ms;
+    if (!inkpane_board_power_key_long_pressed()) {
+        return;
+    }
+    resident_power_off_with_page("长按 PWR 关机");
 }
 
 static void resident_render_dashboard(void)
@@ -2220,10 +2269,10 @@ static void resident_battery_check(void)
         inkpane_voice_set_muted(true);
     }
     if (battery < 5 && !inkpane_board_vbus_present()) {
+        char reason[64];
+        snprintf(reason, sizeof(reason), "电量过低（%d%%），自动关机", battery);
         ESP_LOGW(TAG, "battery critical (%d%%), powering off", battery);
-        resident_render_notice("电量过低", "设备即将关机以保护电池", "请连接 USB 充电", NULL);
-        vTaskDelay(pdMS_TO_TICKS(3000));
-        inkpane_board_power_off();
+        resident_power_off_with_page(reason);
     }
 }
 
@@ -2238,6 +2287,7 @@ static void resident_main(void)
     s_persist.zoomed_module = -1;
     inkpane_snapshot_invalidate(&s_snapshot);
     s_last_battery_check_ms = esp_timer_get_time() / 1000;
+    s_last_power_key_check_ms = s_last_battery_check_ms;
 
     ESP_LOGI(TAG, "resident boot: reason=%d", (int)esp_reset_reason());
     if (inkpane_board_init() != ESP_OK) {
@@ -2333,6 +2383,7 @@ static void resident_main(void)
         int64_t now_ms = esp_timer_get_time() / 1000;
         ++s_main_loop_ticks;
         s_main_loop_last_ms = now_ms;
+        resident_power_key_tick();
         resident_poll_buttons(&config);
 
         inkpane_voice_event_t event;
