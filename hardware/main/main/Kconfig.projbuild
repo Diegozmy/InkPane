@@ -91,6 +91,16 @@ menu "InkPane"
             关闭后设备只向小智注册只读工具（查询时间/日程/待办/设备状态），
             不会注册新增、完成、删除类 MCP 工具。
 
+    config INKPANE_VOICE_BARGE_IN
+        bool "回答时说话可以打断（软件回采 AEC）"
+        default y
+        depends on INKPANE_VOICE
+        help
+            播放回复时保持麦克风与 AFE 开启，并把送往喇叭的 PCM 作为虚拟回采
+            参考通道交给 AFE AEC；用户持续说话约 0.3 秒即中止回答并开始聆听。
+            本板没有硬件回采，外壳共振较大时仍可能被喇叭回声误触发；出现
+            自打断可关闭本项，改用 BOOT 键打断。
+
     config INKPANE_VOICE_WAKE_DURING_PLAYBACK
         bool "播放回复时仍监听唤醒词（实验）"
         default n

@@ -57,7 +57,8 @@ target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-error)
 
 # Capability macros normally provided by xiaozhi's Kconfig. InkPane always uses
 # the AFE for VAD/uplink, supports the server-side AEC timestamp protocol, has no
-# playback reference channel, and does not upload wake-word audio.
+# hardware playback reference channel (barge-in synthesises one in the codec),
+# and does not upload wake-word audio.
 target_compile_definitions(${COMPONENT_LIB} PRIVATE
     CONFIG_USE_AUDIO_PROCESSOR=1
     CONFIG_USE_SERVER_AEC=1

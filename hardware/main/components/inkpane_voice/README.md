@@ -33,8 +33,10 @@ MCP 工具在独立控制任务里执行，避免阻塞音频。
 
 ## 关键约束
 
-- 本板单麦、没有回采参考通道，硬件 AEC 不可用；默认播放 TTS 时关闭唤醒词检测，
-  用 BOOT 键打断（`CONFIG_INKPANE_VOICE_WAKE_DURING_PLAYBACK=y` 可改，但可能自触发）。
+- 本板单麦、没有硬件回采参考通道。`CONFIG_INKPANE_VOICE_BARGE_IN=y`（默认）时，
+  `Es8311AudioCodec` 把送往喇叭的 PCM 作为虚拟参考通道（输入第二声道）交给 AFE AEC；
+  播放中检测到持续说话就中止回答。外壳共振仍可能自触发，可关闭该项改用 BOOT 键打断。
+  `CONFIG_INKPANE_VOICE_WAKE_DURING_PLAYBACK` 是另一条实验路径，默认关闭。
 - 自定义唤醒词由 MultiNet 运行时命令词实现，只支持模型可解码的中文短语；
   改词通过 `AudioService::ReloadWakeWords()` 在待命态应用，无需重启。
 - 语音服务不可达、模型缺失、令牌失效都只影响语音，看板继续工作。

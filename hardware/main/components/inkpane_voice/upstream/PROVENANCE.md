@@ -30,7 +30,9 @@ routes that InkPane owns. The audio DSP / Opus / AFE logic itself is unchanged.
 1. `audio_codec.*`: dropped `board.h`; volume uses the local `Settings` shim.
 2. `audio_service.*`: dropped `board.h`/Ogg demuxer/`PlaySound` (InkPane has no
    OGG sound assets); decoder resampling uses the stored `codec_`; added
-   `ReloadWakeWords()` for runtime custom wake words.
+   `ReloadWakeWords()` for runtime custom wake words; `EnableVoiceProcessing()`
+   takes `reset_decoder=false` so barge-in can start the microphone without
+   dropping the reply that is still queued.
 3. `afe_audio_engine.*`: added `ReloadWakeWords()`; the rest of the AFE
    pipeline (FD low-cost, server AEC, VAD, PSRAM allocation policy) is untouched.
 4. `custom_wake_word.*`: removed the `Assets`/`index.json` and Kconfig command
@@ -42,6 +44,10 @@ routes that InkPane owns. The audio DSP / Opus / AFE logic itself is unchanged.
    `SystemInfo`/`Lang`/`Application::Schedule` glue with `port/web_socket.h` and
    `port/voice_identity.h`; added `SetConfig(url, token, version)`; hello still
    advertises `mcp` and, with `CONFIG_USE_SERVER_AEC`, `aec`.
+7. `es8311_audio_codec.*`: optional virtual playback reference for barge-in.
+   The board has one microphone, so the codec keeps a ring of the PCM written to
+   the speaker and returns interleaved `[mic, reference]` frames; the AFE then
+   runs its normal FD AEC. Enabled by `CONFIG_INKPANE_VOICE_BARGE_IN`.
 
 ## Capability macros
 
@@ -51,7 +57,7 @@ that the copied code expects:
 ```
 CONFIG_USE_AUDIO_PROCESSOR=1   # AFE uplink + VAD
 CONFIG_USE_SERVER_AEC=1        # advertise server-side AEC timestamps
-CONFIG_USE_DEVICE_AEC=0        # this board has no playback reference channel
+CONFIG_USE_DEVICE_AEC=0        # no hardware reference; barge-in synthesises one
 CONFIG_SEND_WAKE_WORD_DATA=0   # do not upload pre-roll audio
 ```
 

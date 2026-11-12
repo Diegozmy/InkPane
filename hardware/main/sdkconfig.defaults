@@ -90,3 +90,7 @@ CONFIG_INKPANE_VOICE_WAKE_WORDS="da fen qi"
 CONFIG_INKPANE_VOICE_WAKE_THRESHOLD=65
 CONFIG_INKPANE_VOICE_VOLUME=60
 CONFIG_INKPANE_VOICE_ALLOW_CONTROL=y
+# Barge-in: the codec feeds a virtual playback reference channel to the AFE AEC
+# so speech during a reply can stop it without the speaker self-triggering.
+CONFIG_INKPANE_VOICE_BARGE_IN=y
+# CONFIG_INKPANE_VOICE_WAKE_DURING_PLAYBACK is not set

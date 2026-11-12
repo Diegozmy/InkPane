@@ -56,6 +56,21 @@ extern "C" {
  * the mic resets the decoder (cutting the reply off mid-sentence). */
 #define VOICE_FOLLOWUP_DELAY_MS 900
 #define VOICE_FOLLOWUP_TIMEOUT_MS 7000
+/* Barge-in: speech has to persist for this long before the reply is stopped.
+ * The AFE sees the AEC output, so this is only meant to reject clicks and the
+ * speaker's first echo tail, not to wait for a whole sentence. */
+#if CONFIG_INKPANE_VOICE_BARGE_IN
+#define VOICE_BARGE_IN_HOLD_MS 300
+/* Ignore the first part of the reply: the AEC needs a few frames to converge,
+ * and the speaker's first echo tail is not the user talking. */
+#define VOICE_BARGE_IN_GRACE_MS 500
+#else
+#define VOICE_BARGE_IN_HOLD_MS 0
+#define VOICE_BARGE_IN_GRACE_MS 0
+#endif
+/* After a barge-in the server may still flush the rest of the aborted reply.
+ * Drop those packets until the new question has been recognised. */
+#define VOICE_DISCARD_REPLY_TIMEOUT_MS 10000
 /* Safety net: if the output queue never reports drained, do not leave the
  * microphone disabled forever. Local buffering is capped at ~1.2 s, so this is
  * far beyond any normal reply tail. */
@@ -129,6 +144,18 @@ static std::atomic<bool> s_followup_active{false};
  * reply audio is still queued). */
 static std::atomic<bool> s_wake_pending{false};
 static std::atomic<int64_t> s_drain_since_ms{0};
+/* Barge-in bookkeeping. `s_barge_in_since_ms` is armed by the AFE VAD while the
+ * assistant is speaking and fires once speech has been sustained long enough. */
+static std::atomic<int64_t> s_barge_in_since_ms{0};
+static std::atomic<int64_t> s_speaking_since_ms{0};
+/* Uplink is only valid between "listen start" and the end of the question;
+ * while speaking the microphone feeds the AEC/VAD but its encoded audio is
+ * discarded instead of being sent as stray packets. */
+static std::atomic<bool> s_uplink_enabled{false};
+/* Set after a barge-in: ignore the aborted reply's audio and control messages
+ * until the server recognises the new question. */
+static std::atomic<bool> s_discard_reply{false};
+static std::atomic<int64_t> s_discard_since_ms{0};
 
 /* Borrowed config strings copied so the caller may reuse its struct. */
 static bool s_enabled;
@@ -501,6 +528,10 @@ static void on_playback_drained() {}
 
 static void on_incoming_audio(std::unique_ptr<AudioStreamPacket> packet)
 {
+    if (s_discard_reply.load()) {
+        /* Tail of the reply that was interrupted by the user's speech. */
+        return;
+    }
     const inkpane_voice_state_t state = snapshot_state();
     if (state != INKPANE_VOICE_CONNECTING && state != INKPANE_VOICE_LISTENING &&
         state != INKPANE_VOICE_THINKING && state != INKPANE_VOICE_SPEAKING) {
@@ -531,6 +562,11 @@ static void on_incoming_json(const cJSON* root)
     const inkpane_voice_state_t current = snapshot_state();
     const bool in_turn = current == INKPANE_VOICE_CONNECTING || current == INKPANE_VOICE_LISTENING ||
                          current == INKPANE_VOICE_THINKING || current == INKPANE_VOICE_SPEAKING;
+    if (s_discard_reply.load() && (strcmp(value, "tts") == 0 || strcmp(value, "mcp") == 0 ||
+                                   strcmp(value, "alert") == 0)) {
+        ESP_LOGI(TAG, "ignoring %s from the interrupted reply", value);
+        return;
+    }
     if (strcmp(value, "stt") == 0) {
         if (!in_turn) {
             ESP_LOGI(TAG, "ignoring stray stt in state %d", (int)current);
@@ -538,6 +574,10 @@ static void on_incoming_json(const cJSON* root)
         }
         const cJSON* text = cJSON_GetObjectItem(root, "text");
         if (cJSON_IsString(text)) {
+            /* Clear the barge-in gate here, on the WebSocket task: the reply
+             * audio can arrive before the control task processes SttText. */
+            s_discard_reply.store(false);
+            s_discard_since_ms.store(0);
             post_command(VoiceCmd::SttText, text->valuestring);
         }
     } else if (strcmp(value, "tts") == 0) {
@@ -650,6 +690,13 @@ static void send_pending_audio()
          * flushes them once the server has been told to listen). */
         return;
     }
+    if (!s_uplink_enabled.load()) {
+        /* Barge-in keeps the microphone/AEC running while the reply plays, but
+         * nothing may reach the server until the new "listen start" is sent. */
+        while (s_audio->PopPacketFromSendQueue()) {
+        }
+        return;
+    }
     while (auto packet = s_audio->PopPacketFromSendQueue()) {
         if (!s_protocol->SendAudio(std::move(packet))) {
             while (s_audio->PopPacketFromSendQueue()) {
@@ -672,6 +719,11 @@ static void close_audio_channel(bool reenable_wake_word)
     s_followup_active.store(false);
     s_wake_pending.store(false);
     s_drain_since_ms.store(0);
+    s_barge_in_since_ms.store(0);
+    s_speaking_since_ms.store(0);
+    s_uplink_enabled.store(false);
+    s_discard_reply.store(false);
+    s_discard_since_ms.store(0);
     if (s_audio != nullptr) {
         s_audio->EnableVoiceProcessing(false);
         const bool arm_wake_word = reenable_wake_word && !s_muted;
@@ -713,8 +765,18 @@ static void start_listening(ListeningMode mode)
     s_reply_drain_pending.store(false);
     s_wake_pending.store(false);
     s_drain_since_ms.store(0);
+    s_barge_in_since_ms.store(0);
+    s_speaking_since_ms.store(0);
+    s_uplink_enabled.store(true);
     s_audio->EnableWakeWordDetection(false);
-    s_audio->EnableVoiceProcessing(true);
+    if (s_audio->IsAudioProcessorRunning()) {
+        /* Barge-in already has the microphone/AEC running; just flush the
+         * interrupted reply. Re-enabling voice processing would add a 120 ms
+         * warm-up gap and lose the start of the new question. */
+        s_audio->ResetDecoder();
+    } else {
+        s_audio->EnableVoiceProcessing(true);
+    }
     s_protocol->SendStartListening(mode);
     snapshot_set_state(INKPANE_VOICE_LISTENING);
     s_last_activity_ms = now_ms();
@@ -740,6 +802,9 @@ static void start_conversation(bool manual)
     s_followup_active.store(false);
     s_wake_pending.store(false);
     s_drain_since_ms.store(0);
+    s_barge_in_since_ms.store(0);
+    s_discard_reply.store(false);
+    s_discard_since_ms.store(0);
     /* Capture the microphone from the wake instant: if the channel still has to
      * connect, those frames wait in the send queue and are flushed afterwards. */
     s_audio->EnableVoiceProcessing(true);
@@ -759,7 +824,24 @@ static void handle_tts_start()
     s_followup_at_ms.store(0);
     s_wake_pending.store(false);
     s_drain_since_ms.store(0);
+    s_barge_in_since_ms.store(0);
+    s_speaking_since_ms.store(now_ms());
+    s_uplink_enabled.store(false);
+    /* The reply is about to play. Keep the microphone off unless barge-in is
+     * enabled; `reset_decoder=false` preserves the first queued reply packets
+     * that arrived before `tts start`. */
+#if CONFIG_INKPANE_VOICE_BARGE_IN
+    if (s_muted) {
+        s_audio->EnableVoiceProcessing(false);
+    } else if (!s_audio->IsAudioProcessorRunning()) {
+        /* If the microphone is already running from the listening phase, leave
+         * it alone: re-enabling adds a 120 ms warm-up gap right when the user
+         * might want to talk over the reply. */
+        s_audio->EnableVoiceProcessing(true, false);
+    }
+#else
     s_audio->EnableVoiceProcessing(false);
+#endif
 #if CONFIG_INKPANE_VOICE_WAKE_DURING_PLAYBACK
     s_audio->EnableWakeWordDetection(!s_muted);
 #else
@@ -806,6 +888,9 @@ static void handle_tts_stop()
     s_reply_audio_seen.store(false);
     s_followup_active.store(false);
     s_followup_at_ms.store(0);
+    s_barge_in_since_ms.store(0);
+    s_speaking_since_ms.store(0);
+    s_uplink_enabled.store(false);
     s_last_activity_ms = now_ms();
     /* Stay in SPEAKING until the local speaker is actually quiet: the server's
      * `tts stop` can arrive while seconds of audio are still queued. */
@@ -828,6 +913,7 @@ static void handle_button_short()
     case INKPANE_VOICE_LISTENING:
         if (s_listening_mode == kListeningModeManualStop) {
             s_protocol->SendStopListening();
+            s_uplink_enabled.store(false);
             s_audio->EnableVoiceProcessing(false);
             snapshot_set_state(INKPANE_VOICE_THINKING);
             s_last_activity_ms = now_ms();
@@ -921,10 +1007,71 @@ static void handle_mcp_payload()
     }
 }
 
+#if CONFIG_INKPANE_VOICE_BARGE_IN
+/**
+ * The user talked over the reply for VOICE_BARGE_IN_HOLD_MS. Abort it, drop the
+ * tail the server may still flush, and go straight back to listening without
+ * requiring the wake word again.
+ */
+static void handle_barge_in()
+{
+    if (snapshot_state() != INKPANE_VOICE_SPEAKING) {
+        s_barge_in_since_ms.store(0);
+        return;
+    }
+    ESP_LOGI(TAG, "barge-in: user speech during reply");
+    s_barge_in_since_ms.store(0);
+    s_reply_drain_pending.store(false);
+    s_followup_at_ms.store(0);
+    s_followup_active.store(false);
+    s_wake_pending.store(false);
+    s_drain_since_ms.store(0);
+    s_reply_audio_seen.store(false);
+    s_discard_reply.store(true);
+    s_discard_since_ms.store(now_ms());
+    /* The interrupted answer is no longer valid; clear it so the listening
+     * page does not keep showing the half-spoken reply. */
+    snapshot_reset_text();
+    if (s_protocol != nullptr) {
+        s_protocol->SendAbortSpeaking(kAbortReasonNone);
+    }
+    /* start_listening resets the decoder, which flushes the rest of the reply
+     * from the local queues, then sends "listen start" for the new question. */
+    start_listening(kListeningModeAutoStop);
+    s_last_activity_ms = now_ms();
+}
+#endif
+
 static void control_tick()
 {
     int64_t current = now_ms();
     inkpane_voice_state_t state = snapshot_state();
+#if CONFIG_INKPANE_VOICE_BARGE_IN
+    if (state == INKPANE_VOICE_SPEAKING) {
+        const int64_t speaking_since = s_speaking_since_ms.load();
+        const bool armed =
+            speaking_since != 0 && current - speaking_since >= VOICE_BARGE_IN_GRACE_MS;
+        if (armed && s_audio != nullptr && s_audio->IsVoiceDetected()) {
+            const int64_t barge_in_since = s_barge_in_since_ms.load();
+            if (barge_in_since == 0) {
+                s_barge_in_since_ms.store(current);
+            } else if (current - barge_in_since >= VOICE_BARGE_IN_HOLD_MS) {
+                handle_barge_in();
+                return;
+            }
+        } else {
+            s_barge_in_since_ms.store(0);
+        }
+    } else {
+        s_barge_in_since_ms.store(0);
+    }
+#endif
+    if (s_discard_reply.load() && s_discard_since_ms.load() != 0 &&
+        current - s_discard_since_ms.load() >= VOICE_DISCARD_REPLY_TIMEOUT_MS) {
+        ESP_LOGW(TAG, "no new question after barge-in, accepting replies again");
+        s_discard_reply.store(false);
+        s_discard_since_ms.store(0);
+    }
     /* The server finished sending the reply, but the speaker may still hold
      * buffered audio. Only end the turn / reopen the microphone once the output
      * has drained: EnableVoiceProcessing(true) resets the decoder, which would
@@ -1001,6 +1148,7 @@ static void control_tick()
         ESP_LOGI(TAG, "end of speech after %d ms of silence", (int)VOICE_END_OF_SPEECH_MS);
         s_vad_heard_speech.store(false);
         s_vad_silence_ms.store(0);
+        s_uplink_enabled.store(false);
         s_audio->EnableVoiceProcessing(false);
         if (s_protocol != nullptr) {
             s_protocol->SendStopListening();
@@ -1014,6 +1162,7 @@ static void control_tick()
         if (s_listening_mode == kListeningModeManualStop) {
             s_protocol->SendStopListening();
         }
+        s_uplink_enabled.store(false);
         s_audio->EnableVoiceProcessing(false);
         snapshot_set_state(INKPANE_VOICE_THINKING);
         s_last_activity_ms = current;
@@ -1239,6 +1388,11 @@ static bool init_audio()
     ESP_LOGI(TAG, "audio init: starting input/output tasks");
     s_audio->Initialize(s_codec);
     s_audio->Start();
+#if CONFIG_INKPANE_VOICE_BARGE_IN
+    /* The ES8311 codec synthesises the playback reference channel; tell the AFE
+     * to keep AEC enabled while voice processing (and wake word) is running. */
+    s_audio->EnableDeviceAec(true);
+#endif
     ESP_LOGI(TAG, "audio init: enabling wake word detection");
     s_audio->EnableWakeWordDetection(true);
     if (!s_audio->IsWakeWordRunning() || s_audio->GetWakeWords().empty()) {
@@ -1315,20 +1469,31 @@ static void control_task(void* argument)
                 handle_apply_config();
                 break;
             case VoiceCmd::TtsStart:
-                handle_tts_start();
+                if (!s_discard_reply.load()) {
+                    handle_tts_start();
+                }
                 break;
             case VoiceCmd::TtsStop:
-                handle_tts_stop();
+                if (!s_discard_reply.load()) {
+                    handle_tts_stop();
+                }
                 break;
             case VoiceCmd::SttText:
+                /* The new question was recognised: the interrupted reply is
+                 * over, so accept this turn's audio and control messages. */
+                s_discard_reply.store(false);
+                s_discard_since_ms.store(0);
+                s_uplink_enabled.store(false);
                 snapshot_set_user(command.text);
                 snapshot_set_state(INKPANE_VOICE_THINKING);
                 s_last_activity_ms = now_ms();
                 break;
             case VoiceCmd::ReplyText:
-                snapshot_append_reply(command.text);
-                snapshot_set_state(INKPANE_VOICE_SPEAKING);
-                s_last_activity_ms = now_ms();
+                if (!s_discard_reply.load()) {
+                    snapshot_append_reply(command.text);
+                    snapshot_set_state(INKPANE_VOICE_SPEAKING);
+                    s_last_activity_ms = now_ms();
+                }
                 break;
             case VoiceCmd::ChannelClosed:
                 close_audio_channel(true);

@@ -710,14 +710,18 @@ void AudioService::ReleaseWakeWordResources() {
 #endif
 }
 
-void AudioService::EnableVoiceProcessing(bool enable) {
+void AudioService::EnableVoiceProcessing(bool enable, bool reset_decoder) {
     ESP_LOGD(TAG, "%s voice processing", enable ? "Enabling" : "Disabling");
 
     if (enable) {
         if (!InitializeAudioEngine()) {
             return;
         }
-        ResetDecoder();
+        if (reset_decoder) {
+            /* Normal turns start clean; barge-in keeps the reply queued so it
+             * can finish the current output block without a click. */
+            ResetDecoder();
+        }
         audio_input_need_warmup_ = true;
         {
             std::lock_guard<std::mutex> lock(input_resampler_mutex_);

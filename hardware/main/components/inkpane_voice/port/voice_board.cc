@@ -9,6 +9,10 @@ extern "C" {
 
 #define TAG "voice_board"
 
+#ifndef CONFIG_INKPANE_VOICE_BARGE_IN
+#define CONFIG_INKPANE_VOICE_BARGE_IN 0
+#endif
+
 /* Waveshare ESP32-S3-ePaper-3.97 audio wiring (same as the xiaozhi board). */
 #define VOICE_I2S_MCLK GPIO_NUM_13
 #define VOICE_I2S_BCLK GPIO_NUM_14
@@ -34,6 +38,7 @@ AudioCodec *inkpane_voice_board_codec(void)
     s_codec = new Es8311AudioCodec(static_cast<void *>(bus), I2C_NUM_0, VOICE_SAMPLE_RATE,
                                    VOICE_SAMPLE_RATE, VOICE_I2S_MCLK, VOICE_I2S_BCLK, VOICE_I2S_WS,
                                    VOICE_I2S_DOUT, VOICE_I2S_DIN, VOICE_PA_PIN,
-                                   ES8311_CODEC_DEFAULT_ADDR, true, false);
+                                   ES8311_CODEC_DEFAULT_ADDR, true, false,
+                                   CONFIG_INKPANE_VOICE_BARGE_IN);
     return s_codec;
 }

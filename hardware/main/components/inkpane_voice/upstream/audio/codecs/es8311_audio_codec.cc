@@ -1,6 +1,9 @@
 #include "es8311_audio_codec.h"
 
+#include <algorithm>
+
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -8,10 +11,15 @@
 
 Es8311AudioCodec::Es8311AudioCodec(void* i2c_master_handle, i2c_port_t i2c_port, int input_sample_rate, int output_sample_rate,
     gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din,
-    gpio_num_t pa_pin, uint8_t es8311_addr, bool use_mclk, bool pa_inverted) {
+    gpio_num_t pa_pin, uint8_t es8311_addr, bool use_mclk, bool pa_inverted,
+    bool use_reference) {
     duplex_ = true; // 是否双工
-    input_reference_ = false; // 是否使用参考输入，实现回声消除
-    input_channels_ = 1; // 输入通道数
+    use_reference_ = use_reference;
+    input_reference_ = use_reference; // 是否使用参考输入，实现回声消除
+    input_channels_ = use_reference ? 2 : 1; // 输入通道数
+    if (use_reference_) {
+        reference_ring_.assign(kReferenceRingSamples, 0);
+    }
     input_sample_rate_ = input_sample_rate;
     output_sample_rate_ = output_sample_rate;
     pa_pin_ = pa_pin;
@@ -202,16 +210,87 @@ void Es8311AudioCodec::EnableOutput(bool enable) {
     UpdateDeviceState();
 }
 
+void Es8311AudioCodec::StoreReference(const int16_t* data, int samples) {
+    if (!use_reference_ || data == nullptr || samples <= 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(reference_mutex_);
+    if (reference_reset_pending_) {
+        std::fill(reference_ring_.begin(), reference_ring_.end(), 0);
+        reference_written_ = 0;
+        reference_consumed_ = 0;
+        reference_valid_ = false;
+        reference_reset_pending_ = false;
+    }
+    for (int i = 0; i < samples; ++i) {
+        reference_ring_[reference_written_ % kReferenceRingSamples] = data[i];
+        ++reference_written_;
+    }
+    last_output_us_ = esp_timer_get_time();
+}
+
 int Es8311AudioCodec::Read(int16_t* dest, int samples) {
-    if (input_enabled_) {
+    if (!input_enabled_) {
+        return 0;
+    }
+    if (!use_reference_) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_read(dev_, (void*)dest, samples * sizeof(int16_t)));
+        return samples;
+    }
+
+    /* `samples` is interleaved [mic, reference]; read only the microphone half
+     * from the codec, then rebuild the reference channel from the playback ring. */
+    const int frames = samples / 2;
+    std::vector<int16_t> mic(frames);
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_read(dev_, (void*)mic.data(),
+                                                     frames * sizeof(int16_t)));
+
+    std::lock_guard<std::mutex> lock(reference_mutex_);
+    const int64_t now = esp_timer_get_time();
+    const bool playing = last_output_us_ != 0 && now - last_output_us_ < kReferenceIdleUs;
+    if (!playing) {
+        /* No playback for a while: stop feeding stale audio and let the next
+         * playback start from a clean ring. */
+        reference_reset_pending_ = true;
+        reference_valid_ = false;
+        reference_consumed_ = reference_written_;
+    } else if (!reference_valid_) {
+        reference_consumed_ = reference_written_ > kReferenceDelaySamples
+                                  ? reference_written_ - kReferenceDelaySamples
+                                  : reference_written_;
+        reference_valid_ = true;
+    }
+
+    for (int i = 0; i < frames; ++i) {
+        dest[i * 2] = mic[i];
+        int16_t reference = 0;
+        if (playing && reference_valid_ && reference_consumed_ < reference_written_) {
+            reference = reference_ring_[reference_consumed_ % kReferenceRingSamples];
+            ++reference_consumed_;
+        }
+        dest[i * 2 + 1] = reference;
     }
     return samples;
 }
 
 int Es8311AudioCodec::Write(const int16_t* data, int samples) {
-    if (output_enabled_) {
+    if (!output_enabled_) {
+        return samples;
+    }
+    if (!use_reference_) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_write(dev_, (void*)data, samples * sizeof(int16_t)));
+        return samples;
+    }
+    /* Write in DMA-frame chunks so the reference ring advances at roughly the
+     * rate the DAC consumes it instead of jumping a whole 60 ms Opus frame. */
+    constexpr int kChunkSamples = AUDIO_CODEC_DMA_FRAME_NUM;
+    int written = 0;
+    while (written < samples) {
+        const int chunk = std::min(kChunkSamples, samples - written);
+        StoreReference(data + written, chunk);
+        ESP_ERROR_CHECK_WITHOUT_ABORT(
+            esp_codec_dev_write(dev_, (void*)(data + written), chunk * sizeof(int16_t)));
+        written += chunk;
     }
     return samples;
 }

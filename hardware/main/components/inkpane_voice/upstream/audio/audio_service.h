@@ -122,7 +122,7 @@ public:
     std::unique_ptr<AudioStreamPacket> PopWakeWordPacket();
     const std::string& GetLastWakeWord() const;
     std::vector<std::string> GetWakeWords() const;
-    bool IsVoiceDetected() const { return voice_detected_; }
+    bool IsVoiceDetected() const { return voice_detected_.load(); }
     bool IsIdle();
     bool IsPlaybackIdle();
     bool IsWakeWordRunning() const {
@@ -135,7 +135,9 @@ public:
 
     void EnableWakeWordDetection(bool enable);
     void ReleaseWakeWordResources();
-    void EnableVoiceProcessing(bool enable);
+    /* `reset_decoder` is false for barge-in: the microphone has to start while
+     * the reply is still queued, and ResetDecoder would discard that audio. */
+    void EnableVoiceProcessing(bool enable, bool reset_decoder = true);
     void EnableAudioTesting(bool enable);
     void EnableDeviceAec(bool enable);
     /** Reapply the runtime configured MultiNet wake phrases. */
@@ -202,7 +204,7 @@ private:
     FixedQueue<uint32_t, MAX_TIMESTAMPS_IN_QUEUE> timestamp_queue_;
 
     bool audio_engine_initialized_ = false;
-    bool voice_detected_ = false;
+    std::atomic<bool> voice_detected_{false};
 #if CONFIG_USE_DEVICE_AEC
     bool device_aec_enabled_ = true;
 #else
