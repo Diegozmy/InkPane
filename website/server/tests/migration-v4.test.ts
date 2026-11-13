@@ -3,7 +3,7 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import { closeDatabase, openDatabase, setDatabaseForTesting } from '../src/db/client.js';
-import { runMigrations, schemaVersion } from '../src/db/migrations.js';
+import { runMigrations, LATEST_SCHEMA_VERSION, schemaVersion } from '../src/db/migrations.js';
 
 const OLD_TOKEN = '7f3a9c2e5b8d4a61c0f9e2d7b4a8c153';
 let db: ReturnType<typeof openDatabase>;
@@ -55,7 +55,7 @@ afterAll(() => {
 describe('v4 迁移', () => {
   it('把旧数据归到第一个管理员，并保留旧设备令牌', () => {
     runMigrations(db);
-    expect(schemaVersion(db)).toBe(4);
+    expect(schemaVersion(db)).toBe(LATEST_SCHEMA_VERSION);
 
     const owner = db.prepare('SELECT id, role, status FROM users').get() as {
       id: number;

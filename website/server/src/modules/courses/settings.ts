@@ -62,7 +62,7 @@ export const DEFAULT_PERIODS: PeriodTime[] = [
 ];
 
 export const DEFAULT_SETTINGS: CourseSyncSettings = {
-  baseUrl: 'http://ws8.yucai.sh.cn',
+  baseUrl: 'https://ws8.yucai.sh.cn',
   periods: DEFAULT_PERIODS,
   fridaySeparate: false,
   fridayPeriods: DEFAULT_PERIODS,

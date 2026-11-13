@@ -521,7 +521,7 @@ Base URL：`http://127.0.0.1:4000/api`（开发期前端通过 Vite 代理访问
 
 ## 课程同步
 
-对接学校课程管理系统（默认 `http://ws8.yucai.sh.cn`，可在设置里改）。
+对接学校课程管理系统（默认 `https://ws8.yucai.sh.cn`，可在设置里改）。
 服务端负责登录、抓取、解析，并把每个课表条目换算成一条每周重复的日程。
 
 ### 登录链路（逆向自官网前端，逐字节对齐）
@@ -602,7 +602,7 @@ SSRF 校验：只允许 `http` / `https`，禁止 URL 内嵌用户名密码，�
 
 ```json
 {
-  "baseUrl": "http://ws8.yucai.sh.cn",
+  "baseUrl": "https://ws8.yucai.sh.cn",
   "periods": [{ "index": 1, "start": "08:00", "end": "08:40" }],
   "fridaySeparate": false,
   "fridayPeriods": [{ "index": 1, "start": "09:30", "end": "10:10" }],

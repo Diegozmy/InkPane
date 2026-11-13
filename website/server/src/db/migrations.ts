@@ -463,6 +463,41 @@ const MIGRATIONS: readonly Migration[] = [
       }
     },
   },
+  {
+    version: 5,
+    name: 'course-sync-https-base-url',
+    up: (db) => {
+      // 校方站点已强制 HTTPS：http 登录会被网关 302 到 https，不跟随就会拿到空响应体。
+      // 把已保存的旧地址原地升级，避免每次同步都先走一遍明文跳转。
+      const legacy = 'http://ws8.yucai.sh.cn';
+      const upgraded = 'https://ws8.yucai.sh.cn';
+      const timestamp = new Date().toISOString();
+
+      db.prepare('UPDATE sync_credentials SET base_url = ? WHERE base_url = ?').run(upgraded, legacy);
+      db.prepare('UPDATE sync_credentials SET base_url = ? WHERE base_url = ?').run(
+        upgraded,
+        `${legacy}/`,
+      );
+
+      const rows = db
+        .prepare("SELECT user_id, value FROM app_settings WHERE key = 'course-sync'")
+        .all() as { user_id: number; value: string }[];
+      const update = db.prepare(
+        "UPDATE app_settings SET value = ?, updated_at = ? WHERE user_id = ? AND key = 'course-sync'",
+      );
+      for (const row of rows) {
+        try {
+          const parsed = JSON.parse(row.value) as { baseUrl?: unknown };
+          if (parsed.baseUrl === legacy || parsed.baseUrl === `${legacy}/`) {
+            parsed.baseUrl = upgraded;
+            update.run(JSON.stringify(parsed), timestamp, row.user_id);
+          }
+        } catch {
+          // 设置 JSON 损坏时保持原样，读取时会回落到默认值
+        }
+      }
+    },
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(

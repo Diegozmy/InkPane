@@ -14,7 +14,8 @@
 
 import { assertCourseUrlResolvable } from './url-guard.js';
 
-const DEFAULT_BASE_URL = 'http://ws8.yucai.sh.cn';
+// 校方站点已强制 HTTPS：用 http 登录会被网关 302 到 https，POST 不跟随就拿到空响应体。
+const DEFAULT_BASE_URL = 'https://ws8.yucai.sh.cn';
 const LOGIN_PATH = '/Login-checkLogin';
 const TIMETABLE_PATH = '/Xskebiao';
 const REQUEST_TIMEOUT_MS = 20_000;
@@ -250,6 +251,8 @@ export class SchoolPortalClient {
     const response = await this.request(LOGIN_PATH, {
       method: 'POST',
       json: true,
+      // 用户可能仍保存着旧的 http 地址，站点会 302 到 https；跟随重定向时保留 POST 与报文
+      follow: true,
       referer: `${this.baseUrl}/`,
       body: new URLSearchParams({ data: payload }).toString(),
     });
@@ -274,11 +277,12 @@ export class SchoolPortalClient {
     if (!this.loggedIn) throw new SchoolPortalError('auth', '尚未登录学校系统');
 
     // 先访问一次首页，让服务端完成会话初始化
-    await this.request('/index-index');
+    await this.request('/index-index', { follow: true });
 
     const response = await this.request(TIMETABLE_PATH, {
       method: 'POST',
       json: true,
+      follow: true,
       body: '',
     });
     const text = await response.text();

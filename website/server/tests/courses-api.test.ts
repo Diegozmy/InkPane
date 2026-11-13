@@ -102,7 +102,7 @@ describe('课程同步设置', () => {
     expect(response.body.data.periods.length).toBeGreaterThanOrEqual(8);
     expect(response.body.data.fridaySeparate).toBe(false);
     expect(response.body.data.autoSync).toBe(false);
-    expect(response.body.data.baseUrl).toBe('http://ws8.yucai.sh.cn');
+    expect(response.body.data.baseUrl).toBe('https://ws8.yucai.sh.cn');
   });
 
   it('可以修改节次时间、周五单独时间、学期区间与自动同步', async () => {

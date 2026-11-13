@@ -222,6 +222,49 @@ describe('登录与取课表', () => {
     expect(String(timetableRequest?.headers.cookie ?? '')).toContain('PHPSESSID=');
   });
 
+  it('登录 POST 遇到 302 时按原方法跟随（校方站点 http→https 跳转）', async () => {
+    const hits: { url: string; method: string; body: string }[] = [];
+    const redirectServer = createServer((request, response) => {
+      void readBody(request).then((body) => {
+        hits.push({ url: request.url ?? '/', method: request.method ?? 'GET', body });
+        if (request.url === '/') {
+          response.setHeader('Content-Type', 'text/html; charset=utf-8');
+          response.end(
+            "<script>var privateKey = 'abcdefgh12345678';var privateIv = 'ABCDEFGH12345678';</script>",
+          );
+          return;
+        }
+        if (request.url === '/Login-checkLogin') {
+          response.statusCode = 302;
+          response.setHeader('Location', '/Login-checkLogin-https');
+          response.end();
+          return;
+        }
+        if (request.url === '/Login-checkLogin-https') {
+          response.setHeader('Content-Type', 'application/json; charset=utf-8');
+          response.end(JSON.stringify({ status: 1, info: '', url: '' }));
+          return;
+        }
+        response.statusCode = 404;
+        response.end('not found');
+      });
+    });
+    await new Promise<void>((resolve) => redirectServer.listen(0, '127.0.0.1', resolve));
+    const address = redirectServer.address();
+    if (address === null || typeof address === 'string') throw new Error('无法获取测试服务端口');
+
+    try {
+      const client = new SchoolPortalClient({ baseUrl: `http://127.0.0.1:${address.port}` });
+      await client.login({ username: 'a', password: 'b' });
+      const final = hits.find((item) => item.url === '/Login-checkLogin-https');
+      // 不能把 POST 降级成 GET，否则站点会返回「非法请求」或空页面
+      expect(final?.method).toBe('POST');
+      expect(final?.body).toContain('data=');
+    } finally {
+      await new Promise<void>((resolve) => redirectServer.close(() => resolve()));
+    }
+  });
+
   it('密码错误时抛出 auth 错误并原样带出站点提示', async () => {
     const client = new SchoolPortalClient({ baseUrl });
     await expect(client.login({ username: VALID_USERNAME, password: 'wrong-password' })).rejects.toMatchObject({
