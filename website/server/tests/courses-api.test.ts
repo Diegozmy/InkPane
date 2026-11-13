@@ -10,6 +10,7 @@ import type { Express } from 'express';
 import { createApp } from '../src/app.js';
 import { closeDatabase, getDatabase, openDatabase, setDatabaseForTesting } from '../src/db/client.js';
 import { runMigrations } from '../src/db/migrations.js';
+import { addDaysToDateKey, toDateKey } from '../src/domain/time.js';
 import { setupTestAdmin } from './helpers/auth.js';
 
 const TERM_ID = '102';
@@ -33,11 +34,20 @@ const WEEKDAY_LABELS = ['星期日', '星期一', '星期二', '星期三', '星
 const COLUMN_ORDER = [7, 1, 2, 3, 4, 5, 6];
 
 /** 造一份与真实站点结构一致的课表 HTML。 */
-function makeTimetableHtml(slots: FixtureSlot[], options: { withDates?: boolean } = {}): string {
+function makeTimetableHtml(
+  slots: FixtureSlot[],
+  options: { withDates?: boolean; headerMonday?: string } = {},
+): string {
   const withDates = options.withDates ?? true;
+  const headerMonday = options.headerMonday;
   const header = COLUMN_ORDER.map((weekday) => {
-    const label = WEEKDAY_LABELS[weekday];
-    return `<td>${withDates ? `${label}(2026-10-12)` : label}</td>`;
+    const label = WEEKDAY_LABELS[weekday % 7];
+    if (!withDates) return `<td>${label}</td>`;
+    if (!headerMonday) return `<td>${label}(2026-10-12)</td>`;
+    // 真实站点从星期日开始列表头，星期日比当周周一早一天。
+    const offset = weekday === 7 ? -1 : weekday - 1;
+    const dateKey = addDaysToDateKey(headerMonday, offset);
+    return `<td>${label}(${dateKey})</td>`;
   }).join('');
 
   const periodNumbers = [...new Set(slots.map((slot) => slot.period))].sort((a, b) => a - b);
@@ -203,6 +213,38 @@ describe('课表预览', () => {
     const response = await agent.post('/api/courses/preview').send({ rawHtml: html });
     expect(response.body.data.termStartInferred).toBe(true);
     expect(response.body.data.warnings.join(' ')).toContain('第一周');
+  });
+
+  it('表头从星期日开始时，第一周周一取表头里星期一的日期', async () => {
+    const html = makeTimetableHtml(
+      [{ weekday: 1, period: 1, name: '周一语文' }],
+      { headerMonday: '2026-10-12' },
+    );
+    const preview = (await agent.post('/api/courses/preview').send({ rawHtml: html })).body.data;
+    // 星期日 2026-10-11 是最早日期，但它属于 10-12 那一周；不能把周一算成 10-05。
+    expect(preview.weekDates.find((item: { weekday: number }) => item.weekday === 7)?.dateKey).toBe(
+      '2026-10-11',
+    );
+    expect(preview.termStartDate).toBe('2026-10-12');
+  });
+
+  it('学期起始日不是周一时对齐到所在周的周一，避免每天的课程错位一天', async () => {
+    // 2026-09-01 是开学当天（周二）。如果直接当周一用，周五的课会落到周六、
+    // 周四的课会落到周五——设备上就会显示成「昨天的课」。
+    await setSettings({ termStartDate: '2026-09-01' });
+    const html = makeTimetableHtml([
+      { weekday: 1, period: 1, name: '周一语文' },
+      { weekday: 5, period: 1, name: '周五数学' },
+    ]);
+    const preview = (await agent.post('/api/courses/preview').send({ rawHtml: html })).body.data;
+
+    expect(preview.termStartDate).toBe('2026-08-31');
+    expect(preview.warnings.join(' ')).toContain('不是周一');
+
+    const friday = preview.slots.find((slot: { weekday: number }) => slot.weekday === 5);
+    expect(toDateKey(new Date(friday.firstStartAt), 'Asia/Shanghai')).toBe('2026-09-04');
+    const monday = preview.slots.find((slot: { weekday: number }) => slot.weekday === 1);
+    expect(toDateKey(new Date(monday.firstStartAt), 'Asia/Shanghai')).toBe('2026-08-31');
   });
 
   it('勾选周五单独时间后，周五使用独立时间表而其他天不变', async () => {

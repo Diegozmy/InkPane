@@ -152,19 +152,34 @@ export function buildPreview({
 }: BuildPreviewInput): CoursePreview {
   const warnings: string[] = [];
 
-  // 学期第一周周一：用户配置优先；否则用表头给出的当周周一
-  const headerMonday = timetable.weekDates
-    .map((item) => item.dateKey)
-    .filter((key) => DATE_KEY.test(key))
-    .sort()[0];
+  // 学期第一周周一：用户配置优先；否则用表头给出的当周周一。
+  // 注意 ws8 的表头列从星期日开始（星期日…星期六），直接取最早日期会把「当周周一」
+  // 错算到上一周，所以优先取表头里星期一那一列的日期。
+  const headerDates = timetable.weekDates.filter((item) => DATE_KEY.test(item.dateKey));
+  const headerMondayDate =
+    headerDates.find((item) => item.weekday === 1)?.dateKey ??
+    headerDates
+      .map((item) => item.dateKey)
+      .sort()[0];
   const explicitStart =
     settings.termStartDate && DATE_KEY.test(settings.termStartDate) ? settings.termStartDate : null;
-  const termStartMonday = explicitStart ?? (headerMonday ? mondayOf(headerMonday) : mondayOf(toDateKey(new Date(), timezone)));
+  // 学期起始日必须是周一：若用户填了开学当天（如 9 月 1 日恰逢周二），
+  // 直接用会把整个学期的每节课都错位一天（设备上就会显示「昨天的课」）。
+  const termStartMonday = explicitStart
+    ? mondayOf(explicitStart)
+    : headerMondayDate
+      ? mondayOf(headerMondayDate)
+      : mondayOf(toDateKey(new Date(), timezone));
   const termStartInferred = explicitStart === null;
 
+  if (explicitStart && explicitStart !== termStartMonday) {
+    warnings.push(
+      `学期起始日 ${explicitStart} 不是周一，已按所在周的周一 ${termStartMonday} 对齐；否则每天的课程会整体错位一天。`,
+    );
+  }
   if (termStartInferred) {
     warnings.push(
-      `学校系统只提供当周日期（${headerMonday ?? '未知'}），无法得知学程第一周。已暂按 ${termStartMonday} 作为第一周周一生成，请在下方按实际开学日期修正。`,
+      `学校系统只提供当周日期（${headerMondayDate ?? '未知'}），无法得知学程第一周。已暂按 ${termStartMonday} 作为第一周周一生成，请在下方按实际开学日期修正。`,
     );
   }
   if (settings.fridaySeparate) {
